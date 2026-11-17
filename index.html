@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>কৃষি বন্ধু (Krishi Bondhu) — সারা বাংলাদেশের দালালমুক্ত কৃষিপণ্য বাজার</title>
+  <link rel="icon" type="image/png" href="website/assets/logo.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=Noto+Sans+Bengali:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              primary: '#168447',
+              dark: '#105B34',
+              light: '#EAF7EF',
+              bg: '#F7FAF7',
+              text: '#202820'
+            }
+          },
+          fontFamily: {
+            sans: ['"Hind Siliguri"', '"Noto Sans Bengali"', 'system-ui', 'sans-serif']
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body {
+      font-family: 'Hind Siliguri', 'Noto Sans Bengali', system-ui, sans-serif;
+      background-color: #F7FAF7;
+      color: #202820;
+    }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Top Brand Header -->
+  <header class="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-emerald-100 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3">
+      <!-- Brand -->
+      <button onclick="window.kbApp.navigate('home')" class="flex items-center gap-2.5 text-left group focus:outline-none">
+        <img src="website/assets/logo.png" alt="কৃষি বন্ধু লোগো" class="w-10 h-10 rounded-xl object-cover border border-emerald-200 shadow-sm" />
+        <div>
+          <div class="flex items-center gap-1.5">
+            <span class="font-bold text-lg text-[#105B34] leading-none">কৃষি বন্ধু</span>
+            <span id="rtdb-status-dot" title="Firebase Realtime Sync" class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
+          </div>
+          <span class="text-[11px] text-emerald-700 font-medium hidden sm:block">০% দালাল • সারা বাংলাদেশ (৬৪ জেলা)</span>
+        </div>
+      </button>
+
+      <!-- Desktop Navigation -->
+      <nav id="desktop-nav" class="hidden md:flex items-center gap-1 text-sm font-medium">
+        <button data-nav="home" onclick="window.kbApp.navigate('home')" class="nav-btn px-3 py-2 rounded-lg hover:bg-[#EAF7EF]">হোম</button>
+        <button data-nav="browse" onclick="window.kbApp.navigate('browse')" class="nav-btn px-3 py-2 rounded-lg hover:bg-[#EAF7EF]">ফসল খুঁজুন</button>
+        <button data-nav="farmers" onclick="window.kbApp.navigate('farmers')" class="nav-btn px-3 py-2 rounded-lg hover:bg-[#EAF7EF]">কৃষক খুঁজুন</button>
+        <button data-nav="farmer-dashboard" id="nav-sell-btn" onclick="window.kbApp.goSell()" class="nav-btn px-3 py-2 rounded-lg hover:bg-[#EAF7EF]">বিক্রি করুন</button>
+        <button data-nav="orders" id="nav-orders-btn" onclick="window.kbApp.navigate('orders')" class="nav-btn px-3 py-2 rounded-lg hover:bg-[#EAF7EF]">অর্ডার</button>
+        <button data-nav="info" onclick="window.kbApp.navigate('info')" class="nav-btn px-3 py-2 rounded-lg hover:bg-[#EAF7EF]">তথ্য ও নীতি</button>
+        <button data-nav="admin" id="nav-admin-btn" onclick="window.kbApp.navigate('admin')" class="hidden nav-btn px-3 py-2 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100">অ্যাডমিন প্যানেল</button>
+      </nav>
+
+      <!-- Right Actions -->
+      <div class="flex items-center gap-2">
+        <button onclick="window.kbApp.toggleLanguage()" id="lang-btn" class="px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs font-semibold text-[#105B34] hover:bg-[#EAF7EF]">
+          EN
+        </button>
+
+        <button onclick="window.kbApp.navigate('notifications')" class="relative p-2 rounded-xl hover:bg-[#EAF7EF] text-[#105B34]" aria-label="নোটিফিকেশন">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+          </svg>
+          <span id="notif-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center">0</span>
+        </button>
+
+        <button onclick="window.kbApp.navigate('cart')" class="relative p-2 rounded-xl hover:bg-[#EAF7EF] text-[#105B34]" aria-label="কার্ট">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"/>
+          </svg>
+          <span id="cart-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-[#168447] text-white text-[10px] font-bold flex items-center justify-center">0</span>
+        </button>
+
+        <div id="auth-header-slot"></div>
+      </div>
+    </div>
+
+    <!-- Mobile Quick Bar -->
+    <div class="md:hidden border-t border-emerald-50 bg-white px-3 py-1.5 flex items-center gap-1 overflow-x-auto no-scrollbar text-xs font-medium">
+      <button onclick="window.kbApp.navigate('home')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">হোম</button>
+      <button onclick="window.kbApp.navigate('browse')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">ফসল খুঁজুন</button>
+      <button onclick="window.kbApp.navigate('farmers')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">কৃষক খুঁজুন</button>
+      <button onclick="window.kbApp.goSell()" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">বিক্রি করুন</button>
+      <button onclick="window.kbApp.navigate('orders')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">অর্ডার</button>
+      <button onclick="window.kbApp.navigate('info')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">তথ্য ও নীতি</button>
+      <button id="mobile-admin-btn" onclick="window.kbApp.navigate('admin')" class="hidden px-2.5 py-1.5 rounded-lg whitespace-nowrap bg-amber-50 text-amber-800 border border-amber-200">অ্যাডমিন</button>
+    </div>
+  </header>
+
+  <!-- Toast Banner -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-sm pointer-events-none"></div>
+
+  <!-- Main Content -->
+  <main id="app-root" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6"></main>
+
+  <!-- Modal Container -->
+  <div id="modal-root" class="hidden fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"></div>
+
+  <!-- Footer -->
+  <footer class="bg-[#105B34] text-emerald-50 mt-12">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 grid grid-cols-1 md:grid-cols-4 gap-8">
+      <div class="md:col-span-2 space-y-3">
+        <div class="flex items-center gap-3">
+          <img src="website/assets/logo.png" alt="কৃষি বন্ধু" class="w-11 h-11 rounded-xl bg-white p-0.5 object-cover" />
+          <div>
+            <h3 class="text-lg font-bold text-white">কৃষি বন্ধু (Krishi Bondhu)</h3>
+            <p class="text-xs text-emerald-200">কৃষকের ফসল, কৃষকের ন্যায্য দাম — সরাসরি ক্রেতার হাতে।</p>
+          </div>
+        </div>
+        <p class="text-sm text-emerald-100/90 leading-relaxed">
+          কুষ্টিয়া থেকে সূচনা হয়ে এখন সারা বাংলাদেশের ৮ বিভাগ ও ৬৪ জেলার জন্য ১০০% দালালমুক্ত, শূন্য-কমিশন সরাসরি কৃষিপণ্য বাজার। অ্যান্ড্রয়েড অ্যাপ ও ওয়েবসাইটে একসাথে রিয়েল-টাইম Firebase সিঙ্ক সুবিধা।
+        </p>
+      </div>
+      <div>
+        <h4 class="font-bold text-white mb-3">দ্রুত লিংক</h4>
+        <ul class="space-y-2 text-sm text-emerald-100">
+          <li><button onclick="window.kbApp.navigate('browse')" class="hover:underline">সকল ফসল দেখুন</button></li>
+          <li><button onclick="window.kbApp.navigate('farmers')" class="hover:underline">যাচাইকৃত কৃষক</button></li>
+          <li><button onclick="window.kbApp.navigate('auth-register-farmer')" class="hover:underline">কৃষক নিবন্ধন</button></li>
+          <li><button onclick="window.kbApp.navigate('auth-register-buyer')" class="hover:underline">ক্রেতা নিবন্ধন</button></li>
+        </ul>
+      </div>
+      <div>
+        <h4 class="font-bold text-white mb-3">তথ্য ও সহায়তা</h4>
+        <ul class="space-y-2 text-sm text-emerald-100">
+          <li><button onclick="window.kbApp.navigate('info', { tab: 'about' })" class="hover:underline">আমাদের সম্পর্কে</button></li>
+          <li><button onclick="window.kbApp.navigate('info', { tab: 'contact' })" class="hover:underline">যোগাযোগ</button></li>
+          <li><button onclick="window.kbApp.navigate('info', { tab: 'privacy' })" class="hover:underline">গোপনীয়তা নীতি</button></li>
+          <li><button onclick="window.kbApp.navigate('info', { tab: 'terms' })" class="hover:underline">শর্তাবলী</button></li>
+        </ul>
+      </div>
+    </div>
+    <div class="border-t border-emerald-800/70 py-4 text-center text-xs text-emerald-200">
+      © ২০২৬ কৃষি বন্ধু (Krishi Bondhu) • দালালমুক্ত সরাসরি কৃষক-ক্রেতা প্ল্যাটফর্ম • বাংলাদেশ
+    </div>
+  </footer>
+
+  <script type="module" src="website/app.js"></script>
+</body>
+</html>

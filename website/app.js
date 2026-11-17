@@ -18,6 +18,7 @@ import {
 
 const STORAGE_KEY = "krishi_bondhu_web_state_v2";
 const APP_LAUNCH_TIME = Date.now();
+const ASSET_BASE = new URL("./assets/", import.meta.url).href;
 
 const state = {
   lang: "bn",
@@ -317,7 +318,7 @@ function checkAndAlertIncomingNotifications() {
     showToast(`🔔 ${n.titleBn}: ${n.messageBn}`, n.type === "ORDER_NEW" ? "success" : "info");
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       try {
-        new Notification(n.titleBn, { body: n.messageBn, icon: "assets/logo.png" });
+        new Notification(n.titleBn, { body: n.messageBn, icon: `${ASSET_BASE}logo.png` });
       } catch (_) {}
     }
   }
@@ -1311,7 +1312,7 @@ function renderHomePage() {
             </div>
           </div>
           <div class="flex justify-center">
-            <img src="assets/showcase.png" alt="কৃষি বন্ধু প্ল্যাটফর্ম" class="rounded-2xl shadow-2xl border-2 border-white/25 max-h-72 object-cover w-full" />
+            <img src="${ASSET_BASE}showcase.png" alt="কৃষি বন্ধু প্ল্যাটফর্ম" class="rounded-2xl shadow-2xl border-2 border-white/25 max-h-72 object-cover w-full" />
           </div>
         </div>
 
@@ -1665,7 +1666,7 @@ function renderLoginPage() {
   return `
     <div class="max-w-md mx-auto bg-white rounded-3xl p-6 sm:p-8 border border-emerald-100 shadow-sm space-y-5">
       <div class="text-center space-y-1">
-        <img src="assets/logo.png" alt="কৃষি বন্ধু" class="w-16 h-16 mx-auto rounded-2xl border border-emerald-100 shadow-sm" />
+        <img src="${ASSET_BASE}logo.png" alt="কৃষি বন্ধু" class="w-16 h-16 mx-auto rounded-2xl border border-emerald-100 shadow-sm" />
         <h1 class="text-2xl font-bold text-[#105B34]">অ্যাকাউন্টে লগইন</h1>
         <p class="text-xs text-gray-600">আপনার মোবাইল নম্বর অথবা অ্যাডমিন আইডি দিয়ে প্রবেশ করুন</p>
       </div>
