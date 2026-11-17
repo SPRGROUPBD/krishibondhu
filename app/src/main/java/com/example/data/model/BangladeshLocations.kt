@@ -104,11 +104,11 @@ object BangladeshLocations {
     )
 
     fun districtsForDivision(divisionBn: String): List<DistrictInfo> =
-        allDistricts.filter { it.divisionBn == divisionBn }
+        allDistricts.filter { it.divisionBn.equalsBn(divisionBn) }
 
     fun upazilasForDistrict(districtBn: String): List<String> =
-        allDistricts.firstOrNull { it.districtBn == districtBn }?.upazilas ?: emptyList()
+        allDistricts.firstOrNull { it.districtBn.equalsBn(districtBn) }?.upazilas ?: emptyList()
 
     fun divisionForDistrict(districtBn: String): String =
-        allDistricts.firstOrNull { it.districtBn == districtBn }?.divisionBn ?: "ঢাকা"
+        allDistricts.firstOrNull { it.districtBn.equalsBn(districtBn) }?.divisionBn ?: "ঢাকা"
 }

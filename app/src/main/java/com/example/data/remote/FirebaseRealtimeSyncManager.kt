@@ -1,16 +1,23 @@
 package com.example.data.remote
 
+import android.content.Context
 import android.util.Log
 import com.example.data.local.*
+import com.example.data.model.AccountStatus
 import com.example.data.model.AdConfig
 import com.example.data.model.UserRole
+import com.example.data.model.normalizeBn
 import com.google.firebase.FirebaseApp
 import com.google.firebase.database.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -30,7 +37,8 @@ import java.util.concurrent.TimeUnit
  * or RTDB `.indexOn` server rules.
  */
 class FirebaseRealtimeSyncManager(
-    private val enableRemoteSync: Boolean = true
+    private val enableRemoteSync: Boolean = true,
+    private val appContext: Context? = null
 ) {
 
     companion object {
@@ -39,45 +47,64 @@ class FirebaseRealtimeSyncManager(
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     }
 
+    private data class RestGetOutcome(
+        val ok: Boolean,
+        val body: String? = null
+    )
+
     private var listenersAttached = false
     private val launchTimestamp = System.currentTimeMillis()
+    private val syncMutex = Mutex()
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(6, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
-            .writeTimeout(8, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .build()
     }
 
     private fun rootRefOrNull(): DatabaseReference? {
         if (!enableRemoteSync) return null
+        val ctx = appContext ?: return null
         return runCatching {
-            if (FirebaseApp.getApps(FirebaseApp.getInstance().applicationContext).isEmpty()) {
+            if (FirebaseApp.getApps(ctx).isEmpty()) {
                 null
             } else {
                 FirebaseDatabase.getInstance(RTDB_URL).reference
             }
-        }.getOrElse {
-            runCatching { FirebaseDatabase.getInstance(RTDB_URL).reference }.getOrNull()
-        }
+        }.getOrNull()
     }
 
     fun startRealtimeListeners(
         localDb: KrishiBondhuDatabase,
         scope: CoroutineScope,
         onAdConfigChanged: (AdConfig) -> Unit = {},
+        onSyncStateChanged: (isSyncing: Boolean, error: String?) -> Unit = { _, _ -> },
         onIncomingNotification: (NotificationEntity) -> Unit
     ) {
         if (!enableRemoteSync || listenersAttached) return
         listenersAttached = true
 
-        // Always launch REST immediate pull + periodic live mirror loop (online RTDB authoritative)
+        // Always launch REST immediate pull + fast initial retry + periodic live mirror loop
         scope.launch(Dispatchers.IO) {
-            pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+            onSyncStateChanged(true, null)
+            var ok = pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+            if (!ok) {
+                delay(1_800L)
+                ok = pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+            }
+            onSyncStateChanged(
+                false,
+                if (ok) null else "সার্ভারের সাথে সংযোগ করতে সমস্যা হয়েছে। ইন্টারনেট যাচাই করে পুনরায় চেষ্টা করুন।"
+            )
             while (isActive) {
-                delay(10_000L)
-                pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+                delay(12_000L)
+                val pollOk = pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+                if (pollOk) {
+                    onSyncStateChanged(false, null)
+                }
             }
         }
 
@@ -357,6 +384,21 @@ class FirebaseRealtimeSyncManager(
         }
     }
 
+    private suspend fun safeUpsertUser(localDb: KrishiBondhuDatabase, user: UserEntity) {
+        val dao = localDb.userDao()
+        runCatching { dao.upsertUser(user) }.onFailure {
+            runCatching {
+                val existingByPhone = dao.getUserByPhone(user.phone)
+                if (existingByPhone != null && existingByPhone.id != user.id && existingByPhone.id != "admin_super") {
+                    dao.deleteNonAdminUserById(existingByPhone.id)
+                }
+                dao.upsertUser(user)
+            }.onFailure { err ->
+                Log.w(TAG, "User upsert skipped (${user.id}): ${err.message}")
+            }
+        }
+    }
+
     private suspend fun upsertProductsEnsuringFarmers(
         localDb: KrishiBondhuDatabase,
         products: List<ProductEntity>
@@ -367,32 +409,179 @@ class FirebaseRealtimeSyncManager(
         if (missingFarmer) {
             pullUsersFromRestIntoDb(localDb)
         }
-        products.forEach { prod ->
-            runCatching { localDb.productDao().upsertProduct(prod) }
-                .onFailure { Log.w(TAG, "Product upsert skipped (${prod.id}): ${it.message}") }
+        val existingCatIds = runCatching {
+            // Seed master categories if empty first
+            if (localDb.categoryDao().countCategories() == 0) {
+                MasterCatalogSeeder.initialize(localDb)
+            }
+            emptySet<String>()
+        }.getOrDefault(emptySet())
+        products.forEach { rawProd ->
+            val prod = if (rawProd.categoryId.isBlank()) rawProd.copy(categoryId = "cat_other") else rawProd
+            runCatching { localDb.productDao().upsertProduct(prod) }.onFailure {
+                // Ensure both farmer & category FK targets exist so valid products are NEVER dropped
+                runCatching {
+                    if (localDb.userDao().getUserById(prod.farmerId) == null) {
+                        val stubFarmer = UserEntity(
+                            id = prod.farmerId,
+                            fullName = prod.farmerName.ifBlank { "কৃষক" },
+                            phone = "farmer_${prod.farmerId.takeLast(8)}",
+                            passwordHash = "",
+                            role = UserRole.FARMER.name,
+                            division = prod.division.ifBlank { "খুলনা" },
+                            district = prod.district.ifBlank { "কুষ্টিয়া" },
+                            upazila = prod.upazila,
+                            unionName = prod.unionName,
+                            village = prod.village,
+                            verificationStatus = if (prod.farmerVerified) "VERIFIED" else "PENDING",
+                            accountStatus = AccountStatus.ACTIVE.name
+                        )
+                        safeUpsertUser(localDb, stubFarmer)
+                    }
+                    runCatching { localDb.productDao().upsertProduct(prod) }.onFailure {
+                        // Fallback category if custom categoryId isn't seeded yet
+                        localDb.categoryDao().upsertCategory(
+                            CategoryEntity(
+                                id = prod.categoryId,
+                                nameBn = prod.categoryNameBn.ifBlank { "কৃষিপণ্য" },
+                                nameEn = prod.categoryNameBn.ifBlank { "Produce" },
+                                groupKey = "OTHER",
+                                emoji = "🌾",
+                                sortOrder = 99,
+                                isActive = true
+                            )
+                        )
+                        localDb.productDao().upsertProduct(prod)
+                    }
+                }.onFailure { err ->
+                    Log.w(TAG, "Product upsert failed (${prod.id}, cats=${existingCatIds.size}): ${err.message}")
+                }
+            }
         }
     }
 
     /**
-     * Pulls the entire shared RTDB tree over HTTPS REST (`/.json`) and strictly reconciles Room
-     * (including deletions when RTDB nodes are cleared or individual records are removed).
+     * Pulls the shared RTDB tree over HTTPS REST (`/.json`) with automatic fallback to
+     * parallel per-node REST GETs if the full tree times out (e.g. large user photos).
+     * Returns `true` if core data synced successfully from RTDB, `false` otherwise.
      */
     suspend fun pullAllFromRest(
         localDb: KrishiBondhuDatabase,
         onAdConfigChanged: (AdConfig) -> Unit = {},
         onIncomingNotification: (NotificationEntity) -> Unit = {}
-    ) {
-        if (!enableRemoteSync) return
-        val rawBody = restGetJson(".json") ?: return
-        val trimmed = rawBody.trim()
-        val rootObj = if (trimmed == "null") {
-            JSONObject()
-        } else {
-            runCatching { JSONObject(trimmed) }.getOrNull() ?: return
+    ): Boolean = syncMutex.withLock {
+        if (!enableRemoteSync) return@withLock false
+
+        var rootOutcome = restGetJsonWithStatus(".json")
+        if (!rootOutcome.ok) {
+            delay(600L)
+            rootOutcome = restGetJsonWithStatus(".json")
         }
 
+        if (rootOutcome.ok && rootOutcome.body != null) {
+            val trimmed = rootOutcome.body.trim()
+            val rootObj = if (trimmed == "null" || trimmed.isBlank()) {
+                JSONObject()
+            } else {
+                runCatching { JSONObject(trimmed) }.getOrNull()
+            }
+            if (rootObj != null) {
+                reconcileAllNodesFromJson(
+                    localDb = localDb,
+                    catsRes = RestGetOutcome(true, rootObj.optJSONObject("categories")?.toString() ?: "null"),
+                    locsRes = RestGetOutcome(true, rootObj.optJSONObject("locations")?.toString() ?: "null"),
+                    usersRes = RestGetOutcome(true, rootObj.optJSONObject("users")?.toString() ?: "null"),
+                    prodsRes = RestGetOutcome(true, rootObj.optJSONObject("products")?.toString() ?: "null"),
+                    ordersRes = RestGetOutcome(true, rootObj.optJSONObject("orders")?.toString() ?: "null"),
+                    notifsRes = RestGetOutcome(true, rootObj.optJSONObject("notifications")?.toString() ?: "null"),
+                    revRes = RestGetOutcome(true, rootObj.optJSONObject("reviews")?.toString() ?: "null"),
+                    cmpRes = RestGetOutcome(true, rootObj.optJSONObject("complaints")?.toString() ?: "null"),
+                    audRes = RestGetOutcome(true, rootObj.optJSONObject("auditLogs")?.toString() ?: "null"),
+                    adRes = RestGetOutcome(true, rootObj.optJSONObject("adConfig")?.toString() ?: "null"),
+                    payRes = RestGetOutcome(true, rootObj.optJSONObject("activationPayments")?.toString() ?: "null"),
+                    psRes = RestGetOutcome(true, rootObj.optJSONObject("paymentSettings")?.toString() ?: "null"),
+                    onAdConfigChanged = onAdConfigChanged,
+                    onIncomingNotification = onIncomingNotification
+                )
+                return@withLock true
+            }
+        }
+
+        // Parallel per-node fallback (handles huge base64 avatars or transient root timeouts safely)
+        return@withLock coroutineScope {
+            val catsD = async(Dispatchers.IO) { restGetJsonWithStatus("categories.json") }
+            val locsD = async(Dispatchers.IO) { restGetJsonWithStatus("locations.json") }
+            val usersD = async(Dispatchers.IO) { restGetJsonWithStatus("users.json") }
+            val prodsD = async(Dispatchers.IO) { restGetJsonWithStatus("products.json") }
+            val ordersD = async(Dispatchers.IO) { restGetJsonWithStatus("orders.json") }
+            val notifsD = async(Dispatchers.IO) { restGetJsonWithStatus("notifications.json") }
+            val revD = async(Dispatchers.IO) { restGetJsonWithStatus("reviews.json") }
+            val cmpD = async(Dispatchers.IO) { restGetJsonWithStatus("complaints.json") }
+            val audD = async(Dispatchers.IO) { restGetJsonWithStatus("auditLogs.json") }
+            val adD = async(Dispatchers.IO) { restGetJsonWithStatus("adConfig.json") }
+            val payD = async(Dispatchers.IO) { restGetJsonWithStatus("activationPayments.json") }
+            val psD = async(Dispatchers.IO) { restGetJsonWithStatus("paymentSettings.json") }
+
+            val catsRes = catsD.await()
+            val locsRes = locsD.await()
+            val usersRes = usersD.await()
+            val prodsRes = prodsD.await()
+            val ordersRes = ordersD.await()
+            val notifsRes = notifsD.await()
+            val revRes = revD.await()
+            val cmpRes = cmpD.await()
+            val audRes = audD.await()
+            val adRes = adD.await()
+            val payRes = payD.await()
+            val psRes = psD.await()
+
+            reconcileAllNodesFromJson(
+                localDb = localDb,
+                catsRes = catsRes,
+                locsRes = locsRes,
+                usersRes = usersRes,
+                prodsRes = prodsRes,
+                ordersRes = ordersRes,
+                notifsRes = notifsRes,
+                revRes = revRes,
+                cmpRes = cmpRes,
+                audRes = audRes,
+                adRes = adRes,
+                payRes = payRes,
+                psRes = psRes,
+                onAdConfigChanged = onAdConfigChanged,
+                onIncomingNotification = onIncomingNotification
+            )
+            prodsRes.ok || usersRes.ok
+        }
+    }
+
+    private fun parseJsonObjectOrNull(outcome: RestGetOutcome): JSONObject? {
+        if (!outcome.ok) return null
+        val t = outcome.body?.trim().orEmpty()
+        if (t.isBlank() || t == "null") return JSONObject()
+        return runCatching { JSONObject(t) }.getOrNull()
+    }
+
+    private suspend fun reconcileAllNodesFromJson(
+        localDb: KrishiBondhuDatabase,
+        catsRes: RestGetOutcome,
+        locsRes: RestGetOutcome,
+        usersRes: RestGetOutcome,
+        prodsRes: RestGetOutcome,
+        ordersRes: RestGetOutcome,
+        notifsRes: RestGetOutcome,
+        revRes: RestGetOutcome,
+        cmpRes: RestGetOutcome,
+        audRes: RestGetOutcome,
+        adRes: RestGetOutcome,
+        payRes: RestGetOutcome,
+        psRes: RestGetOutcome,
+        onAdConfigChanged: (AdConfig) -> Unit,
+        onIncomingNotification: (NotificationEntity) -> Unit
+    ) {
         // 1. Categories first (FK target of products)
-        rootObj.optJSONObject("categories")?.let { catsObj ->
+        parseJsonObjectOrNull(catsRes)?.takeIf { it.length() > 0 }?.let { catsObj ->
             val cats = parseJsonMap(catsObj) { id, obj -> jsonToCategory(id, obj) }
             if (cats.isNotEmpty()) {
                 runCatching { localDb.categoryDao().insertAll(cats) }
@@ -400,124 +589,129 @@ class FirebaseRealtimeSyncManager(
         }
 
         // 2. Locations
-        rootObj.optJSONObject("locations")?.let { locsObj ->
+        parseJsonObjectOrNull(locsRes)?.takeIf { it.length() > 0 }?.let { locsObj ->
             val locs = parseJsonMap(locsObj) { id, obj -> jsonToLocation(id, obj) }
             if (locs.isNotEmpty()) {
                 runCatching { localDb.locationDao().insertAll(locs) }
             }
         }
 
-        // 3. Users (FK parent of products - upsert before products, prune stale after child tables)
-        val remoteUsersObj = rootObj.optJSONObject("users")
-        val remoteUsers = if (remoteUsersObj != null) {
-            parseJsonMap(remoteUsersObj) { id, obj -> jsonToUser(id, obj) }
+        // 3. Users (FK parent of products - upsert before products, prune stale only when usersRes succeeded)
+        val usersJson = parseJsonObjectOrNull(usersRes)
+        val remoteUsers = if (usersJson != null && usersJson.length() > 0) {
+            parseJsonMap(usersJson) { id, obj -> jsonToUser(id, obj) }
         } else {
             emptyList()
         }
-        remoteUsers.forEach { u ->
-            runCatching { localDb.userDao().upsertUser(u) }
+        if (usersJson != null) {
+            remoteUsers.forEach { u -> safeUpsertUser(localDb, u) }
         }
 
-        // 4. Products (upsert after users & categories, prune deleted)
-        val remoteProdsObj = rootObj.optJSONObject("products")
-        val remoteProds = if (remoteProdsObj != null) {
-            parseJsonMap(remoteProdsObj) { id, obj -> jsonToProduct(id, obj) }
-        } else {
-            emptyList()
-        }
-        if (remoteProds.isEmpty()) {
-            runCatching {
-                localDb.productDao().clearAllProducts()
-                localDb.cartDao().clearCart()
+        // 4. Products (upsert ensuring farmer & category FKs exist; prune deleted ONLY if prodsRes succeeded)
+        val prodsJson = parseJsonObjectOrNull(prodsRes)
+        if (prodsJson != null) {
+            val remoteProds = if (prodsJson.length() > 0) {
+                parseJsonMap(prodsJson) { id, obj -> jsonToProduct(id, obj) }
+            } else {
+                emptyList()
             }
-        } else {
-            remoteProds.forEach { p ->
-                runCatching { localDb.productDao().upsertProduct(p) }
-            }
-            val prodIds = remoteProds.map { it.id }
-            if (prodIds.size <= 900) {
-                runCatching { localDb.productDao().deleteProductsNotIn(prodIds) }
+            if (remoteProds.isEmpty()) {
+                runCatching {
+                    localDb.productDao().clearAllProducts()
+                    localDb.cartDao().clearCart()
+                }
+            } else {
+                upsertProductsEnsuringFarmers(localDb, remoteProds)
+                val prodIds = remoteProds.map { it.id }
+                if (prodIds.size <= 900) {
+                    runCatching { localDb.productDao().deleteProductsNotIn(prodIds) }
+                }
             }
         }
 
-        // Now safe to prune/clear users (children already reconciled)
-        if (remoteUsers.isEmpty()) {
-            runCatching { localDb.userDao().clearNonAdminUsers() }
-        } else {
-            val userIds = remoteUsers.map { it.id }
-            if (userIds.size <= 900) {
-                runCatching { localDb.userDao().deleteNonAdminUsersNotIn(userIds) }
+        // Prune stale users ONLY if usersJson parsed cleanly AND there are no local products relying on omitted farmers
+        if (usersJson != null) {
+            if (remoteUsers.isEmpty()) {
+                if (prodsJson == null || prodsJson.length() == 0) {
+                    runCatching { localDb.userDao().clearNonAdminUsers() }
+                }
+            } else {
+                val keepIds = (remoteUsers.map { it.id } +
+                    runCatching { localDb.productDao().getAllProductsOnce().map { it.farmerId } }.getOrDefault(emptyList()))
+                    .distinct()
+                if (keepIds.size <= 900) {
+                    runCatching { localDb.userDao().deleteNonAdminUsersNotIn(keepIds) }
+                }
             }
         }
 
         // 5. Orders + items
-        val ordersObj = rootObj.optJSONObject("orders")
-        if (ordersObj == null) {
-            runCatching {
-                localDb.orderDao().clearAllOrderItems()
-                localDb.orderDao().clearAllOrders()
-            }
-        } else {
-            val orders = mutableListOf<OrderEntity>()
-            val items = mutableListOf<OrderItemEntity>()
-            val keys = ordersObj.keys()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                val obj = ordersObj.optJSONObject(key) ?: continue
-                jsonToOrder(key, obj)?.let { ord ->
-                    orders.add(ord)
-                    obj.optJSONObject("items")?.let { itemsObj ->
-                        val itemKeys = itemsObj.keys()
-                        while (itemKeys.hasNext()) {
-                            val ik = itemKeys.next()
-                            itemsObj.optJSONObject(ik)?.let { iObj ->
-                                jsonToOrderItem(ik, iObj, ord.id)?.let { items.add(it) }
+        parseJsonObjectOrNull(ordersRes)?.let { ordersObj ->
+            if (ordersObj.length() == 0) {
+                runCatching {
+                    localDb.orderDao().clearAllOrderItems()
+                    localDb.orderDao().clearAllOrders()
+                }
+            } else {
+                val orders = mutableListOf<OrderEntity>()
+                val items = mutableListOf<OrderItemEntity>()
+                val keys = ordersObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val obj = ordersObj.optJSONObject(key) ?: continue
+                    jsonToOrder(key, obj)?.let { ord ->
+                        orders.add(ord)
+                        obj.optJSONObject("items")?.let { itemsObj ->
+                            val itemKeys = itemsObj.keys()
+                            while (itemKeys.hasNext()) {
+                                val ik = itemKeys.next()
+                                itemsObj.optJSONObject(ik)?.let { iObj ->
+                                    jsonToOrderItem(ik, iObj, ord.id)?.let { items.add(it) }
+                                }
                             }
                         }
                     }
                 }
-            }
-            runCatching {
-                if (orders.isEmpty()) {
-                    localDb.orderDao().clearAllOrderItems()
-                    localDb.orderDao().clearAllOrders()
-                } else {
-                    localDb.orderDao().insertOrders(orders)
-                    if (items.isNotEmpty()) localDb.orderDao().insertOrderItems(items)
-                    val orderIds = orders.map { it.id }
-                    if (orderIds.size <= 900) {
-                        localDb.orderDao().deleteOrderItemsForMissingOrders(orderIds)
-                        localDb.orderDao().deleteOrdersNotIn(orderIds)
+                runCatching {
+                    if (orders.isEmpty()) {
+                        localDb.orderDao().clearAllOrderItems()
+                        localDb.orderDao().clearAllOrders()
+                    } else {
+                        localDb.orderDao().insertOrders(orders)
+                        if (items.isNotEmpty()) localDb.orderDao().insertOrderItems(items)
+                        val orderIds = orders.map { it.id }
+                        if (orderIds.size <= 900) {
+                            localDb.orderDao().deleteOrderItemsForMissingOrders(orderIds)
+                            localDb.orderDao().deleteOrdersNotIn(orderIds)
+                        }
                     }
                 }
             }
         }
 
         // 6. Notifications
-        val notifsObj = rootObj.optJSONObject("notifications")
-        if (notifsObj == null) {
-            runCatching { localDb.notificationAuditDao().clearAllNotifications() }
-        } else {
-            val notifs = parseJsonMap(notifsObj) { id, obj -> jsonToNotification(id, obj) }
-            if (notifs.isEmpty()) {
+        parseJsonObjectOrNull(notifsRes)?.let { notifsObj ->
+            if (notifsObj.length() == 0) {
                 runCatching { localDb.notificationAuditDao().clearAllNotifications() }
             } else {
-                notifs.forEach { n ->
-                    ingestRemoteNotification(localDb, n, onIncomingNotification)
-                }
-                val ids = notifs.map { it.id }
-                if (ids.size <= 900) {
-                    runCatching { localDb.notificationAuditDao().deleteNotificationsNotIn(ids) }
+                val notifs = parseJsonMap(notifsObj) { id, obj -> jsonToNotification(id, obj) }
+                if (notifs.isEmpty()) {
+                    runCatching { localDb.notificationAuditDao().clearAllNotifications() }
+                } else {
+                    notifs.forEach { n ->
+                        ingestRemoteNotification(localDb, n, onIncomingNotification)
+                    }
+                    val ids = notifs.map { it.id }
+                    if (ids.size <= 900) {
+                        runCatching { localDb.notificationAuditDao().deleteNotificationsNotIn(ids) }
+                    }
                 }
             }
         }
 
         // 7. Reviews, Complaints, AuditLogs
-        val revObj = rootObj.optJSONObject("reviews")
-        if (revObj == null) {
-            runCatching { localDb.reviewComplaintDao().clearAllReviews() }
-        } else {
-            val list = parseJsonMap(revObj) { id, obj -> jsonToReview(id, obj) }
+        parseJsonObjectOrNull(revRes)?.let { revObj ->
+            val list = if (revObj.length() == 0) emptyList() else parseJsonMap(revObj) { id, obj -> jsonToReview(id, obj) }
             runCatching {
                 if (list.isEmpty()) localDb.reviewComplaintDao().clearAllReviews()
                 else {
@@ -528,11 +722,8 @@ class FirebaseRealtimeSyncManager(
             }
         }
 
-        val cmpObj = rootObj.optJSONObject("complaints")
-        if (cmpObj == null) {
-            runCatching { localDb.reviewComplaintDao().clearAllComplaints() }
-        } else {
-            val list = parseJsonMap(cmpObj) { id, obj -> jsonToComplaint(id, obj) }
+        parseJsonObjectOrNull(cmpRes)?.let { cmpObj ->
+            val list = if (cmpObj.length() == 0) emptyList() else parseJsonMap(cmpObj) { id, obj -> jsonToComplaint(id, obj) }
             runCatching {
                 if (list.isEmpty()) localDb.reviewComplaintDao().clearAllComplaints()
                 else {
@@ -543,11 +734,8 @@ class FirebaseRealtimeSyncManager(
             }
         }
 
-        val audObj = rootObj.optJSONObject("auditLogs")
-        if (audObj == null) {
-            runCatching { localDb.notificationAuditDao().clearAllAuditLogs() }
-        } else {
-            val list = parseJsonMap(audObj) { id, obj -> jsonToAuditLog(id, obj) }
+        parseJsonObjectOrNull(audRes)?.let { audObj ->
+            val list = if (audObj.length() == 0) emptyList() else parseJsonMap(audObj) { id, obj -> jsonToAuditLog(id, obj) }
             runCatching {
                 if (list.isEmpty()) localDb.notificationAuditDao().clearAllAuditLogs()
                 else {
@@ -559,19 +747,17 @@ class FirebaseRealtimeSyncManager(
         }
 
         // 8. AdConfig
-        val adObj = rootObj.optJSONObject("adConfig")
-        if (adObj == null) {
-            onAdConfigChanged(AdConfig())
-        } else {
-            jsonToAdConfig(adObj)?.let { onAdConfigChanged(it) }
+        parseJsonObjectOrNull(adRes)?.let { adObj ->
+            if (adObj.length() == 0) {
+                onAdConfigChanged(AdConfig())
+            } else {
+                jsonToAdConfig(adObj)?.let { onAdConfigChanged(it) }
+            }
         }
 
         // 9. Activation Payments
-        val payObj = rootObj.optJSONObject("activationPayments")
-        if (payObj == null) {
-            runCatching { localDb.activationPaymentDao().clearAllPayments() }
-        } else {
-            val list = parseJsonMap(payObj) { id, obj -> jsonToActivationPayment(id, obj) }
+        parseJsonObjectOrNull(payRes)?.let { payObj ->
+            val list = if (payObj.length() == 0) emptyList() else parseJsonMap(payObj) { id, obj -> jsonToActivationPayment(id, obj) }
             runCatching {
                 if (list.isEmpty()) localDb.activationPaymentDao().clearAllPayments()
                 else {
@@ -583,12 +769,13 @@ class FirebaseRealtimeSyncManager(
         }
 
         // 10. Payment Settings
-        val psObj = rootObj.optJSONObject("paymentSettings")
-        if (psObj == null) {
-            runCatching { localDb.paymentSettingsDao().clearSettings() }
-        } else {
-            jsonToPaymentSettings(psObj)?.let { settings ->
-                runCatching { localDb.paymentSettingsDao().upsertSettings(settings) }
+        parseJsonObjectOrNull(psRes)?.let { psObj ->
+            if (psObj.length() == 0) {
+                runCatching { localDb.paymentSettingsDao().clearSettings() }
+            } else {
+                jsonToPaymentSettings(psObj)?.let { settings ->
+                    runCatching { localDb.paymentSettingsDao().upsertSettings(settings) }
+                }
             }
         }
     }
@@ -596,12 +783,11 @@ class FirebaseRealtimeSyncManager(
     private suspend fun pullUsersFromRestIntoDb(localDb: KrishiBondhuDatabase): List<UserEntity> {
         val bodyStr = restGetJson("users.json") ?: return emptyList()
         if (bodyStr.trim() == "null" || bodyStr.isBlank()) {
-            runCatching { localDb.userDao().clearNonAdminUsers() }
             return emptyList()
         }
         val obj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return emptyList()
         val users = parseJsonMap(obj) { id, uObj -> jsonToUser(id, uObj) }
-        users.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
+        users.forEach { u -> safeUpsertUser(localDb, u) }
         return users
     }
 
@@ -798,22 +984,29 @@ class FirebaseRealtimeSyncManager(
         }
     }
 
-    private suspend fun restGetJson(relativePath: String): String? = withContext(Dispatchers.IO) {
+    private suspend fun restGetJsonWithStatus(relativePath: String): RestGetOutcome = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder()
                 .url("$RTDB_URL/$relativePath")
+                .header("Accept", "application/json")
+                .header("Cache-Control", "no-cache")
                 .get()
                 .build()
             httpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string() else {
+                if (resp.isSuccessful) {
+                    RestGetOutcome(ok = true, body = resp.body?.string())
+                } else {
                     Log.w(TAG, "REST GET $relativePath HTTP ${resp.code}")
-                    null
+                    RestGetOutcome(ok = false, body = null)
                 }
             }
         }.onFailure {
             Log.w(TAG, "REST GET $relativePath skipped: ${it.message}")
-        }.getOrNull()
+        }.getOrDefault(RestGetOutcome(ok = false, body = null))
     }
+
+    private suspend fun restGetJson(relativePath: String): String? =
+        restGetJsonWithStatus(relativePath).takeIf { it.ok }?.body
 
     private suspend fun restPutJson(relativePath: String, jsonBody: String): Boolean = withContext(Dispatchers.IO) {
         runCatching {
@@ -904,15 +1097,15 @@ class FirebaseRealtimeSyncManager(
         val resolvedAccountStatus = resolveAccountStatus(role, s.str("accountStatus"), verificationStatus)
         return UserEntity(
             id = id,
-            fullName = s.str("fullName") ?: "",
+            fullName = (s.str("fullName") ?: "").normalizeBn(),
             phone = SecurityHashUtil.normalizePhone(phone),
             passwordHash = s.str("passwordHash") ?: "",
             role = role,
-            division = s.str("division") ?: "ঢাকা",
-            district = s.str("district") ?: "ঢাকা",
-            upazila = s.str("upazila") ?: "",
-            unionName = s.str("unionName") ?: "",
-            village = s.str("village") ?: "",
+            division = (s.str("division") ?: "ঢাকা").normalizeBn(),
+            district = (s.str("district") ?: "ঢাকা").normalizeBn(),
+            upazila = (s.str("upazila") ?: "").normalizeBn(),
+            unionName = (s.str("unionName") ?: "").normalizeBn(),
+            village = (s.str("village") ?: "").normalizeBn(),
             farmBio = s.str("farmBio") ?: "",
             nidMasked = s.str("nidMasked") ?: "",
             profileImageUri = s.str("profileImageUri") ?: "",
@@ -939,15 +1132,15 @@ class FirebaseRealtimeSyncManager(
         val resolvedAccountStatus = resolveAccountStatus(role, o.optString("accountStatus", ""), verificationStatus)
         return UserEntity(
             id = id,
-            fullName = o.optString("fullName", ""),
+            fullName = o.optString("fullName", "").normalizeBn(),
             phone = SecurityHashUtil.normalizePhone(phoneRaw),
             passwordHash = o.optString("passwordHash", ""),
             role = role,
-            division = o.optString("division", "ঢাকা"),
-            district = o.optString("district", "ঢাকা"),
-            upazila = o.optString("upazila", ""),
-            unionName = o.optString("unionName", ""),
-            village = o.optString("village", ""),
+            division = o.optString("division", "ঢাকা").normalizeBn(),
+            district = o.optString("district", "ঢাকা").normalizeBn(),
+            upazila = o.optString("upazila", "").normalizeBn(),
+            unionName = o.optString("unionName", "").normalizeBn(),
+            village = o.optString("village", "").normalizeBn(),
             farmBio = o.optString("farmBio", ""),
             nidMasked = o.optString("nidMasked", ""),
             profileImageUri = o.optString("profileImageUri", ""),
@@ -1079,17 +1272,18 @@ class FirebaseRealtimeSyncManager(
 
     private fun snapToProduct(s: DataSnapshot): ProductEntity? {
         val id = s.str("id") ?: s.key ?: return null
-        val nameBn = s.str("nameBn") ?: return null
+        val nameBn = (s.str("nameBn") ?: s.str("nameEn") ?: "").normalizeBn()
         val farmerId = s.str("farmerId") ?: return null
+        if (nameBn.isBlank()) return null
         return ProductEntity(
             id = id,
             farmerId = farmerId,
-            farmerName = s.str("farmerName") ?: "",
+            farmerName = (s.str("farmerName") ?: "").normalizeBn(),
             farmerVerified = s.bool("farmerVerified") ?: false,
             categoryId = s.str("categoryId") ?: "cat_other",
-            categoryNameBn = s.str("categoryNameBn") ?: "",
+            categoryNameBn = (s.str("categoryNameBn") ?: "").normalizeBn(),
             nameBn = nameBn,
-            nameEn = s.str("nameEn") ?: nameBn,
+            nameEn = (s.str("nameEn") ?: nameBn).normalizeBn(),
             descriptionBn = s.str("descriptionBn") ?: "",
             imageUri = s.str("imageUri") ?: "",
             availableQuantity = s.dbl("availableQuantity") ?: 0.0,
@@ -1097,12 +1291,12 @@ class FirebaseRealtimeSyncManager(
             pricePerUnit = s.dbl("pricePerUnit") ?: 0.0,
             harvestDate = s.str("harvestDate") ?: "",
             availabilityDate = s.str("availabilityDate") ?: "",
-            division = s.str("division") ?: "ঢাকা",
-            district = s.str("district") ?: "ঢাকা",
-            upazila = s.str("upazila") ?: "",
-            unionName = s.str("unionName") ?: "",
-            village = s.str("village") ?: "",
-            pickupAddress = s.str("pickupAddress") ?: "",
+            division = (s.str("division") ?: "ঢাকা").normalizeBn(),
+            district = (s.str("district") ?: "ঢাকা").normalizeBn(),
+            upazila = (s.str("upazila") ?: "").normalizeBn(),
+            unionName = (s.str("unionName") ?: "").normalizeBn(),
+            village = (s.str("village") ?: "").normalizeBn(),
+            pickupAddress = (s.str("pickupAddress") ?: "").normalizeBn(),
             supportsFarmPickup = s.bool("supportsFarmPickup") ?: true,
             supportsDirectDelivery = s.bool("supportsDirectDelivery") ?: true,
             deliveryChargeEstimate = s.dbl("deliveryChargeEstimate") ?: 0.0,
@@ -1117,18 +1311,18 @@ class FirebaseRealtimeSyncManager(
 
     private fun jsonToProduct(key: String, o: JSONObject): ProductEntity? {
         val id = o.optString("id", key).ifBlank { key }
-        val nameBn = o.optString("nameBn", "")
+        val nameBn = o.optString("nameBn", "").ifBlank { o.optString("nameEn", "") }.normalizeBn()
         val farmerId = o.optString("farmerId", "")
         if (nameBn.isBlank() || farmerId.isBlank()) return null
         return ProductEntity(
             id = id,
             farmerId = farmerId,
-            farmerName = o.optString("farmerName", ""),
+            farmerName = o.optString("farmerName", "").normalizeBn(),
             farmerVerified = o.optBoolean("farmerVerified", false),
             categoryId = o.optString("categoryId", "cat_other").ifBlank { "cat_other" },
-            categoryNameBn = o.optString("categoryNameBn", ""),
+            categoryNameBn = o.optString("categoryNameBn", "").normalizeBn(),
             nameBn = nameBn,
-            nameEn = o.optString("nameEn", nameBn).ifBlank { nameBn },
+            nameEn = o.optString("nameEn", nameBn).ifBlank { nameBn }.normalizeBn(),
             descriptionBn = o.optString("descriptionBn", ""),
             imageUri = o.optString("imageUri", ""),
             availableQuantity = o.optDouble("availableQuantity", 0.0).takeUnless { it.isNaN() } ?: 0.0,
@@ -1136,12 +1330,12 @@ class FirebaseRealtimeSyncManager(
             pricePerUnit = o.optDouble("pricePerUnit", 0.0).takeUnless { it.isNaN() } ?: 0.0,
             harvestDate = o.optString("harvestDate", ""),
             availabilityDate = o.optString("availabilityDate", ""),
-            division = o.optString("division", "ঢাকা"),
-            district = o.optString("district", "ঢাকা"),
-            upazila = o.optString("upazila", ""),
-            unionName = o.optString("unionName", ""),
-            village = o.optString("village", ""),
-            pickupAddress = o.optString("pickupAddress", ""),
+            division = o.optString("division", "ঢাকা").normalizeBn(),
+            district = o.optString("district", "ঢাকা").normalizeBn(),
+            upazila = o.optString("upazila", "").normalizeBn(),
+            unionName = o.optString("unionName", "").normalizeBn(),
+            village = o.optString("village", "").normalizeBn(),
+            pickupAddress = o.optString("pickupAddress", "").normalizeBn(),
             supportsFarmPickup = o.optBoolean("supportsFarmPickup", true),
             supportsDirectDelivery = o.optBoolean("supportsDirectDelivery", true),
             deliveryChargeEstimate = o.optDouble("deliveryChargeEstimate", 0.0).takeUnless { it.isNaN() } ?: 0.0,

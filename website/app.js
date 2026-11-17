@@ -2420,46 +2420,104 @@ function mountPageAdPlacements() {
 
 // ---------------------- Render Helpers ----------------------
 
-function getUnionOptions(district, upazila) {
-  const set = new Set();
+function normBn(v) {
+  return String(v || "").trim().normalize("NFC").toLowerCase();
+}
+
+function getUpazilaOptions(division, district) {
+  const normDiv = normBn(division);
+  const normDist = normBn(district);
+  const map = new Map();
+  const add = (val) => {
+    const clean = String(val || "").trim().normalize("NFC");
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (!map.has(key)) map.set(key, clean);
+  };
+  if (normDist) {
+    const distObj = BD_DISTRICTS.find((d) => normBn(d.districtBn) === normDist);
+    (distObj?.upazilas || []).forEach(add);
+  } else if (normDiv) {
+    BD_DISTRICTS.filter((d) => normBn(d.divisionBn) === normDiv).forEach((d) => (d.upazilas || []).forEach(add));
+  }
   for (const loc of state.locations || []) {
-    if (district && loc.districtBn !== district) continue;
-    if (upazila && loc.upazilaBn !== upazila) continue;
-    if (loc.unionBn && String(loc.unionBn).trim()) set.add(String(loc.unionBn).trim());
+    if (normDiv && normBn(loc.divisionBn) !== normDiv) continue;
+    if (normDist && normBn(loc.districtBn) !== normDist) continue;
+    add(loc.upazilaBn);
   }
   for (const u of state.users || []) {
-    if (district && u.district !== district) continue;
-    if (upazila && u.upazila !== upazila) continue;
-    if (u.unionName && String(u.unionName).trim()) set.add(String(u.unionName).trim());
+    if (u.role !== "FARMER") continue;
+    if (normDiv && normBn(u.division) !== normDiv) continue;
+    if (normDist && normBn(u.district) !== normDist) continue;
+    add(u.upazila);
   }
   for (const p of state.products || []) {
-    if (district && p.district !== district) continue;
-    if (upazila && p.upazila !== upazila) continue;
-    if (p.unionName && String(p.unionName).trim()) set.add(String(p.unionName).trim());
+    if (normDiv && normBn(p.division) !== normDiv) continue;
+    if (normDist && normBn(p.district) !== normDist) continue;
+    add(p.upazila);
   }
-  return Array.from(set).sort();
+  const arr = Array.from(map.values());
+  return normDist ? arr : arr.sort((a, b) => a.localeCompare(b));
+}
+
+function getUnionOptions(district, upazila, division) {
+  const normDiv = normBn(division);
+  const normDist = normBn(district);
+  const normUpz = normBn(upazila);
+  const map = new Map();
+  const add = (val) => {
+    const clean = String(val || "").trim().normalize("NFC");
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (!map.has(key)) map.set(key, clean);
+  };
+  for (const loc of state.locations || []) {
+    if (normDiv && normBn(loc.divisionBn) !== normDiv) continue;
+    if (normDist && normBn(loc.districtBn) !== normDist) continue;
+    if (normUpz && normBn(loc.upazilaBn) !== normUpz) continue;
+    add(loc.unionBn);
+  }
+  for (const u of state.users || []) {
+    if (normDiv && normBn(u.division) !== normDiv) continue;
+    if (normDist && normBn(u.district) !== normDist) continue;
+    if (normUpz && normBn(u.upazila) !== normUpz) continue;
+    add(u.unionName);
+  }
+  for (const p of state.products || []) {
+    if (normDiv && normBn(p.division) !== normDiv) continue;
+    if (normDist && normBn(p.district) !== normDist) continue;
+    if (normUpz && normBn(p.upazila) !== normUpz) continue;
+    add(p.unionName);
+  }
+  return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
 }
 
 function getFilteredProducts() {
   const f = state.filters;
-  const q = f.query.trim().toLowerCase();
+  const q = normBn(f.query);
+  const divN = normBn(f.division);
+  const distN = normBn(f.district);
+  const upzN = normBn(f.upazila);
+  const unionN = normBn(f.union);
   const list = state.products.filter((p) => {
     if (p.status !== "ACTIVE") return false;
     const matchQ =
       !q ||
-      (p.nameBn || "").toLowerCase().includes(q) ||
-      (p.nameEn || "").toLowerCase().includes(q) ||
-      (p.farmerName || "").toLowerCase().includes(q) ||
-      (p.division || "").toLowerCase().includes(q) ||
-      (p.district || "").toLowerCase().includes(q) ||
-      (p.upazila || "").toLowerCase().includes(q) ||
-      (p.unionName || "").toLowerCase().includes(q) ||
-      (p.categoryNameBn || "").toLowerCase().includes(q);
+      normBn(p.nameBn).includes(q) ||
+      normBn(p.nameEn).includes(q) ||
+      normBn(p.descriptionBn).includes(q) ||
+      normBn(p.farmerName).includes(q) ||
+      normBn(p.division).includes(q) ||
+      normBn(p.district).includes(q) ||
+      normBn(p.upazila).includes(q) ||
+      normBn(p.unionName).includes(q) ||
+      normBn(p.pickupAddress).includes(q) ||
+      normBn(p.categoryNameBn).includes(q);
     const matchCat = !f.categoryId || p.categoryId === f.categoryId;
-    const matchDiv = !f.division || p.division === f.division;
-    const matchDist = !f.district || p.district === f.district;
-    const matchUpz = !f.upazila || p.upazila === f.upazila;
-    const matchUnion = !f.union || (p.unionName || "").trim() === f.union;
+    const matchDiv = !divN || normBn(p.division) === divN;
+    const matchDist = !distN || normBn(p.district) === distN;
+    const matchUpz = !upzN || normBn(p.upazila) === upzN;
+    const matchUnion = !unionN || normBn(p.unionName) === unionN;
     const matchW = f.wholesaleOnly === "" || String(Boolean(p.isWholesale)) === f.wholesaleOnly;
     return matchQ && matchCat && matchDiv && matchDist && matchUpz && matchUnion && matchW;
   });
@@ -2471,21 +2529,26 @@ function getFilteredProducts() {
 
 function getFilteredFarmers() {
   const f = state.filters;
-  const q = f.query.trim().toLowerCase();
+  const q = normBn(f.query);
+  const divN = normBn(f.division);
+  const distN = normBn(f.district);
+  const upzN = normBn(f.upazila);
+  const unionN = normBn(f.union);
   return state.users.filter((u) => {
     if (u.role !== "FARMER") return false;
     const matchQ =
       !q ||
-      (u.fullName || "").toLowerCase().includes(q) ||
-      (u.division || "").toLowerCase().includes(q) ||
-      (u.district || "").toLowerCase().includes(q) ||
-      (u.upazila || "").toLowerCase().includes(q) ||
-      (u.unionName || "").toLowerCase().includes(q) ||
-      (u.farmBio || "").toLowerCase().includes(q);
-    const matchDiv = !f.division || u.division === f.division;
-    const matchDist = !f.district || u.district === f.district;
-    const matchUpz = !f.upazila || u.upazila === f.upazila;
-    const matchUnion = !f.union || (u.unionName || "").trim() === f.union;
+      normBn(u.fullName).includes(q) ||
+      normBn(u.division).includes(q) ||
+      normBn(u.district).includes(q) ||
+      normBn(u.upazila).includes(q) ||
+      normBn(u.unionName).includes(q) ||
+      normBn(u.village).includes(q) ||
+      normBn(u.farmBio).includes(q);
+    const matchDiv = !divN || normBn(u.division) === divN;
+    const matchDist = !distN || normBn(u.district) === distN;
+    const matchUpz = !upzN || normBn(u.upazila) === upzN;
+    const matchUnion = !unionN || normBn(u.unionName) === unionN;
     return matchQ && matchDiv && matchDist && matchUpz && matchUnion;
   });
 }
@@ -2856,9 +2919,9 @@ function renderAccountStatusBanner(user) {
 function renderBrowsePage() {
   const f = state.filters;
   const user = getActiveUser();
-  const distOptions = f.division ? BD_DISTRICTS.filter((d) => d.divisionBn === f.division) : BD_DISTRICTS;
-  const upzOptions = f.district ? BD_DISTRICTS.find((d) => d.districtBn === f.district)?.upazilas || [] : [];
-  const unionOptions = getUnionOptions(f.district, f.upazila);
+  const distOptions = f.division ? BD_DISTRICTS.filter((d) => normBn(d.divisionBn) === normBn(f.division)) : BD_DISTRICTS;
+  const upzOptions = getUpazilaOptions(f.division, f.district);
+  const unionOptions = getUnionOptions(f.district, f.upazila, f.division);
   const filtered = getFilteredProducts();
 
   return `
@@ -2886,26 +2949,26 @@ function renderBrowsePage() {
       <!-- Cascading Dropdown Filters (4-level Location + Category/Type/Sort) -->
       <div class="bg-white rounded-3xl p-4 sm:p-5 border border-emerald-100 shadow-sm grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <input id="browse-query" type="text" value="${escapeHtml(f.query)}" oninput="window.kbApp.setFilter('query', this.value)"
-          placeholder="ফসল বা কৃষক খুঁজুন..." class="px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+          placeholder="ফসল, এলাকা বা কৃষক খুঁজুন..." class="px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
 
         <select onchange="window.kbApp.setFilter('division', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
           <option value="">সব বিভাগ (৮টি)</option>
-          ${BD_DIVISIONS.map((d) => `<option value="${escapeHtml(d)}" ${f.division === d ? "selected" : ""}>${escapeHtml(d)} বিভাগ</option>`).join("")}
+          ${BD_DIVISIONS.map((d) => `<option value="${escapeHtml(d)}" ${normBn(f.division) === normBn(d) ? "selected" : ""}>${escapeHtml(d)} বিভাগ</option>`).join("")}
         </select>
 
         <select onchange="window.kbApp.setFilter('district', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
           <option value="">সব জেলা (৬৪টি)</option>
-          ${distOptions.map((d) => `<option value="${escapeHtml(d.districtBn)}" ${f.district === d.districtBn ? "selected" : ""}>${escapeHtml(d.districtBn)}</option>`).join("")}
+          ${distOptions.map((d) => `<option value="${escapeHtml(d.districtBn)}" ${normBn(f.district) === normBn(d.districtBn) ? "selected" : ""}>${escapeHtml(d.districtBn)}</option>`).join("")}
         </select>
 
-        <select onchange="window.kbApp.setFilter('upazila', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!f.district ? "disabled" : ""}>
+        <select onchange="window.kbApp.setFilter('upazila', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!upzOptions.length ? "disabled" : ""}>
           <option value="">সব উপজেলা</option>
-          ${upzOptions.map((u) => `<option value="${escapeHtml(u)}" ${f.upazila === u ? "selected" : ""}>${escapeHtml(u)}</option>`).join("")}
+          ${upzOptions.map((u) => `<option value="${escapeHtml(u)}" ${normBn(f.upazila) === normBn(u) ? "selected" : ""}>${escapeHtml(u)}</option>`).join("")}
         </select>
 
-        <select onchange="window.kbApp.setFilter('union', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!f.upazila && !unionOptions.length ? "disabled" : ""}>
+        <select onchange="window.kbApp.setFilter('union', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!unionOptions.length ? "disabled" : ""}>
           <option value="">সব ইউনিয়ন</option>
-          ${unionOptions.map((un) => `<option value="${escapeHtml(un)}" ${f.union === un ? "selected" : ""}>${escapeHtml(un)}</option>`).join("")}
+          ${unionOptions.map((un) => `<option value="${escapeHtml(un)}" ${normBn(f.union) === normBn(un) ? "selected" : ""}>${escapeHtml(un)}</option>`).join("")}
         </select>
 
         <select onchange="window.kbApp.setFilter('categoryId', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
@@ -3039,9 +3102,9 @@ function renderProductDetailPage() {
 function renderFarmersPage() {
   const f = state.filters;
   const user = getActiveUser();
-  const distOptions = f.division ? BD_DISTRICTS.filter((d) => d.divisionBn === f.division) : BD_DISTRICTS;
-  const upzOptions = f.district ? BD_DISTRICTS.find((d) => d.districtBn === f.district)?.upazilas || [] : [];
-  const unionOptions = getUnionOptions(f.district, f.upazila);
+  const distOptions = f.division ? BD_DISTRICTS.filter((d) => normBn(d.divisionBn) === normBn(f.division)) : BD_DISTRICTS;
+  const upzOptions = getUpazilaOptions(f.division, f.district);
+  const unionOptions = getUnionOptions(f.district, f.upazila, f.division);
   const farmers = getFilteredFarmers();
   const viewerActive = user && isMarketplaceActive(user);
 
@@ -3065,19 +3128,19 @@ function renderFarmersPage() {
           class="px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
         <select onchange="window.kbApp.setFilter('division', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
           <option value="">সব বিভাগ</option>
-          ${BD_DIVISIONS.map((d) => `<option value="${escapeHtml(d)}" ${f.division === d ? "selected" : ""}>${escapeHtml(d)}</option>`).join("")}
+          ${BD_DIVISIONS.map((d) => `<option value="${escapeHtml(d)}" ${normBn(f.division) === normBn(d) ? "selected" : ""}>${escapeHtml(d)}</option>`).join("")}
         </select>
         <select onchange="window.kbApp.setFilter('district', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
           <option value="">সব জেলা</option>
-          ${distOptions.map((d) => `<option value="${escapeHtml(d.districtBn)}" ${f.district === d.districtBn ? "selected" : ""}>${escapeHtml(d.districtBn)}</option>`).join("")}
+          ${distOptions.map((d) => `<option value="${escapeHtml(d.districtBn)}" ${normBn(f.district) === normBn(d.districtBn) ? "selected" : ""}>${escapeHtml(d.districtBn)}</option>`).join("")}
         </select>
-        <select onchange="window.kbApp.setFilter('upazila', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!f.district ? "disabled" : ""}>
+        <select onchange="window.kbApp.setFilter('upazila', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!upzOptions.length ? "disabled" : ""}>
           <option value="">সব উপজেলা</option>
-          ${upzOptions.map((u) => `<option value="${escapeHtml(u)}" ${f.upazila === u ? "selected" : ""}>${escapeHtml(u)}</option>`).join("")}
+          ${upzOptions.map((u) => `<option value="${escapeHtml(u)}" ${normBn(f.upazila) === normBn(u) ? "selected" : ""}>${escapeHtml(u)}</option>`).join("")}
         </select>
-        <select onchange="window.kbApp.setFilter('union', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!f.upazila && !unionOptions.length ? "disabled" : ""}>
+        <select onchange="window.kbApp.setFilter('union', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white" ${!unionOptions.length ? "disabled" : ""}>
           <option value="">সব ইউনিয়ন</option>
-          ${unionOptions.map((un) => `<option value="${escapeHtml(un)}" ${f.union === un ? "selected" : ""}>${escapeHtml(un)}</option>`).join("")}
+          ${unionOptions.map((un) => `<option value="${escapeHtml(un)}" ${normBn(f.union) === normBn(un) ? "selected" : ""}>${escapeHtml(un)}</option>`).join("")}
         </select>
       </div>
 

@@ -27,7 +27,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -58,6 +60,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SplashScreen(
     isAppLoading: Boolean,
+    isInitialSyncing: Boolean = false,
     onSplashComplete: () -> Unit,
     appVersion: String = BuildConfig.VERSION_NAME,
     buildVersion: String = BuildConfig.BUILD_VERSION
@@ -65,6 +68,8 @@ fun SplashScreen(
     val logoScale = remember { Animatable(0.78f) }
     val logoAlpha = remember { Animatable(0f) }
     val textAlpha = remember { Animatable(0f) }
+    val latestIsAppLoading by androidx.compose.runtime.rememberUpdatedState(isAppLoading)
+    val latestIsSyncing by androidx.compose.runtime.rememberUpdatedState(isInitialSyncing)
 
     LaunchedEffect(Unit) {
         launch {
@@ -89,7 +94,7 @@ fun SplashScreen(
         )
         delay(1300L)
         var waited = 0
-        while (isAppLoading && waited < 10) {
+        while ((latestIsAppLoading || latestIsSyncing) && waited < 15) {
             delay(100L)
             waited++
         }

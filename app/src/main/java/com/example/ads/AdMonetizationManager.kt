@@ -38,17 +38,30 @@ object AdMonetizationManager {
             GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context) == ConnectionResult.SUCCESS
         }.getOrDefault(false)
 
-    fun initialize(context: Context) {
-        if (isTestEnvironment() || initialized || initializing) return
+    fun initialize(context: Context, onReady: (() -> Unit)? = null) {
+        if (isTestEnvironment()) return
+        if (initialized) {
+            onReady?.let { cb ->
+                initScope.launch(Dispatchers.Main) { cb() }
+            }
+            return
+        }
         val appContext = context.applicationContext
         if (!isPlayServicesAvailable(appContext)) return
+        if (initializing) return
         initializing = true
         initScope.launch {
             runCatching {
-                MobileAds.initialize(appContext) {}
-                initialized = true
+                MobileAds.initialize(appContext) {
+                    initialized = true
+                    initializing = false
+                    onReady?.let { cb ->
+                        initScope.launch(Dispatchers.Main) { cb() }
+                    }
+                }
+            }.onFailure {
+                initializing = false
             }
-            initializing = false
         }
     }
 
@@ -64,9 +77,15 @@ object AdMonetizationManager {
         if (unitId.isBlank()) return
         if ((interstitialAd != null && loadedUnitId == unitId) || isLoadingInterstitial) return
 
-        initialize(context)
-        isLoadingInterstitial = true
         val appContext = context.applicationContext
+        if (!initialized) {
+            initialize(appContext) {
+                preloadInterstitial(appContext, overrideUnitId, enabled)
+            }
+            return
+        }
+
+        isLoadingInterstitial = true
         runCatching {
             InterstitialAd.load(
                 appContext,

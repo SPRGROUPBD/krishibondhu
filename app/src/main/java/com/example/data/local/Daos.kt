@@ -111,6 +111,9 @@ interface ProductDao {
     @Query("SELECT * FROM products ORDER BY createdAt DESC")
     fun observeAllProducts(): Flow<List<ProductEntity>>
 
+    @Query("SELECT * FROM products")
+    suspend fun getAllProductsOnce(): List<ProductEntity>
+
     @Query("SELECT * FROM products WHERE id = :productId LIMIT 1")
     suspend fun getProductById(productId: String): ProductEntity?
 

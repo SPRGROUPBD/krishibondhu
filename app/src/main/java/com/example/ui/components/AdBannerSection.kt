@@ -3,7 +3,11 @@ package com.example.ui.components
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Color as AndroidColor
+import android.net.http.SslError
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -15,8 +19,11 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,6 +44,7 @@ import com.example.ui.theme.DarkGreen
 import com.example.ui.theme.HarvestGoldLight
 import com.example.ui.theme.LightGreen
 import com.example.ui.theme.PrimaryGreen
+import com.example.util.NetworkMonitor
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
@@ -60,11 +68,15 @@ fun AdBannerSection(
     val webNetworkAd = remember(adConfig, placementTag, priority) {
         buildMobileNetworkHtmlPayload(adConfig, placementTag, priority)
     }
+    val isOnline = remember(context) {
+        AdMonetizationManager.isTestEnvironment() || NetworkMonitor.isCurrentlyOnline(context)
+    }
     val showAdMob = adConfig.androidAdsEnabled &&
         resolvedAdMobUnit.isNotBlank() &&
         allows("ADMOB") &&
-        (AdMonetizationManager.isTestEnvironment() || AdMonetizationManager.isPlayServicesAvailable(context))
-    val showMobileWebAd = adConfig.mobileWebAdsEnabled && webNetworkAd != null
+        (AdMonetizationManager.isTestEnvironment() || (isOnline && AdMonetizationManager.isPlayServicesAvailable(context)))
+    val showMobileWebAd = adConfig.mobileWebAdsEnabled && webNetworkAd != null &&
+        (AdMonetizationManager.isTestEnvironment() || isOnline)
     val showSponsor = adConfig.sponsorEnabled &&
         adConfig.sponsorTitle.isNotBlank() &&
         (allows("SPONSOR") || (!showAdMob && !showMobileWebAd))
@@ -180,54 +192,58 @@ fun AdBannerSection(
             }
         }
 
-        // 2. Multi-Network Mobile WebView Ad Bridge (Adsterra, Monetag, AdSense, Custom HTML5 / Unity / AppLovin Web)
-        webNetworkAd?.takeIf { adConfig.mobileWebAdsEnabled }?.let { resolvedWebAd ->
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+        // 2. Multi-Network Mobile WebView Ad Bridge (collapses cleanly if ad network fails to load)
+        if (showMobileWebAd && webNetworkAd != null) {
+            var webAdFailed by remember(webNetworkAd.html, placementTag) { mutableStateOf(false) }
+            if (!webAdFailed) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    if (adConfig.showAdsLabel) {
-                        Text(
-                            text = "Sponsored Ad • ${resolvedWebAd.networkLabel}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                    }
-                    if (AdMonetizationManager.isTestEnvironment()) {
-                        Surface(
-                            color = LightGreen,
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(60.dp)
-                                .testTag("mobile_multi_ad_$placementTag")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = "${resolvedWebAd.networkLabel} ($placementTag)",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = DarkGreen
-                                )
-                            }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        if (adConfig.showAdsLabel) {
+                            Text(
+                                text = "Sponsored Ad • ${webNetworkAd.networkLabel}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
                         }
-                    } else {
-                        key(resolvedWebAd.html) {
-                            SandboxedAdWebView(
-                                htmlContent = resolvedWebAd.html,
+                        if (AdMonetizationManager.isTestEnvironment()) {
+                            Surface(
+                                color = LightGreen,
+                                shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(72.dp)
+                                    .height(60.dp)
                                     .testTag("mobile_multi_ad_$placementTag")
-                            )
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = "${webNetworkAd.networkLabel} ($placementTag)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = DarkGreen
+                                    )
+                                }
+                            }
+                        } else {
+                            key(webNetworkAd.html) {
+                                SandboxedAdWebView(
+                                    htmlContent = webNetworkAd.html,
+                                    onAdFailed = { webAdFailed = true },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(60.dp)
+                                        .testTag("mobile_multi_ad_$placementTag")
+                                )
+                            }
                         }
                     }
                 }
@@ -392,6 +408,7 @@ private fun buildMobileNetworkHtmlPayload(
 @Composable
 private fun SandboxedAdWebView(
     htmlContent: String,
+    onAdFailed: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -419,6 +436,47 @@ private fun SandboxedAdWebView(
                             return true
                         }
                         return true
+                    }
+
+                    override fun onReceivedError(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                        error: WebResourceError?
+                    ) {
+                        if (request?.isForMainFrame == true) {
+                            onAdFailed()
+                        }
+                    }
+
+                    override fun onReceivedHttpError(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                        errorResponse: WebResourceResponse?
+                    ) {
+                        if (request?.isForMainFrame == true) {
+                            onAdFailed()
+                        }
+                    }
+
+                    override fun onReceivedSslError(
+                        view: WebView?,
+                        handler: SslErrorHandler?,
+                        error: SslError?
+                    ) {
+                        handler?.cancel()
+                        onAdFailed()
+                    }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        view?.postDelayed({
+                            view.evaluateJavascript(
+                                "(function(){var b=document.body;if(!b)return '0';var h=b.querySelector('img,iframe,ins,a,object,embed');return (h||(b.innerText||'').trim().length>0)?'1':'0';})()"
+                            ) { res ->
+                                if (res == "\"0\"" || res == "0") {
+                                    onAdFailed()
+                                }
+                            }
+                        }, 3500L)
                     }
                 }
                 loadDataWithBaseURL("https://krishibondhu.bd", htmlContent, "text/html", "utf-8", null)

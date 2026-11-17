@@ -1269,4 +1269,118 @@ class ExampleRobolectricTest {
         assertEquals(UserRole.ADMIN, adminState.activeRole)
         assertTrue(adminState.isSuperAdmin)
     }
+
+    @Test
+    fun banglaUnicodeNormalizationMatchesNfdAndNfcAcrossSearchAndLocationFilters() {
+        val kushtiaNfc = "কুষ্টি\u09DFা" // NFC য়
+        val kushtiaNfd = "কুষ্টি\u09AF\u09BCা" // NFD য + ়
+        val mirpur = "মিরপুর"
+
+        assertTrue(BangladeshLocations.upazilasForDistrict(kushtiaNfd).isNotEmpty())
+        assertEquals(
+            BangladeshLocations.upazilasForDistrict(kushtiaNfc),
+            BangladeshLocations.upazilasForDistrict(kushtiaNfd)
+        )
+
+        val farmer = UserEntity(
+            id = "farmer_bn_norm",
+            fullName = "সাজ্জাদ আহমেদ",
+            phone = "01712345678",
+            passwordHash = "hash",
+            role = UserRole.FARMER.name,
+            division = "খুলনা",
+            district = kushtiaNfc,
+            upazila = mirpur,
+            unionName = "পোড়াদহ",
+            village = "হালসা",
+            farmBio = "মিনিকেট ধান",
+            verificationStatus = "VERIFIED",
+            accountStatus = AccountStatus.ACTIVE.name
+        )
+        val product = com.example.data.local.ProductEntity(
+            id = "prod_bn_norm",
+            farmerId = farmer.id,
+            farmerName = farmer.fullName,
+            farmerVerified = true,
+            categoryId = "cat_rice",
+            categoryNameBn = "চাল",
+            nameBn = "মিনিকেট চাল",
+            nameEn = "Miniket Rice",
+            descriptionBn = "টাটকা ফসল",
+            availableQuantity = 10.0,
+            pricePerUnit = 1200.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            division = "খুলনা",
+            district = kushtiaNfc,
+            upazila = mirpur,
+            unionName = "পোড়াদহ",
+            village = "হালসা",
+            pickupAddress = "$mirpur, $kushtiaNfc",
+            status = "ACTIVE"
+        )
+
+        val filteredByNfdDistrict = com.example.ui.viewmodel.MarketplaceUiState(
+            isLoading = false,
+            products = listOf(product),
+            farmers = listOf(farmer),
+            selectedDistrict = kushtiaNfd
+        )
+        assertEquals(1, filteredByNfdDistrict.filteredProducts.size)
+        assertEquals(1, filteredByNfdDistrict.filteredFarmers.size)
+
+        val filteredByNfdSearch = com.example.ui.viewmodel.MarketplaceUiState(
+            isLoading = false,
+            products = listOf(product),
+            farmers = listOf(farmer),
+            searchQuery = kushtiaNfd
+        )
+        assertEquals(1, filteredByNfdSearch.filteredProducts.size)
+        assertEquals(1, filteredByNfdSearch.filteredFarmers.size)
+    }
+
+    @Test
+    fun syncManagerSafelySkipsSdkWithoutGoogleServicesAndPreservesLocalCache() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val syncManagerWithAppContext = FirebaseRealtimeSyncManager(enableRemoteSync = true, appContext = context)
+        val syncScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined
+        )
+        // Verifies SDK initialization guard skips FirebaseDatabase cleanly when google-services.json is absent
+        syncManagerWithAppContext.startRealtimeListeners(
+            localDb = db,
+            scope = syncScope,
+            onIncomingNotification = {}
+        )
+        syncScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+
+        val testRepo = MarketplaceRepository(
+            db = db,
+            prefs = UserPreferences(context),
+            rtdbSync = FirebaseRealtimeSyncManager(enableRemoteSync = false, appContext = context)
+        )
+        val categoriesBefore = db.categoryDao().observeCategories().first()
+        assertTrue(categoriesBefore.isNotEmpty())
+
+        val farmer = repo.registerUser(
+            fullName = "লোকাল ক্যাশ কৃষক",
+            phone = "01799000011",
+            rawPassword = "pass1234",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "ভেড়ামারা",
+            unionName = "",
+            village = "",
+            nidLastFour = "1234",
+            farmBio = "ভুট্টা"
+        ).getOrThrow()
+
+        testRepo.initializeCatalogsAndSync()
+        assertFalse(testRepo.syncNow())
+        assertFalse(testRepo.isSyncing.value)
+        assertNotNull(db.userDao().getUserById(farmer.id))
+        assertTrue(db.categoryDao().observeCategories().first().isNotEmpty())
+    }
 }
+

@@ -3,8 +3,10 @@ package com.example.ui.screens
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -12,15 +14,19 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,10 +40,13 @@ import com.example.data.model.AppLanguage
 import com.example.data.model.BangladeshLocations
 import com.example.data.model.PriceSort
 import com.example.data.model.UserRole
+import com.example.data.model.equalsBn
+import com.example.data.model.normalizeBn
 import com.example.ui.components.AdBannerSection
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.FarmerCard
 import com.example.ui.components.InteractiveBangladeshMapDialog
+import com.example.ui.components.ProductBrowseRowCard
 import com.example.ui.components.ProductCard
 import com.example.ui.viewmodel.MarketplaceUiState
 import com.example.util.LocationHelper
@@ -61,6 +70,7 @@ fun BrowseScreen(
     onWholesaleSelect: (Boolean?) -> Unit,
     onSortSelect: (PriceSort) -> Unit,
     onResetFilters: () -> Unit,
+    onRefreshSync: () -> Unit = {},
     onProductClick: (String) -> Unit,
     onFarmerClick: (String) -> Unit,
     onQuickAddToCart: (String) -> Unit
@@ -70,6 +80,7 @@ fun BrowseScreen(
     val lang = uiState.language
     var showFarmersTab by remember(initialTabFarmers) { mutableStateOf(initialTabFarmers) }
     var showMapPicker by remember { mutableStateOf(false) }
+    var filtersExpanded by remember { mutableStateOf(false) }
 
     val runGpsFilter: () -> Unit = {
         scope.launch {
@@ -97,18 +108,60 @@ fun BrowseScreen(
     val categoryEmojiMap = remember(uiState.categories) {
         uiState.categories.associate { it.id to it.emoji }
     }
-    val divisions = BangladeshLocations.divisions
-    val districts = remember(uiState.selectedDivision) {
-        if (uiState.selectedDivision == null) BangladeshLocations.allDistricts.map { it.districtBn }
-        else BangladeshLocations.districtsForDivision(uiState.selectedDivision).map { it.districtBn }
+    val divisions = remember {
+        BangladeshLocations.divisions.map { it.normalizeBn() }.distinct()
     }
-    val upazilas = remember(uiState.selectedDistrict, uiState.locations) {
-        if (uiState.selectedDistrict != null) {
-            (BangladeshLocations.upazilasForDistrict(uiState.selectedDistrict) +
-                uiState.locations.filter { it.districtBn == uiState.selectedDistrict }.map { it.upazilaBn }).distinct()
+    val districts = remember(uiState.selectedDivision, uiState.locations, uiState.products, uiState.farmers) {
+        val base = if (uiState.selectedDivision == null) {
+            BangladeshLocations.allDistricts.map { it.districtBn }
         } else {
-            emptyList()
+            BangladeshLocations.districtsForDivision(uiState.selectedDivision).map { it.districtBn }
         }
+        val extra = (uiState.locations.filter {
+            uiState.selectedDivision == null || it.divisionBn.equalsBn(uiState.selectedDivision)
+        }.map { it.districtBn } +
+            uiState.products.filter {
+                uiState.selectedDivision == null || it.division.equalsBn(uiState.selectedDivision)
+            }.map { it.district } +
+            uiState.farmers.filter {
+                uiState.selectedDivision == null || it.division.equalsBn(uiState.selectedDivision)
+            }.map { it.district })
+        (base + extra)
+            .map { it.normalizeBn() }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+    val upazilas = remember(
+        uiState.selectedDivision,
+        uiState.selectedDistrict,
+        uiState.locations,
+        uiState.products,
+        uiState.farmers
+    ) {
+        val fromStatic = when {
+            uiState.selectedDistrict != null ->
+                BangladeshLocations.upazilasForDistrict(uiState.selectedDistrict)
+            uiState.selectedDivision != null ->
+                BangladeshLocations.districtsForDivision(uiState.selectedDivision).flatMap { it.upazilas }
+            else -> emptyList()
+        }
+        val fromLocations = uiState.locations.filter { loc ->
+            (uiState.selectedDivision == null || loc.divisionBn.equalsBn(uiState.selectedDivision)) &&
+                (uiState.selectedDistrict == null || loc.districtBn.equalsBn(uiState.selectedDistrict))
+        }.map { it.upazilaBn }
+        val fromFarmers = uiState.farmers.filter { f ->
+            (uiState.selectedDivision == null || f.division.equalsBn(uiState.selectedDivision)) &&
+                (uiState.selectedDistrict == null || f.district.equalsBn(uiState.selectedDistrict))
+        }.map { it.upazila }
+        val fromProducts = uiState.products.filter { p ->
+            (uiState.selectedDivision == null || p.division.equalsBn(uiState.selectedDivision)) &&
+                (uiState.selectedDistrict == null || p.district.equalsBn(uiState.selectedDistrict))
+        }.map { it.upazila }
+        (fromStatic + fromLocations + fromFarmers + fromProducts)
+            .map { it.normalizeBn() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .let { list -> if (uiState.selectedDistrict != null) list else list.sorted() }
     }
     val unions = remember(
         uiState.selectedDivision,
@@ -119,36 +172,37 @@ fun BrowseScreen(
         uiState.products
     ) {
         val fromLocations = uiState.locations.filter { loc ->
-            (uiState.selectedDivision == null || loc.divisionBn == uiState.selectedDivision) &&
-                (uiState.selectedDistrict == null || loc.districtBn == uiState.selectedDistrict) &&
-                (uiState.selectedUpazila == null || loc.upazilaBn == uiState.selectedUpazila)
+            (uiState.selectedDivision == null || loc.divisionBn.equalsBn(uiState.selectedDivision)) &&
+                (uiState.selectedDistrict == null || loc.districtBn.equalsBn(uiState.selectedDistrict)) &&
+                (uiState.selectedUpazila == null || loc.upazilaBn.equalsBn(uiState.selectedUpazila))
         }.map { it.unionBn }
         val fromFarmers = uiState.farmers.filter { f ->
-            (uiState.selectedDivision == null || f.division == uiState.selectedDivision) &&
-                (uiState.selectedDistrict == null || f.district == uiState.selectedDistrict) &&
-                (uiState.selectedUpazila == null || f.upazila == uiState.selectedUpazila)
+            (uiState.selectedDivision == null || f.division.equalsBn(uiState.selectedDivision)) &&
+                (uiState.selectedDistrict == null || f.district.equalsBn(uiState.selectedDistrict)) &&
+                (uiState.selectedUpazila == null || f.upazila.equalsBn(uiState.selectedUpazila))
         }.map { it.unionName }
         val fromProducts = uiState.products.filter { p ->
-            (uiState.selectedDivision == null || p.division == uiState.selectedDivision) &&
-                (uiState.selectedDistrict == null || p.district == uiState.selectedDistrict) &&
-                (uiState.selectedUpazila == null || p.upazila == uiState.selectedUpazila)
+            (uiState.selectedDivision == null || p.division.equalsBn(uiState.selectedDivision)) &&
+                (uiState.selectedDistrict == null || p.district.equalsBn(uiState.selectedDistrict)) &&
+                (uiState.selectedUpazila == null || p.upazila.equalsBn(uiState.selectedUpazila))
         }.map { it.unionName }
         (fromLocations + fromFarmers + fromProducts)
-            .map { it.trim() }
+            .map { it.normalizeBn() }
             .filter { it.isNotBlank() }
             .distinct()
             .sorted()
     }
 
-    val hasActiveFilter = uiState.searchQuery.isNotBlank() ||
-        uiState.selectedDivision != null ||
-        uiState.selectedDistrict != null ||
-        uiState.selectedUpazila != null ||
-        uiState.selectedUnion != null ||
-        uiState.selectedCategoryId != null ||
-        uiState.wholesaleOnly != null ||
-        uiState.priceSort != PriceSort.NEWEST
-
+    val activeFilterCount = listOfNotNull(
+        uiState.selectedDivision,
+        uiState.selectedDistrict,
+        uiState.selectedUpazila,
+        uiState.selectedUnion,
+        uiState.selectedCategoryId,
+        uiState.wholesaleOnly,
+        uiState.priceSort.takeIf { it != PriceSort.NEWEST }
+    ).size
+    val hasActiveFilter = uiState.searchQuery.isNotBlank() || activeFilterCount > 0
     val isFarmerRole = uiState.activeRole == UserRole.FARMER
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -173,11 +227,12 @@ fun BrowseScreen(
                 )
             }
         }
+
         // Tab Switcher: ফসল vs কৃষক
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             FilterChip(
@@ -216,37 +271,7 @@ fun BrowseScreen(
             )
         }
 
-        // Search input
-        OutlinedTextField(
-            value = uiState.searchQuery,
-            onValueChange = onSearchChange,
-            placeholder = {
-                Text(
-                    if (lang == AppLanguage.BENGALI)
-                        "ফসল, জেলা, উপজেলা, ইউনিয়ন বা কৃষকের নাম লিখুন..."
-                    else
-                        "Search crops, district, upazila, union or farmer..."
-                )
-            },
-            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-            trailingIcon = {
-                if (uiState.searchQuery.isNotBlank()) {
-                    IconButton(onClick = { onSearchChange("") }) {
-                        Icon(Icons.Filled.Clear, contentDescription = "মুছুন")
-                    }
-                }
-            },
-            singleLine = true,
-            shape = RoundedCornerShape(14.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .testTag("browse_search_input")
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Auto GPS / My Area / Map Quick Location + Reset Bar
+        // Search input + manual sync refresh button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -254,6 +279,89 @@ fun BrowseScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            OutlinedTextField(
+                value = uiState.searchQuery,
+                onValueChange = onSearchChange,
+                placeholder = {
+                    Text(
+                        text = if (lang == AppLanguage.BENGALI)
+                            "ফসল, জেলা, উপজেলা, ইউনিয়ন বা কৃষকের নাম..."
+                        else
+                            "Search crops, district, upazila, union or farmer...",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (uiState.searchQuery.isNotBlank()) {
+                        IconButton(onClick = { onSearchChange("") }) {
+                            Icon(Icons.Filled.Clear, contentDescription = "মুছুন")
+                        }
+                    }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("browse_search_input")
+            )
+
+            FilledTonalIconButton(
+                onClick = onRefreshSync,
+                enabled = !uiState.isSyncing,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("browse_refresh_button")
+            ) {
+                if (uiState.isSyncing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Filled.Refresh,
+                        contentDescription = if (lang == AppLanguage.BENGALI) "ডাটা রিফ্রেশ করুন" else "Refresh data"
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // Compact Action Bar: Filter Toggle, GPS, My Area, Map, Reset
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilterChip(
+                selected = filtersExpanded || activeFilterCount > 0,
+                onClick = { filtersExpanded = !filtersExpanded },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Tune,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                },
+                label = {
+                    val text = if (lang == AppLanguage.BENGALI) {
+                        if (activeFilterCount > 0) "ফিল্টার ($activeFilterCount)" else "ফিল্টার"
+                    } else {
+                        if (activeFilterCount > 0) "Filters ($activeFilterCount)" else "Filters"
+                    }
+                    Text(text, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                },
+                modifier = Modifier
+                    .minimumInteractiveComponentSize()
+                    .testTag("browse_toggle_filters_button")
+            )
+
             FilledTonalButton(
                 onClick = {
                     if (LocationHelper.hasLocationPermission(context)) runGpsFilter()
@@ -264,8 +372,9 @@ fun BrowseScreen(
                         )
                     )
                 },
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                 modifier = Modifier
-                    .weight(1f)
+                    .heightIn(min = 40.dp)
                     .testTag("browse_auto_gps_button")
             ) {
                 Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -276,251 +385,456 @@ fun BrowseScreen(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+
             if (uiState.activeUser != null && onUseMyLocation != null) {
                 OutlinedButton(
                     onClick = onUseMyLocation,
-                    modifier = Modifier.testTag("browse_my_location_button")
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .heightIn(min = 40.dp)
+                        .testTag("browse_my_location_button")
                 ) {
                     Text(if (lang == AppLanguage.BENGALI) "আমার এলাকা" else "My Area", maxLines = 1)
                 }
             }
+
             OutlinedButton(
                 onClick = { showMapPicker = true },
-                modifier = Modifier.testTag("browse_open_map_button")
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .testTag("browse_open_map_button")
             ) {
                 Icon(Icons.Filled.Map, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(4.dp))
-                Text(if (lang == AppLanguage.BENGALI) "ম্যাপ" else "Map")
+                Text(if (lang == AppLanguage.BENGALI) "ম্যাপ" else "Map", maxLines = 1)
             }
+
             if (hasActiveFilter) {
-                IconButton(
+                OutlinedButton(
                     onClick = onResetFilters,
-                    modifier = Modifier.testTag("browse_reset_filters_button")
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    modifier = Modifier
+                        .heightIn(min = 40.dp)
+                        .testTag("browse_reset_filters_button")
                 ) {
                     Icon(
                         imageVector = Icons.Filled.RestartAlt,
                         contentDescription = if (lang == AppLanguage.BENGALI) "ফিল্টার রিসেট" else "Reset filters",
-                        tint = MaterialTheme.colorScheme.primary
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
                     )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(if (lang == AppLanguage.BENGALI) "রিসেট" else "Reset", maxLines = 1)
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // All Filters as Structured Dropdowns (বিভাগ, জেলা, উপজেলা, ইউনিয়ন, সব ক্যাটাগরি, পাইকারি, সাজানো)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            // Row 1: বিভাগ & জেলা Dropdowns
+        // Active filter chips strip when panel is collapsed
+        if (hasActiveFilter && !filtersExpanded) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                val allDivLabel = if (lang == AppLanguage.BENGALI) "সব বিভাগ" else "All Divisions"
-                FilterDropdownField(
-                    label = if (lang == AppLanguage.BENGALI) "বিভাগ" else "Division",
-                    selectedText = uiState.selectedDivision ?: allDivLabel,
-                    isActive = uiState.selectedDivision != null,
-                    options = listOf(allDivLabel to null) + divisions.map { it to it },
-                    onSelect = onDivisionSelect,
-                    modifier = Modifier.weight(1f),
-                    testTag = "filter_division_dropdown"
-                )
-
-                val allDistLabel = if (lang == AppLanguage.BENGALI) "সব জেলা" else "All Districts"
-                FilterDropdownField(
-                    label = if (lang == AppLanguage.BENGALI) "জেলা" else "District",
-                    selectedText = uiState.selectedDistrict ?: allDistLabel,
-                    isActive = uiState.selectedDistrict != null,
-                    options = listOf(allDistLabel to null) + districts.map { it to it },
-                    onSelect = onDistrictSelect,
-                    modifier = Modifier.weight(1f),
-                    testTag = "filter_district_dropdown"
-                )
-            }
-
-            // Row 2: উপজেলা & ইউনিয়ন Dropdowns
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                val allUpzLabel = if (lang == AppLanguage.BENGALI) "সব উপজেলা" else "All Upazilas"
-                FilterDropdownField(
-                    label = if (lang == AppLanguage.BENGALI) "উপজেলা" else "Upazila",
-                    selectedText = uiState.selectedUpazila ?: allUpzLabel,
-                    isActive = uiState.selectedUpazila != null,
-                    enabled = upazilas.isNotEmpty(),
-                    options = listOf(allUpzLabel to null) + upazilas.map { it to it },
-                    onSelect = onUpazilaSelect,
-                    modifier = Modifier.weight(1f),
-                    testTag = "filter_upazila_dropdown"
-                )
-
-                val allUnionLabel = if (lang == AppLanguage.BENGALI) "সব ইউনিয়ন" else "All Unions"
-                FilterDropdownField(
-                    label = if (lang == AppLanguage.BENGALI) "ইউনিয়ন" else "Union",
-                    selectedText = uiState.selectedUnion ?: allUnionLabel,
-                    isActive = uiState.selectedUnion != null,
-                    enabled = unions.isNotEmpty(),
-                    options = listOf(allUnionLabel to null) + unions.map { it to it },
-                    onSelect = onUnionSelect,
-                    modifier = Modifier.weight(1f),
-                    testTag = "filter_union_dropdown"
-                )
-            }
-
-            // Row 3 (Crops Tab): ক্যাটাগরি, পাইকারি/খুচরা & দাম অনুযায়ী সাজান Dropdowns
-            if (!showFarmersTab) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val allCatLabel = if (lang == AppLanguage.BENGALI) "সব ক্যাটাগরি" else "All Categories"
-                    val selectedCat = activeCategories.firstOrNull { it.id == uiState.selectedCategoryId }
-                    val selectedCatText = if (selectedCat != null) {
-                        val catTitle = if (lang == AppLanguage.BENGALI) selectedCat.nameBn else selectedCat.nameEn
-                        "${selectedCat.emoji} $catTitle"
-                    } else {
-                        allCatLabel
+                if (uiState.searchQuery.isNotBlank()) {
+                    InputChip(
+                        selected = true,
+                        onClick = { onSearchChange("") },
+                        label = { Text("🔍 ${uiState.searchQuery}", maxLines = 1) },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                    )
+                }
+                uiState.selectedDivision?.let { div ->
+                    InputChip(
+                        selected = true,
+                        onClick = { onDivisionSelect(null) },
+                        label = { Text(div, maxLines = 1) },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                    )
+                }
+                uiState.selectedDistrict?.let { dist ->
+                    InputChip(
+                        selected = true,
+                        onClick = { onDistrictSelect(null) },
+                        label = { Text(dist, maxLines = 1) },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                    )
+                }
+                uiState.selectedUpazila?.let { upz ->
+                    InputChip(
+                        selected = true,
+                        onClick = { onUpazilaSelect(null) },
+                        label = { Text(upz, maxLines = 1) },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                    )
+                }
+                uiState.selectedUnion?.let { uni ->
+                    InputChip(
+                        selected = true,
+                        onClick = { onUnionSelect(null) },
+                        label = { Text(uni, maxLines = 1) },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                    )
+                }
+                uiState.selectedCategoryId?.let { catId ->
+                    val cat = activeCategories.firstOrNull { it.id == catId }
+                    if (cat != null) {
+                        InputChip(
+                            selected = true,
+                            onClick = { onCategorySelect(null) },
+                            label = {
+                                Text(
+                                    "${cat.emoji} ${if (lang == AppLanguage.BENGALI) cat.nameBn else cat.nameEn}",
+                                    maxLines = 1
+                                )
+                            },
+                            trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
+                        )
                     }
-                    FilterDropdownField(
-                        label = if (lang == AppLanguage.BENGALI) "ক্যাটাগরি" else "Category",
-                        selectedText = selectedCatText,
-                        isActive = uiState.selectedCategoryId != null,
-                        options = listOf(allCatLabel to null) + activeCategories.map { cat ->
-                            val catTitle = if (lang == AppLanguage.BENGALI) cat.nameBn else cat.nameEn
-                            "${cat.emoji} $catTitle" to cat.id
+                }
+                uiState.wholesaleOnly?.let { wholesale ->
+                    InputChip(
+                        selected = true,
+                        onClick = { onWholesaleSelect(null) },
+                        label = {
+                            Text(
+                                if (wholesale) (if (lang == AppLanguage.BENGALI) "পাইকারি" else "Wholesale")
+                                else (if (lang == AppLanguage.BENGALI) "খুচরা" else "Retail"),
+                                maxLines = 1
+                            )
                         },
-                        onSelect = onCategorySelect,
-                        modifier = Modifier.weight(1f),
-                        testTag = "filter_category_dropdown"
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
                     )
-
-                    val allTypeLabel = if (lang == AppLanguage.BENGALI) "সব ধরন" else "All Types"
-                    val wholesaleLabel = if (lang == AppLanguage.BENGALI) "পাইকারি" else "Wholesale"
-                    val retailLabel = if (lang == AppLanguage.BENGALI) "খুচরা" else "Retail"
-                    val selectedTypeText = when (uiState.wholesaleOnly) {
-                        true -> wholesaleLabel
-                        false -> retailLabel
-                        null -> allTypeLabel
-                    }
-                    FilterDropdownField(
-                        label = if (lang == AppLanguage.BENGALI) "ধরন" else "Sale Type",
-                        selectedText = selectedTypeText,
-                        isActive = uiState.wholesaleOnly != null,
-                        options = listOf(
-                            allTypeLabel to null,
-                            wholesaleLabel to true,
-                            retailLabel to false
-                        ),
-                        onSelect = onWholesaleSelect,
-                        modifier = Modifier.weight(0.85f),
-                        testTag = "filter_wholesale_dropdown"
-                    )
-
-                    val sortNewest = if (lang == AppLanguage.BENGALI) "নতুন" else "Newest"
-                    val sortLow = if (lang == AppLanguage.BENGALI) "কম দাম" else "Low→High"
-                    val sortHigh = if (lang == AppLanguage.BENGALI) "বেশি দাম" else "High→Low"
-                    val selectedSortText = when (uiState.priceSort) {
-                        PriceSort.NEWEST -> sortNewest
-                        PriceSort.PRICE_LOW_HIGH -> sortLow
-                        PriceSort.PRICE_HIGH_LOW -> sortHigh
-                    }
-                    FilterDropdownField(
-                        label = if (lang == AppLanguage.BENGALI) "সাজান" else "Sort",
-                        selectedText = selectedSortText,
-                        isActive = uiState.priceSort != PriceSort.NEWEST,
-                        options = listOf(
-                            sortNewest to PriceSort.NEWEST,
-                            sortLow to PriceSort.PRICE_LOW_HIGH,
-                            sortHigh to PriceSort.PRICE_HIGH_LOW
-                        ),
-                        onSelect = onSortSelect,
-                        modifier = Modifier.weight(0.85f),
-                        testTag = "filter_sort_dropdown"
+                }
+                if (uiState.priceSort != PriceSort.NEWEST) {
+                    InputChip(
+                        selected = true,
+                        onClick = { onSortSelect(PriceSort.NEWEST) },
+                        label = {
+                            Text(
+                                when (uiState.priceSort) {
+                                    PriceSort.PRICE_LOW_HIGH -> if (lang == AppLanguage.BENGALI) "কম দাম" else "Low→High"
+                                    PriceSort.PRICE_HIGH_LOW -> if (lang == AppLanguage.BENGALI) "বেশি দাম" else "High→Low"
+                                    PriceSort.NEWEST -> ""
+                                },
+                                maxLines = 1
+                            )
+                        },
+                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (!showFarmersTab) {
-            if (uiState.filteredProducts.isEmpty()) {
-                EmptyStateView(
-                    emoji = "🌾",
-                    title = if (lang == AppLanguage.BENGALI) "কোনো ফসল পাওয়া যায়নি" else "No crops found",
-                    subtitle = if (lang == AppLanguage.BENGALI)
-                        "অনুগ্রহ করে ফিল্টার পরিবর্তন করে পুনরায় খুঁজুন।"
-                    else
-                        "Try adjusting your search or filters.",
-                    actionText = if (lang == AppLanguage.BENGALI) "ফিল্টার রিসেট করুন" else "Reset Filters",
-                    onAction = onResetFilters
-                )
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 172.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxSize()
+        // Collapsible Structured Dropdowns Panel
+        AnimatedVisibility(visible = filtersExpanded) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(uiState.filteredProducts, key = { it.id }) { prod ->
-                        ProductCard(
-                            product = prod,
-                            categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
-                            language = lang,
-                            onClick = { onProductClick(prod.id) },
-                            onQuickAddToCart = { onQuickAddToCart(prod.id) },
-                            showQuickAdd = !isFarmerRole
+                    // Row 1: বিভাগ & জেলা Dropdowns
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val allDivLabel = if (lang == AppLanguage.BENGALI) "সব বিভাগ" else "All Divisions"
+                        FilterDropdownField(
+                            label = if (lang == AppLanguage.BENGALI) "বিভাগ" else "Division",
+                            selectedText = uiState.selectedDivision ?: allDivLabel,
+                            isActive = uiState.selectedDivision != null,
+                            options = listOf(allDivLabel to null) + divisions.map { it to it },
+                            onSelect = onDivisionSelect,
+                            modifier = Modifier.weight(1f),
+                            testTag = "filter_division_dropdown"
+                        )
+
+                        val allDistLabel = if (lang == AppLanguage.BENGALI) "সব জেলা" else "All Districts"
+                        FilterDropdownField(
+                            label = if (lang == AppLanguage.BENGALI) "জেলা" else "District",
+                            selectedText = uiState.selectedDistrict ?: allDistLabel,
+                            isActive = uiState.selectedDistrict != null,
+                            options = listOf(allDistLabel to null) + districts.map { it to it },
+                            onSelect = onDistrictSelect,
+                            modifier = Modifier.weight(1f),
+                            testTag = "filter_district_dropdown"
                         )
                     }
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        AdBannerSection(
-                            adConfig = uiState.adConfig,
-                            placementTag = "browse_crops",
-                            modifier = Modifier.padding(top = 4.dp)
+
+                    // Row 2: উপজেলা & ইউনিয়ন Dropdowns
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val allUpzLabel = if (lang == AppLanguage.BENGALI) "সব উপজেলা" else "All Upazilas"
+                        FilterDropdownField(
+                            label = if (lang == AppLanguage.BENGALI) "উপজেলা" else "Upazila",
+                            selectedText = uiState.selectedUpazila ?: allUpzLabel,
+                            isActive = uiState.selectedUpazila != null,
+                            enabled = upazilas.isNotEmpty(),
+                            options = listOf(allUpzLabel to null) + upazilas.map { it to it },
+                            onSelect = onUpazilaSelect,
+                            modifier = Modifier.weight(1f),
+                            testTag = "filter_upazila_dropdown"
                         )
+
+                        val allUnionLabel = if (lang == AppLanguage.BENGALI) "সব ইউনিয়ন" else "All Unions"
+                        FilterDropdownField(
+                            label = if (lang == AppLanguage.BENGALI) "ইউনিয়ন" else "Union",
+                            selectedText = uiState.selectedUnion ?: allUnionLabel,
+                            isActive = uiState.selectedUnion != null,
+                            enabled = unions.isNotEmpty(),
+                            options = listOf(allUnionLabel to null) + unions.map { it to it },
+                            onSelect = onUnionSelect,
+                            modifier = Modifier.weight(1f),
+                            testTag = "filter_union_dropdown"
+                        )
+                    }
+
+                    // Row 3 (Crops Tab): ক্যাটাগরি, পাইকারি/খুচরা & দাম অনুযায়ী সাজান Dropdowns
+                    if (!showFarmersTab) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            val allCatLabel = if (lang == AppLanguage.BENGALI) "সব ক্যাটাগরি" else "All Categories"
+                            val selectedCat = activeCategories.firstOrNull { it.id == uiState.selectedCategoryId }
+                            val selectedCatText = if (selectedCat != null) {
+                                val catTitle = if (lang == AppLanguage.BENGALI) selectedCat.nameBn else selectedCat.nameEn
+                                "${selectedCat.emoji} $catTitle"
+                            } else {
+                                allCatLabel
+                            }
+                            FilterDropdownField(
+                                label = if (lang == AppLanguage.BENGALI) "ক্যাটাগরি" else "Category",
+                                selectedText = selectedCatText,
+                                isActive = uiState.selectedCategoryId != null,
+                                options = listOf(allCatLabel to null) + activeCategories.map { cat ->
+                                    val catTitle = if (lang == AppLanguage.BENGALI) cat.nameBn else cat.nameEn
+                                    "${cat.emoji} $catTitle" to cat.id
+                                },
+                                onSelect = onCategorySelect,
+                                modifier = Modifier.weight(1f),
+                                testTag = "filter_category_dropdown"
+                            )
+
+                            val allTypeLabel = if (lang == AppLanguage.BENGALI) "সব ধরন" else "All Types"
+                            val wholesaleLabel = if (lang == AppLanguage.BENGALI) "পাইকারি" else "Wholesale"
+                            val retailLabel = if (lang == AppLanguage.BENGALI) "খুচরা" else "Retail"
+                            val selectedTypeText = when (uiState.wholesaleOnly) {
+                                true -> wholesaleLabel
+                                false -> retailLabel
+                                null -> allTypeLabel
+                            }
+                            FilterDropdownField(
+                                label = if (lang == AppLanguage.BENGALI) "ধরন" else "Sale Type",
+                                selectedText = selectedTypeText,
+                                isActive = uiState.wholesaleOnly != null,
+                                options = listOf(
+                                    allTypeLabel to null,
+                                    wholesaleLabel to true,
+                                    retailLabel to false
+                                ),
+                                onSelect = onWholesaleSelect,
+                                modifier = Modifier.weight(0.85f),
+                                testTag = "filter_wholesale_dropdown"
+                            )
+
+                            val sortNewest = if (lang == AppLanguage.BENGALI) "নতুন" else "Newest"
+                            val sortLow = if (lang == AppLanguage.BENGALI) "কম দাম" else "Low→High"
+                            val sortHigh = if (lang == AppLanguage.BENGALI) "বেশি দাম" else "High→Low"
+                            val selectedSortText = when (uiState.priceSort) {
+                                PriceSort.NEWEST -> sortNewest
+                                PriceSort.PRICE_LOW_HIGH -> sortLow
+                                PriceSort.PRICE_HIGH_LOW -> sortHigh
+                            }
+                            FilterDropdownField(
+                                label = if (lang == AppLanguage.BENGALI) "সাজান" else "Sort",
+                                selectedText = selectedSortText,
+                                isActive = uiState.priceSort != PriceSort.NEWEST,
+                                options = listOf(
+                                    sortNewest to PriceSort.NEWEST,
+                                    sortLow to PriceSort.PRICE_LOW_HIGH,
+                                    sortHigh to PriceSort.PRICE_HIGH_LOW
+                                ),
+                                onSelect = onSortSelect,
+                                modifier = Modifier.weight(0.85f),
+                                testTag = "filter_sort_dropdown"
+                            )
+                        }
                     }
                 }
             }
-        } else {
-            if (uiState.filteredFarmers.isEmpty()) {
-                EmptyStateView(
-                    emoji = "🧑‍🌾",
-                    title = if (lang == AppLanguage.BENGALI) "কোনো কৃষক পাওয়া যায়নি" else "No farmers found",
-                    subtitle = if (lang == AppLanguage.BENGALI)
-                        "অন্য জেলা বা উপজেলা নির্বাচন করে খুঁজুন।"
-                    else
-                        "Try choosing a different district or upazila.",
-                    actionText = if (lang == AppLanguage.BENGALI) "ফিল্টার রিসেট করুন" else "Reset",
-                    onAction = onResetFilters
-                )
-            } else {
-                LazyColumn(
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(uiState.filteredFarmers, key = { it.id }) { farmer ->
-                        val count = uiState.products.count { it.farmerId == farmer.id }
-                        FarmerCard(
-                            farmer = farmer,
-                            productCount = count,
-                            language = lang,
-                            onClick = { onFarmerClick(farmer.id) }
-                        )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val useListLayout = maxWidth < 540.dp
+
+            if (!showFarmersTab) {
+                if (uiState.filteredProducts.isEmpty()) {
+                    when {
+                        uiState.isSyncing -> {
+                            SyncingStateCard(
+                                message = if (lang == AppLanguage.BENGALI)
+                                    "অনলাইন মার্কেট থেকে ফসলের তথ্য লোড হচ্ছে..."
+                                else
+                                    "Loading crops from online market..."
+                            )
+                        }
+                        uiState.products.isEmpty() -> {
+                            EmptyStateView(
+                                emoji = if (!uiState.isOnline) "📡" else "🌾",
+                                title = if (lang == AppLanguage.BENGALI)
+                                    "অনলাইন থেকে ফসল লোড করা যায়নি"
+                                else
+                                    "Could not load crops",
+                                subtitle = uiState.syncError ?: if (lang == AppLanguage.BENGALI)
+                                    "ইন্টারনেট সংযোগ নিশ্চিত করে আবার চেষ্টা করুন।"
+                                else
+                                    "Check your internet connection and reload.",
+                                actionText = if (lang == AppLanguage.BENGALI) "পুনরায় লোড করুন" else "Reload",
+                                onAction = onRefreshSync
+                            )
+                        }
+                        else -> {
+                            EmptyStateView(
+                                emoji = "🌾",
+                                title = if (lang == AppLanguage.BENGALI) "কোনো ফসল পাওয়া যায়নি" else "No crops found",
+                                subtitle = if (lang == AppLanguage.BENGALI)
+                                    "অনুগ্রহ করে ফিল্টার পরিবর্তন করে পুনরায় খুঁজুন।"
+                                else
+                                    "Try adjusting your search or filters.",
+                                actionText = if (lang == AppLanguage.BENGALI) "ফিল্টার রিসেট করুন" else "Reset Filters",
+                                onAction = onResetFilters
+                            )
+                        }
                     }
-                    item {
-                        AdBannerSection(
-                            adConfig = uiState.adConfig,
-                            placementTag = "browse_farmers",
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
+                } else if (useListLayout) {
+                    LazyColumn(
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(uiState.filteredProducts, key = { it.id }) { prod ->
+                            ProductBrowseRowCard(
+                                product = prod,
+                                categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
+                                language = lang,
+                                onClick = { onProductClick(prod.id) },
+                                onQuickAddToCart = { onQuickAddToCart(prod.id) },
+                                showQuickAdd = !isFarmerRole
+                            )
+                        }
+                        item {
+                            AdBannerSection(
+                                adConfig = uiState.adConfig,
+                                placementTag = "browse_crops",
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                } else {
+                    LazyVerticalGrid(
+                        columns = GridCells.Adaptive(minSize = 210.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(uiState.filteredProducts, key = { it.id }) { prod ->
+                            ProductCard(
+                                product = prod,
+                                categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
+                                language = lang,
+                                onClick = { onProductClick(prod.id) },
+                                onQuickAddToCart = { onQuickAddToCart(prod.id) },
+                                showQuickAdd = !isFarmerRole
+                            )
+                        }
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            AdBannerSection(
+                                adConfig = uiState.adConfig,
+                                placementTag = "browse_crops",
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                }
+            } else {
+                if (uiState.filteredFarmers.isEmpty()) {
+                    when {
+                        uiState.isSyncing -> {
+                            SyncingStateCard(
+                                message = if (lang == AppLanguage.BENGALI)
+                                    "অনলাইন থেকে কৃষকদের তালিকা লোড হচ্ছে..."
+                                else
+                                    "Loading farmers from online market..."
+                            )
+                        }
+                        uiState.farmers.isEmpty() -> {
+                            EmptyStateView(
+                                emoji = if (!uiState.isOnline) "📡" else "🧑‍🌾",
+                                title = if (lang == AppLanguage.BENGALI)
+                                    "কৃষকদের তালিকা লোড করা যায়নি"
+                                else
+                                    "Could not load farmers",
+                                subtitle = uiState.syncError ?: if (lang == AppLanguage.BENGALI)
+                                    "ইন্টারনেট সংযোগ নিশ্চিত করে আবার চেষ্টা করুন।"
+                                else
+                                    "Check your internet connection and reload.",
+                                actionText = if (lang == AppLanguage.BENGALI) "পুনরায় লোড করুন" else "Reload",
+                                onAction = onRefreshSync
+                            )
+                        }
+                        else -> {
+                            EmptyStateView(
+                                emoji = "🧑‍🌾",
+                                title = if (lang == AppLanguage.BENGALI) "কোনো কৃষক পাওয়া যায়নি" else "No farmers found",
+                                subtitle = if (lang == AppLanguage.BENGALI)
+                                    "অন্য জেলা বা উপজেলা নির্বাচন করে খুঁজুন।"
+                                else
+                                    "Try choosing a different district or upazila.",
+                                actionText = if (lang == AppLanguage.BENGALI) "ফিল্টার রিসেট করুন" else "Reset",
+                                onAction = onResetFilters
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(uiState.filteredFarmers, key = { it.id }) { farmer ->
+                            val count = uiState.products.count { it.farmerId == farmer.id }
+                            FarmerCard(
+                                farmer = farmer,
+                                productCount = count,
+                                language = lang,
+                                onClick = { onFarmerClick(farmer.id) }
+                            )
+                        }
+                        item {
+                            AdBannerSection(
+                                adConfig = uiState.adConfig,
+                                placementTag = "browse_farmers",
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -536,6 +850,32 @@ fun BrowseScreen(
                 showMapPicker = false
             }
         )
+    }
+}
+
+@Composable
+private fun SyncingStateCard(message: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            CircularProgressIndicator()
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -612,7 +952,7 @@ private fun <T> FilterDropdownField(
             modifier = Modifier.heightIn(max = 320.dp)
         ) {
             options.forEach { (optionLabel, optionValue) ->
-                val isSelected = optionLabel == selectedText
+                val isSelected = optionLabel.equalsBn(selectedText)
                 DropdownMenuItem(
                     text = {
                         Text(
@@ -641,3 +981,4 @@ private fun <T> FilterDropdownField(
         }
     }
 }
+

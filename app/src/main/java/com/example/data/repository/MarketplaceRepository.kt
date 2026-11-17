@@ -47,6 +47,12 @@ class MarketplaceRepository(
     private val _adConfig = MutableStateFlow(AdConfig())
     val adConfig: StateFlow<AdConfig> = _adConfig.asStateFlow()
 
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
+    private val _syncError = MutableStateFlow<String?>(null)
+    val syncError: StateFlow<String?> = _syncError.asStateFlow()
+
     fun observeOrderItems(orderId: String): Flow<List<OrderItemEntity>> =
         db.orderDao().observeOrderItems(orderId)
 
@@ -114,6 +120,10 @@ class MarketplaceRepository(
                 localDb = db,
                 scope = scope,
                 onAdConfigChanged = { _adConfig.value = it },
+                onSyncStateChanged = { syncing, err ->
+                    _isSyncing.value = syncing
+                    _syncError.value = err
+                },
                 onIncomingNotification = onIncomingNotification
             )
         }
@@ -127,9 +137,15 @@ class MarketplaceRepository(
         prefs.setActiveUserId("")
     }
 
-    suspend fun syncNow() {
-        rtdbSync.pullAllFromRest(db, onAdConfigChanged = { _adConfig.value = it })
-        evaluateAccountExpiries()
+    suspend fun syncNow(): Boolean {
+        _isSyncing.value = true
+        val ok = rtdbSync.pullAllFromRest(db, onAdConfigChanged = { _adConfig.value = it })
+        _isSyncing.value = false
+        _syncError.value = if (ok) null else "সার্ভারের সাথে সংযোগ করতে সমস্যা হয়েছে। ইন্টারনেট চালু করে পুনরায় চেষ্টা করুন।"
+        if (ok) {
+            evaluateAccountExpiries()
+        }
+        return ok
     }
 
     suspend fun evaluateAccountExpiries(now: Long = System.currentTimeMillis()) {

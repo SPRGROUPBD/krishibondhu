@@ -265,6 +265,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                     ) {
                         SplashScreen(
                             isAppLoading = uiState.isLoading,
+                            isInitialSyncing = uiState.isSyncing,
                             onSplashComplete = {
                                 navController.navigate(Routes.HOME) {
                                     popUpTo(Routes.SPLASH) { inclusive = true }
@@ -304,7 +305,8 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onNavigateToOrders = { navController.navigate(Routes.ORDERS) },
                             onOrderClick = { oid -> navController.navigate(Routes.orderDetail(oid)) },
                             onOpenCart = { navController.navigate(Routes.CART) },
-                            onOpenAdminDashboard = { navController.navigate(Routes.ADMIN) }
+                            onOpenAdminDashboard = { navController.navigate(Routes.ADMIN) },
+                            onRefreshSync = viewModel::syncNow
                         )
                     }
 
@@ -330,6 +332,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onWholesaleSelect = viewModel::setWholesaleFilter,
                             onSortSelect = viewModel::setPriceSort,
                             onResetFilters = viewModel::resetFilters,
+                            onRefreshSync = viewModel::syncNow,
                             onProductClick = { pid -> navController.navigate(Routes.productDetail(pid)) },
                             onFarmerClick = { fid -> navController.navigate(Routes.farmerProfile(fid)) },
                             onQuickAddToCart = { pid ->
@@ -355,6 +358,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onWholesaleSelect = viewModel::setWholesaleFilter,
                             onSortSelect = viewModel::setPriceSort,
                             onResetFilters = viewModel::resetFilters,
+                            onRefreshSync = viewModel::syncNow,
                             onProductClick = { pid -> navController.navigate(Routes.productDetail(pid)) },
                             onFarmerClick = { fid -> navController.navigate(Routes.farmerProfile(fid)) },
                             onQuickAddToCart = { pid ->

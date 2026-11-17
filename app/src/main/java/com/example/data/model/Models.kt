@@ -199,3 +199,22 @@ fun Double.formatQty(): String {
         "%.1f".format(this)
     }
 }
+
+fun String.normalizeBn(): String {
+    val trimmed = this.trim()
+    if (trimmed.isEmpty()) return ""
+    return java.text.Normalizer.normalize(trimmed, java.text.Normalizer.Form.NFC)
+}
+
+fun String.normalizeBnQuery(): String =
+    normalizeBn().lowercase(java.util.Locale.ENGLISH)
+
+fun String.equalsBn(other: String?): Boolean {
+    if (other == null) return false
+    return this.normalizeBn().equals(other.normalizeBn(), ignoreCase = true)
+}
+
+fun String.containsBn(query: String?): Boolean {
+    if (query.isNullOrBlank()) return true
+    return this.normalizeBnQuery().contains(query.normalizeBnQuery())
+}

@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.*
 import com.example.data.model.*
+import com.example.data.remote.FirebaseRealtimeSyncManager
 import com.example.data.repository.MarketplaceRepository
 import com.example.notifications.KrishiNotificationHelper
 import com.example.util.NetworkMonitor
@@ -13,6 +14,8 @@ import kotlinx.coroutines.launch
 
 data class MarketplaceUiState(
     val isLoading: Boolean = true,
+    val isSyncing: Boolean = false,
+    val syncError: String? = null,
     val isOnline: Boolean = true,
     val activeUser: UserEntity? = null,
     val language: AppLanguage = AppLanguage.BENGALI,
@@ -66,26 +69,36 @@ data class MarketplaceUiState(
 
     val filteredProducts: List<ProductEntity>
         get() {
+            val q = searchQuery.normalizeBn()
+            val div = selectedDivision?.normalizeBn()?.takeIf { it.isNotBlank() }
+            val dist = selectedDistrict?.normalizeBn()?.takeIf { it.isNotBlank() }
+            val upz = selectedUpazila?.normalizeBn()?.takeIf { it.isNotBlank() }
+            val union = selectedUnion?.normalizeBn()?.takeIf { it.isNotBlank() }
+
             val base = products.filter { p ->
-                val matchesQuery = searchQuery.isBlank() ||
-                    p.nameBn.contains(searchQuery, ignoreCase = true) ||
-                    p.nameEn.contains(searchQuery, ignoreCase = true) ||
-                    p.farmerName.contains(searchQuery, ignoreCase = true) ||
-                    p.division.contains(searchQuery, ignoreCase = true) ||
-                    p.district.contains(searchQuery, ignoreCase = true) ||
-                    p.upazila.contains(searchQuery, ignoreCase = true) ||
-                    p.unionName.contains(searchQuery, ignoreCase = true) ||
-                    p.categoryNameBn.contains(searchQuery, ignoreCase = true)
+                val matchesQuery = q.isBlank() ||
+                    p.nameBn.containsBn(q) ||
+                    p.nameEn.containsBn(q) ||
+                    p.descriptionBn.containsBn(q) ||
+                    p.farmerName.containsBn(q) ||
+                    p.division.containsBn(q) ||
+                    p.district.containsBn(q) ||
+                    p.upazila.containsBn(q) ||
+                    p.unionName.containsBn(q) ||
+                    p.village.containsBn(q) ||
+                    p.pickupAddress.containsBn(q) ||
+                    p.categoryNameBn.containsBn(q)
                 val matchesCat = selectedCategoryId == null || p.categoryId == selectedCategoryId
-                val matchesDiv = selectedDivision == null || p.division == selectedDivision
-                val matchesDist = selectedDistrict == null || p.district == selectedDistrict
-                val matchesUpazila = selectedUpazila == null || p.upazila == selectedUpazila
-                val matchesUnion = selectedUnion == null ||
-                    p.unionName.equals(selectedUnion, ignoreCase = true) ||
-                    p.village.contains(selectedUnion, ignoreCase = true) ||
-                    p.pickupAddress.contains(selectedUnion, ignoreCase = true)
+                val matchesDiv = div == null || p.division.equalsBn(div)
+                val matchesDist = dist == null || p.district.equalsBn(dist)
+                val matchesUpazila = upz == null || p.upazila.equalsBn(upz)
+                val matchesUnion = union == null ||
+                    p.unionName.equalsBn(union) ||
+                    p.village.containsBn(union) ||
+                    p.pickupAddress.containsBn(union)
                 val matchesWholesale = wholesaleOnly == null || p.isWholesale == wholesaleOnly
-                matchesQuery && matchesCat && matchesDiv && matchesDist && matchesUpazila && matchesUnion && matchesWholesale && p.status == "ACTIVE"
+                matchesQuery && matchesCat && matchesDiv && matchesDist && matchesUpazila && matchesUnion && matchesWholesale &&
+                    p.status.equals("ACTIVE", ignoreCase = true)
             }
             return when (priceSort) {
                 PriceSort.NEWEST -> base.sortedByDescending { it.createdAt }
@@ -95,19 +108,30 @@ data class MarketplaceUiState(
         }
 
     val filteredFarmers: List<UserEntity>
-        get() = farmers.filter { f ->
-            val matchesQuery = searchQuery.isBlank() ||
-                f.fullName.contains(searchQuery, ignoreCase = true) ||
-                f.division.contains(searchQuery, ignoreCase = true) ||
-                f.district.contains(searchQuery, ignoreCase = true) ||
-                f.upazila.contains(searchQuery, ignoreCase = true) ||
-                f.unionName.contains(searchQuery, ignoreCase = true) ||
-                f.farmBio.contains(searchQuery, ignoreCase = true)
-            val matchesDiv = selectedDivision == null || f.division == selectedDivision
-            val matchesDist = selectedDistrict == null || f.district == selectedDistrict
-            val matchesUpazila = selectedUpazila == null || f.upazila == selectedUpazila
-            val matchesUnion = selectedUnion == null || f.unionName.equals(selectedUnion, ignoreCase = true)
-            matchesQuery && matchesDiv && matchesDist && matchesUpazila && matchesUnion
+        get() {
+            val q = searchQuery.normalizeBn()
+            val div = selectedDivision?.normalizeBn()?.takeIf { it.isNotBlank() }
+            val dist = selectedDistrict?.normalizeBn()?.takeIf { it.isNotBlank() }
+            val upz = selectedUpazila?.normalizeBn()?.takeIf { it.isNotBlank() }
+            val union = selectedUnion?.normalizeBn()?.takeIf { it.isNotBlank() }
+
+            return farmers.filter { f ->
+                val matchesQuery = q.isBlank() ||
+                    f.fullName.containsBn(q) ||
+                    f.division.containsBn(q) ||
+                    f.district.containsBn(q) ||
+                    f.upazila.containsBn(q) ||
+                    f.unionName.containsBn(q) ||
+                    f.village.containsBn(q) ||
+                    f.farmBio.containsBn(q)
+                val matchesDiv = div == null || f.division.equalsBn(div)
+                val matchesDist = dist == null || f.district.equalsBn(dist)
+                val matchesUpazila = upz == null || f.upazila.equalsBn(upz)
+                val matchesUnion = union == null ||
+                    f.unionName.equalsBn(union) ||
+                    f.village.containsBn(union)
+                matchesQuery && matchesDiv && matchesDist && matchesUpazila && matchesUnion
+            }
         }
 
     val unreadNotificationCount: Int
@@ -169,7 +193,11 @@ data class MarketplaceUiState(
 class KrishiBondhuViewModel(application: Application) : AndroidViewModel(application) {
     private val db = KrishiBondhuDatabase.getInstance(application)
     private val prefs = UserPreferences(application)
-    private val repo = MarketplaceRepository(db, prefs)
+    private val repo = MarketplaceRepository(
+        db = db,
+        prefs = prefs,
+        rtdbSync = FirebaseRealtimeSyncManager(enableRemoteSync = true, appContext = application)
+    )
 
     private val filterState = MutableStateFlow(FilterParams())
     private val toastFlow = MutableStateFlow<String?>(null)
@@ -187,32 +215,6 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     )
 
     private val launchTimestamp = System.currentTimeMillis()
-
-    init {
-        KrishiNotificationHelper.ensureChannel(application)
-        viewModelScope.launch {
-            repo.initializeCatalogsAndSync(viewModelScope) { incomingNotif ->
-                val current = uiState.value.activeUser
-                val matchesActive = current != null && current.role != UserRole.ADMIN.name && (
-                    incomingNotif.userId == current.id ||
-                        (incomingNotif.userId == "ALL" && (
-                            incomingNotif.targetRole.isBlank() ||
-                                incomingNotif.targetRole == "ALL" ||
-                                incomingNotif.targetRole == current.role
-                            ))
-                    )
-                val isRecent = incomingNotif.createdAt >= launchTimestamp - 30_000L
-                if (matchesActive && isRecent && notifiedIds.add(incomingNotif.id)) {
-                    KrishiNotificationHelper.showLocalNotification(
-                        context = getApplication(),
-                        title = incomingNotif.titleBn,
-                        message = incomingNotif.messageBn,
-                        notificationKey = incomingNotif.id
-                    )
-                }
-            }
-        }
-    }
 
     private val coreDataFlow = combine(
         repo.sessionPrefs,
@@ -234,14 +236,32 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         CommerceBundle(cart, orders, reviews, complaints, notifs)
     }
 
+    private val syncExtrasFlow = combine(
+        NetworkMonitor.observeIsOnline(application),
+        repo.adConfig,
+        repo.isSyncing,
+        repo.syncError
+    ) { online, adCfg, syncing, syncErr ->
+        SyncStatusBundle(online, adCfg, syncing, syncErr)
+    }
+
     private val extrasFlow = combine(
         repo.auditLogs,
         repo.activationPayments,
         repo.paymentSettings,
         toastFlow,
-        combine(NetworkMonitor.observeIsOnline(application), repo.adConfig) { online, adCfg -> online to adCfg }
-    ) { audits, actPayments, paySettings, toast, (online, adCfg) ->
-        ExtrasBundle(audits, actPayments, paySettings, toast, online, adCfg)
+        syncExtrasFlow
+    ) { audits, actPayments, paySettings, toast, syncBundle ->
+        ExtrasBundle(
+            audits = audits,
+            activationPayments = actPayments,
+            paymentSettings = paySettings,
+            toast = toast,
+            online = syncBundle.online,
+            adConfig = syncBundle.adConfig,
+            isSyncing = syncBundle.isSyncing,
+            syncError = syncBundle.syncError
+        )
     }
 
     val uiState: StateFlow<MarketplaceUiState> = combine(
@@ -257,6 +277,8 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         }
         MarketplaceUiState(
             isLoading = core.categories.isEmpty(),
+            isSyncing = extras.isSyncing,
+            syncError = extras.syncError,
             isOnline = extras.online,
             activeUser = activeUser,
             language = core.session.language,
@@ -291,6 +313,43 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         started = SharingStarted.Eagerly,
         initialValue = MarketplaceUiState(isLoading = true)
     )
+
+    init {
+        KrishiNotificationHelper.ensureChannel(application)
+        viewModelScope.launch {
+            repo.initializeCatalogsAndSync(viewModelScope) { incomingNotif ->
+                val current = uiState.value.activeUser
+                val matchesActive = current != null && current.role != UserRole.ADMIN.name && (
+                    incomingNotif.userId == current.id ||
+                        (incomingNotif.userId == "ALL" && (
+                            incomingNotif.targetRole.isBlank() ||
+                                incomingNotif.targetRole == "ALL" ||
+                                incomingNotif.targetRole == current.role
+                            ))
+                    )
+                val isRecent = incomingNotif.createdAt >= launchTimestamp - 30_000L
+                if (matchesActive && isRecent && notifiedIds.add(incomingNotif.id)) {
+                    KrishiNotificationHelper.showLocalNotification(
+                        context = getApplication(),
+                        title = incomingNotif.titleBn,
+                        message = incomingNotif.messageBn,
+                        notificationKey = incomingNotif.id
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
+            var wasOnline: Boolean? = null
+            NetworkMonitor.observeIsOnline(application).collect { online ->
+                val needsReconnectSync = wasOnline == false ||
+                    (wasOnline == true && !repo.isSyncing.value && uiState.value.products.isEmpty())
+                if (online && needsReconnectSync) {
+                    repo.syncNow()
+                }
+                wasOnline = online
+            }
+        }
+    }
 
     fun observeOrderItems(orderId: String): Flow<List<OrderItemEntity>> =
         repo.observeOrderItems(orderId)
@@ -395,7 +454,12 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
 
     fun syncNow() {
         viewModelScope.launch {
-            repo.syncNow()
+            val ok = repo.syncNow()
+            if (!ok) {
+                showToast("সার্ভার থেকে তথ্য আনা যায়নি। ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।")
+            } else {
+                showToast("সর্বশেষ তথ্য আপডেট সম্পন্ন হয়েছে ✓")
+            }
         }
     }
 
@@ -806,12 +870,21 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         val complaints: List<ComplaintEntity>,
         val notifications: List<NotificationEntity>
     )
+    private data class SyncStatusBundle(
+        val online: Boolean,
+        val adConfig: AdConfig,
+        val isSyncing: Boolean,
+        val syncError: String?
+    )
+
     private data class ExtrasBundle(
         val audits: List<AuditLogEntity>,
         val activationPayments: List<ActivationPaymentEntity>,
         val paymentSettings: PaymentSettingsEntity,
         val toast: String?,
         val online: Boolean,
-        val adConfig: AdConfig
+        val adConfig: AdConfig,
+        val isSyncing: Boolean,
+        val syncError: String?
     )
 }

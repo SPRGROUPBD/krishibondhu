@@ -60,7 +60,8 @@ fun HomeScreen(
     onNavigateToOrders: () -> Unit = {},
     onOrderClick: (String) -> Unit = {},
     onOpenCart: () -> Unit = {},
-    onOpenAdminDashboard: () -> Unit = {}
+    onOpenAdminDashboard: () -> Unit = {},
+    onRefreshSync: () -> Unit = {}
 ) {
     if (uiState.isLoading) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -95,7 +96,8 @@ fun HomeScreen(
         onStartSellingTap = onStartSellingTap,
         onNavigateToOrders = onNavigateToOrders,
         onOpenCart = onOpenCart,
-        onOpenAdminDashboard = onOpenAdminDashboard
+        onOpenAdminDashboard = onOpenAdminDashboard,
+        onRefreshSync = onRefreshSync
     )
 }
 
@@ -518,7 +520,8 @@ private fun MarketplaceHomeContent(
     onStartSellingTap: () -> Unit,
     onNavigateToOrders: () -> Unit,
     onOpenCart: () -> Unit,
-    onOpenAdminDashboard: () -> Unit
+    onOpenAdminDashboard: () -> Unit,
+    onRefreshSync: () -> Unit
 ) {
     val lang = uiState.language
     val activeUser = uiState.activeUser
@@ -832,19 +835,56 @@ private fun MarketplaceHomeContent(
             }
         }
 
-        // Empty state when no products have been published yet
+        // Empty / syncing state when no products have been loaded yet
         if (activeProducts.isEmpty()) {
             item {
-                if (isBuyer) {
+                if (uiState.isSyncing) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        shape = RoundedCornerShape(18.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                            Text(
+                                text = if (lang == AppLanguage.BENGALI)
+                                    "সার্ভার থেকে ফসল ও কৃষকের তথ্য আনা হচ্ছে..."
+                                else
+                                    "Loading live crops and farmers...",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                } else if (uiState.syncError != null || !uiState.isOnline) {
+                    EmptyStateView(
+                        emoji = "📡",
+                        title = if (lang == AppLanguage.BENGALI) "সার্ভার থেকে তথ্য লোড হয়নি" else "Could not load server data",
+                        subtitle = uiState.syncError ?: if (lang == AppLanguage.BENGALI)
+                            "ইন্টারনেট সংযোগ চালু করে পুনরায় লোড করুন।"
+                        else
+                            "Turn on internet and tap Reload.",
+                        actionText = if (lang == AppLanguage.BENGALI) "পুনরায় লোড করুন" else "Reload Data",
+                        onAction = onRefreshSync
+                    )
+                } else if (isBuyer) {
                     EmptyStateView(
                         emoji = "🌾",
                         title = if (lang == AppLanguage.BENGALI) "এখনো কোনো ফসল প্রকাশ করা হয়নি" else "No crops listed yet",
                         subtitle = if (lang == AppLanguage.BENGALI)
-                            "কৃষকরা ফসল যুক্ত করলে এখানে সাথে সাথে দেখাবে। আপনি যাচাইকৃত কৃষক তালিকা দেখতে পারেন।"
+                            "কৃষকরা ফসল যুক্ত করলে এখানে সাথে সাথে দেখাবে। আপনি যাচাইকৃত কৃষক তালিকা দেখতে পারেন বা রিফ্রেশ করুন।"
                         else
                             "Fresh crops from farmers will appear here shortly.",
-                        actionText = if (lang == AppLanguage.BENGALI) "কৃষক খুঁজুন" else "Find Farmers",
-                        onAction = onFindFarmersTap
+                        actionText = if (lang == AppLanguage.BENGALI) "রিফ্রেশ করুন" else "Refresh",
+                        onAction = onRefreshSync
                     )
                 } else {
                     EmptyStateView(

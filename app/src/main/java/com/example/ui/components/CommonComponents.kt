@@ -433,6 +433,193 @@ fun ProductCard(
 }
 
 @Composable
+fun ProductBrowseRowCard(
+    product: ProductEntity,
+    categoryEmoji: String,
+    language: AppLanguage,
+    onClick: () -> Unit,
+    onQuickAddToCart: () -> Unit,
+    modifier: Modifier = Modifier,
+    showQuickAdd: Boolean = true
+) {
+    val locationLine = listOf(product.unionName, product.upazila, product.district)
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .joinToString(", ")
+    val kgTotal = (product.availableQuantity * ProductUnit.MON_TO_KG).formatQty()
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("product_card_${product.id}")
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.55f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(104.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            when (product.categoryId) {
+                                "cat_paddy", "cat_rice", "cat_wheat", "cat_maize" -> listOf(Color(0xFFFEF3C7), Color(0xFFFDE68A))
+                                "cat_tomato", "cat_chili", "cat_mango", "cat_lychee" -> listOf(Color(0xFFFFEDD5), Color(0xFFFED7AA))
+                                "cat_fish", "cat_milk" -> listOf(Color(0xFFE0F2FE), Color(0xFFBAE6FD))
+                                else -> listOf(LightGreen, MintSurface)
+                            }
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                val imageModel = MediaCaptureHelper.imageModelFromUri(product.imageUri)
+                if (imageModel != null) {
+                    AsyncImage(
+                        model = imageModel,
+                        contentDescription = product.nameBn,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(text = categoryEmoji, fontSize = 38.sp)
+                }
+                Surface(
+                    color = if (product.isWholesale) DarkGreen else PrimaryGreen,
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                ) {
+                    Text(
+                        text = if (product.isWholesale) "পাইকারি" else "খুচরা",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = if (language == AppLanguage.BENGALI) product.nameBn else product.nameEn,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (product.farmerVerified) {
+                        Icon(
+                            imageVector = Icons.Filled.Verified,
+                            contentDescription = "যাচাইকৃত কৃষক",
+                            tint = PrimaryGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+
+                if (product.farmerName.isNotBlank()) {
+                    Text(
+                        text = "কৃষক: ${product.farmerName}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                if (locationLine.isNotBlank()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.LocationOn,
+                            contentDescription = null,
+                            tint = PrimaryGreen,
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = locationLine,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "${product.pricePerUnit.formatBdt()}/${product.unit}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = if (language == AppLanguage.BENGALI)
+                                "মজুত: ${product.availableQuantity.formatQty()} ${product.unit} ($kgTotal কেজি)"
+                            else
+                                "Stock: ${product.availableQuantity.formatQty()} ${product.unit} ($kgTotal kg)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (showQuickAdd) {
+                        FilledTonalButton(
+                            onClick = onQuickAddToCart,
+                            enabled = product.availableQuantity > 0,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .heightIn(min = 40.dp)
+                                .testTag("quick_add_${product.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.AddShoppingCart,
+                                contentDescription = "কার্টে যোগ করুন",
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (language == AppLanguage.BENGALI) "কার্ট" else "Add",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun UserAvatar(
     imageUri: String,
     role: String,
