@@ -391,7 +391,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             AdminDashboardScreen(
                                 uiState = uiState,
                                 onBack = { navController.popBackStack() },
-                                onVerifyFarmer = viewModel::adminVerifyFarmer,
+                                onVerifyUser = viewModel::adminVerifyUser,
                                 onSendNotification = viewModel::adminSendNotification,
                                 onAddCategory = viewModel::adminAddCategory,
                                 onAddLocation = viewModel::adminAddLocation,

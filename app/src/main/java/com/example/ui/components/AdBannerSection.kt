@@ -1,6 +1,12 @@
 package com.example.ui.components
 
+import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Color as AndroidColor
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,6 +16,7 @@ import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,19 +48,38 @@ fun AdBannerSection(
     placementTag: String = "banner"
 ) {
     if (!adConfig.adsEnabled) return
-    val showSponsor = adConfig.sponsorEnabled && adConfig.sponsorTitle.isNotBlank()
-    val showAdMob = adConfig.androidAdsEnabled
-    if (!showSponsor && !showAdMob) return
 
     val context = LocalContext.current
-    val resolvedUnitId = adConfig.androidBannerId.trim()
+    val priority = adConfig.mobileAdNetworkPriority.trim().ifBlank { "ALL" }
+    fun allows(networkKey: String): Boolean =
+        priority.equals("ALL", ignoreCase = true) || priority.equals(networkKey, ignoreCase = true)
+
+    val resolvedAdMobUnit = adConfig.androidBannerId.trim()
         .ifBlank { stringResource(id = R.string.admob_banner_unit_id) }
+
+    val webNetworkAd = remember(adConfig, placementTag, priority) {
+        buildMobileNetworkHtmlPayload(adConfig, placementTag, priority)
+    }
+    val showAdMob = adConfig.androidAdsEnabled &&
+        resolvedAdMobUnit.isNotBlank() &&
+        allows("ADMOB") &&
+        (AdMonetizationManager.isTestEnvironment() || AdMonetizationManager.isPlayServicesAvailable(context))
+    val showMobileWebAd = adConfig.mobileWebAdsEnabled && webNetworkAd != null
+    val showSponsor = adConfig.sponsorEnabled &&
+        adConfig.sponsorTitle.isNotBlank() &&
+        (allows("SPONSOR") || (!showAdMob && !showMobileWebAd))
+
+    val directLink = adConfig.mobileDirectLinkUrl.trim()
+        .takeIf { it.startsWith("https://") || it.startsWith("http://") }
+
+    if (!showSponsor && !showAdMob && !showMobileWebAd && directLink == null) return
 
     Column(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        if (showSponsor) {
+        // 1. Direct Agricultural Sponsor & Smart Direct Link Card
+        if (showSponsor || directLink != null) {
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -98,7 +124,7 @@ fun AdBannerSection(
                         }
                     }
 
-                    if (adConfig.sponsorImageUrl.isNotBlank()) {
+                    if (showSponsor && adConfig.sponsorImageUrl.isNotBlank()) {
                         AsyncImage(
                             model = adConfig.sponsorImageUrl,
                             contentDescription = adConfig.sponsorTitle,
@@ -110,26 +136,29 @@ fun AdBannerSection(
                         )
                     }
 
-                    Text(
-                        text = adConfig.sponsorTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-
-                    if (adConfig.sponsorSubtitle.isNotBlank()) {
+                    if (showSponsor) {
                         Text(
-                            text = adConfig.sponsorSubtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = adConfig.sponsorTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
+                        if (adConfig.sponsorSubtitle.isNotBlank()) {
+                            Text(
+                                text = adConfig.sponsorSubtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
 
                     val targetUrl = adConfig.sponsorTargetUrl.trim()
-                    if (targetUrl.startsWith("https://") || targetUrl.startsWith("http://")) {
+                        .takeIf { it.startsWith("https://") || it.startsWith("http://") }
+                        ?: directLink
+                    if (targetUrl != null) {
                         OutlinedButton(
                             onClick = {
                                 runCatching {
@@ -151,7 +180,8 @@ fun AdBannerSection(
             }
         }
 
-        if (showAdMob && resolvedUnitId.isNotBlank()) {
+        // 2. Multi-Network Mobile WebView Ad Bridge (Adsterra, Monetag, AdSense, Custom HTML5 / Unity / AppLovin Web)
+        webNetworkAd?.takeIf { adConfig.mobileWebAdsEnabled }?.let { resolvedWebAd ->
             Surface(
                 shape = RoundedCornerShape(14.dp),
                 color = MaterialTheme.colorScheme.surface,
@@ -166,7 +196,61 @@ fun AdBannerSection(
                 ) {
                     if (adConfig.showAdsLabel) {
                         Text(
-                            text = "Sponsored Ad • AdMob",
+                            text = "Sponsored Ad • ${resolvedWebAd.networkLabel}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                    if (AdMonetizationManager.isTestEnvironment()) {
+                        Surface(
+                            color = LightGreen,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(60.dp)
+                                .testTag("mobile_multi_ad_$placementTag")
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "${resolvedWebAd.networkLabel} ($placementTag)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = DarkGreen
+                                )
+                            }
+                        }
+                    } else {
+                        key(resolvedWebAd.html) {
+                            SandboxedAdWebView(
+                                htmlContent = resolvedWebAd.html,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(72.dp)
+                                    .testTag("mobile_multi_ad_$placementTag")
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Google AdMob Native Banner (+ AdMob Mediation Networks: Meta, Unity, AppLovin, Start.io)
+        if (showAdMob) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (adConfig.showAdsLabel) {
+                        Text(
+                            text = "Sponsored Ad • AdMob & Mediation",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -190,12 +274,12 @@ fun AdBannerSection(
                             }
                         }
                     } else {
-                        key(resolvedUnitId) {
+                        key(resolvedAdMobUnit) {
                             AndroidView(
                                 factory = { ctx ->
                                     AdView(ctx).apply {
                                         setAdSize(AdSize.BANNER)
-                                        adUnitId = resolvedUnitId
+                                        adUnitId = resolvedAdMobUnit
                                         loadAd(AdRequest.Builder().build())
                                     }
                                 },
@@ -210,4 +294,135 @@ fun AdBannerSection(
             }
         }
     }
+}
+
+private data class MobileWebAdPayload(
+    val networkLabel: String,
+    val html: String
+)
+
+private fun isSafeHttpsOrHttp(url: String): Boolean {
+    val t = url.trim()
+    return t.startsWith("https://") || t.startsWith("http://")
+}
+
+private fun wrapHtmlDocument(bodyHtml: String): String = """
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+        <style>
+          html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+          * { max-width: 100%; box-sizing: border-box; }
+        </style>
+      </head>
+      <body>$bodyHtml</body>
+    </html>
+""".trimIndent()
+
+private fun buildMobileNetworkHtmlPayload(
+    cfg: AdConfig,
+    placementTag: String,
+    priority: String
+): MobileWebAdPayload? {
+    fun allows(networkKey: String): Boolean =
+        priority.equals("ALL", ignoreCase = true) || priority.equals(networkKey, ignoreCase = true)
+
+    val customMobile = cfg.mobileCustomAdHtml.trim()
+    if (customMobile.isNotEmpty() && (allows("CUSTOM") || allows("ALL"))) {
+        return MobileWebAdPayload(
+            networkLabel = cfg.customAdName.ifBlank { "Mobile Ad Network" },
+            html = wrapHtmlDocument(customMobile)
+        )
+    }
+
+    val adsterraUrl = cfg.adsterraScriptUrl.trim()
+    val adsterraKey = cfg.adsterraBannerKey.trim()
+    if (cfg.adsterraEnabled && allows("ADSTERRA") && isSafeHttpsOrHttp(adsterraUrl) && adsterraKey.isNotEmpty()) {
+        val escapedKey = adsterraKey.replace("\"", "").replace("'", "")
+        val snippet = """
+            <script type="text/javascript">
+              atOptions = { 'key' : '$escapedKey', 'format' : 'iframe', 'height' : 50, 'width' : 320, 'params' : {} };
+            </script>
+            <script type="text/javascript" src="$adsterraUrl"></script>
+        """.trimIndent()
+        return MobileWebAdPayload("Adsterra Network", wrapHtmlDocument(snippet))
+    }
+
+    val monetagUrl = cfg.monetagScriptUrl.trim()
+    val monetagZone = cfg.monetagZoneId.trim()
+    if (cfg.monetagEnabled && allows("MONETAG") && (isSafeHttpsOrHttp(monetagUrl) || monetagZone.isNotEmpty())) {
+        val src = if (isSafeHttpsOrHttp(monetagUrl)) monetagUrl else "https://alwingulla.com/88/tag.min.js"
+        val escapedZone = monetagZone.replace("\"", "")
+        val snippet = """<script src="$src" data-zone="$escapedZone" async data-cfasync="false"></script>"""
+        return MobileWebAdPayload("Monetag / PropellerAds", wrapHtmlDocument(snippet))
+    }
+
+    val adsenseClient = cfg.adsenseClient.trim()
+    val adsenseSlot = when (placementTag) {
+        "home_banner" -> cfg.adsenseTopSlot.trim().ifBlank { cfg.adsenseFeedSlot.trim() }
+        "browse_feed" -> cfg.adsenseFeedSlot.trim().ifBlank { cfg.adsenseTopSlot.trim() }
+        else -> cfg.adsenseFooterSlot.trim().ifBlank { cfg.adsenseFeedSlot.trim() }
+    }
+    if (cfg.adsenseEnabled && allows("ADSENSE") && adsenseClient.startsWith("ca-pub-") && adsenseSlot.isNotEmpty()) {
+        val snippet = """
+            <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=$adsenseClient" crossorigin="anonymous"></script>
+            <ins class="adsbygoogle" style="display:inline-block;width:320px;height:50px" data-ad-client="$adsenseClient" data-ad-slot="$adsenseSlot"></ins>
+            <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+        """.trimIndent()
+        return MobileWebAdPayload("Google AdSense", wrapHtmlDocument(snippet))
+    }
+
+    val sharedCustom = when (placementTag) {
+        "home_banner" -> cfg.customTopHtml.trim()
+        "browse_feed" -> cfg.customFeedHtml.trim().ifBlank { cfg.customTopHtml.trim() }
+        else -> cfg.customFooterHtml.trim().ifBlank { cfg.customTopHtml.trim() }
+    }
+    if (cfg.customAdEnabled && allows("CUSTOM") && sharedCustom.isNotEmpty()) {
+        return MobileWebAdPayload(
+            networkLabel = cfg.customAdName.ifBlank { "Custom Ad Network" },
+            html = wrapHtmlDocument(sharedCustom)
+        )
+    }
+
+    return null
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun SandboxedAdWebView(
+    htmlContent: String,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    AndroidView(
+        modifier = modifier,
+        factory = { ctx ->
+            WebView(ctx).apply {
+                setBackgroundColor(AndroidColor.TRANSPARENT)
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    allowFileAccess = false
+                    allowContentAccess = false
+                    mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    loadWithOverviewMode = true
+                    useWideViewPort = true
+                }
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        val url = request?.url?.toString() ?: return false
+                        if (isSafeHttpsOrHttp(url)) {
+                            runCatching {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
+                            }
+                            return true
+                        }
+                        return true
+                    }
+                }
+                loadDataWithBaseURL("https://krishibondhu.bd", htmlContent, "text/html", "utf-8", null)
+            }
+        }
+    )
 }

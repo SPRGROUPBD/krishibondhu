@@ -472,6 +472,10 @@ class ExampleRobolectricTest {
             adsEnabled = true,
             androidAdsEnabled = true,
             androidBannerId = "ca-app-pub-1234567890123456/1111111111",
+            mobileWebAdsEnabled = true,
+            mobileAdNetworkPriority = "ADSTERRA",
+            mobileCustomAdHtml = "<div id='unity-banner'>Ad</div>",
+            mobileDirectLinkUrl = "https://example.com/smartlink",
             adsenseEnabled = true,
             adsenseClient = "ca-pub-1234567890123456",
             adsterraEnabled = true,
@@ -484,12 +488,99 @@ class ExampleRobolectricTest {
         val allowed = repo.adminSaveAdConfig(admin, updatedConfig)
         assertTrue(allowed.isSuccess)
         assertEquals("ca-app-pub-1234567890123456/1111111111", repo.adConfig.value.androidBannerId)
+        assertTrue(repo.adConfig.value.mobileWebAdsEnabled)
+        assertEquals("ADSTERRA", repo.adConfig.value.mobileAdNetworkPriority)
+        assertEquals("<div id='unity-banner'>Ad</div>", repo.adConfig.value.mobileCustomAdHtml)
+        assertEquals("https://example.com/smartlink", repo.adConfig.value.mobileDirectLinkUrl)
         assertTrue(repo.adConfig.value.adsenseEnabled)
         assertTrue(repo.adConfig.value.adsterraEnabled)
         assertTrue(repo.adConfig.value.monetagEnabled)
 
         val logs = repo.auditLogs.first()
         assertTrue(logs.any { it.actionBn == "বিজ্ঞাপন ও মনিটাইজেশন আপডেট" })
+    }
+
+    @Test
+    fun bothFarmerAndBuyerStartPendingAndAdminCanVerifyBoth() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val cat = repo.categories.first().first()
+
+        val farmer = repo.registerUser(
+            fullName = "যাচাই কৃষক",
+            phone = "01777000001",
+            rawPassword = "pass1234",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "কুমারখালী",
+            unionName = "",
+            village = "",
+            nidLastFour = "1234",
+            farmBio = "ধান"
+        ).getOrThrow()
+
+        val buyer = repo.registerUser(
+            fullName = "যাচাই ক্রেতা",
+            phone = "01777000002",
+            rawPassword = "pass1234",
+            role = UserRole.BUYER,
+            division = "ঢাকা",
+            district = "ঢাকা",
+            upazila = "সাভার",
+            unionName = "",
+            village = "",
+            nidLastFour = "5678",
+            farmBio = ""
+        ).getOrThrow()
+
+        // Both start PENDING with mobile marked directly verified (no OTP)
+        assertEquals("PENDING", farmer.verificationStatus)
+        assertEquals("PENDING", buyer.verificationStatus)
+        assertTrue(farmer.isMobileVerified)
+        assertTrue(buyer.isMobileVerified)
+
+        val prod = repo.createFarmerProduct(
+            farmer = farmer,
+            category = cat,
+            nameBn = "নতুন ধান",
+            descriptionBn = "টাটকা ধান",
+            imageUri = "",
+            quantity = 10.0,
+            unit = "কেজি",
+            pricePerUnit = 45.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        ).getOrThrow()
+        assertFalse(prod.farmerVerified)
+
+        // Non-admin cannot verify
+        assertTrue(repo.adminVerifyUser(buyer, farmer.id, true).isFailure)
+
+        // Admin approves buyer
+        assertTrue(repo.adminVerifyUser(admin, buyer.id, true).isSuccess)
+        val verifiedBuyer = db.userDao().getUserById(buyer.id)!!
+        assertEquals("VERIFIED", verifiedBuyer.verificationStatus)
+
+        // Admin rejects then approves farmer
+        assertTrue(repo.adminVerifyUser(admin, farmer.id, false).isSuccess)
+        assertEquals("REJECTED", db.userDao().getUserById(farmer.id)!!.verificationStatus)
+        assertTrue(repo.adminVerifyUser(admin, farmer.id, true).isSuccess)
+        assertEquals("VERIFIED", db.userDao().getUserById(farmer.id)!!.verificationStatus)
+        assertTrue(db.productDao().getProductById(prod.id)!!.farmerVerified)
+
+        val notifications = repo.notifications.first()
+        assertTrue(notifications.any { it.userId == buyer.id && it.type == "VERIFICATION" && it.targetRole == "BUYER" })
+        assertTrue(notifications.any { it.userId == farmer.id && it.type == "VERIFICATION" && it.targetRole == "FARMER" })
+
+        val logs = repo.auditLogs.first()
+        assertTrue(logs.any { it.actionBn == "ক্রেতা যাচাইকরণ (VERIFIED)" })
+        assertTrue(logs.any { it.actionBn == "কৃষক যাচাইকরণ (VERIFIED)" })
     }
 
     @Test

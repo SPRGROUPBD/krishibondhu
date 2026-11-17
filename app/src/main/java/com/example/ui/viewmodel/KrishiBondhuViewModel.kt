@@ -111,6 +111,7 @@ data class MarketplaceUiState(
             val totalFarmers = farmers.size
             val verifiedFarmers = farmers.count { it.verificationStatus == "VERIFIED" }
             val totalBuyers = buyers.size
+            val verifiedBuyers = buyers.count { it.verificationStatus == "VERIFIED" }
             val activeProds = products.count { it.status == "ACTIVE" }
             val dayAgo = System.currentTimeMillis() - 86_400_000L
             val todaysOrders = orders.count { it.createdAt >= dayAgo }
@@ -125,6 +126,7 @@ data class MarketplaceUiState(
                 totalFarmers = totalFarmers,
                 verifiedFarmers = verifiedFarmers,
                 totalBuyers = totalBuyers,
+                verifiedBuyers = verifiedBuyers,
                 activeProducts = activeProds,
                 todaysOrders = todaysOrders,
                 completedOrders = completedOrders,
@@ -474,11 +476,15 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun adminVerifyFarmer(farmerId: String, approved: Boolean) {
+        adminVerifyUser(farmerId, approved)
+    }
+
+    fun adminVerifyUser(userId: String, approved: Boolean) {
         val admin = uiState.value.activeUser ?: return
         if (admin.role != UserRole.ADMIN.name) return
         viewModelScope.launch {
-            repo.adminVerifyFarmer(admin, farmerId, approved)
-            showToast(if (approved) "কৃষক যাচাই সম্পন্ন হয়েছে" else "কৃষকের আবেদন বাতিল হয়েছে")
+            repo.adminVerifyUser(admin, userId, approved)
+            showToast(if (approved) "অ্যাকাউন্ট যাচাই সম্পন্ন হয়েছে ✓" else "যাচাই আবেদন প্রত্যাখ্যান করা হয়েছে")
         }
     }
 

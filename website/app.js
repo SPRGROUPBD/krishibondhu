@@ -49,6 +49,7 @@ const state = {
   },
   farmerTab: "orders",
   adminTab: "overview",
+  adminUserFilter: "ALL",
   infoTab: "about",
   adConfig: { ...DEFAULT_AD_CONFIG }
 };
@@ -567,7 +568,7 @@ async function registerUser(form) {
     village: String(form.village || "").trim(),
     farmBio: String(form.farmBio || "").trim(),
     nidMasked: nidLast4 ? `NID-****-${nidLast4.slice(-4)}` : "",
-    verificationStatus: role === "FARMER" ? "PENDING" : "VERIFIED",
+    verificationStatus: "PENDING",
     isMobileVerified: true,
     rating: 5.0,
     reviewCount: 0,
@@ -592,7 +593,7 @@ async function registerUser(form) {
   await rtdbPush(`users/${uid}`, user);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
-  showToast(`নিবন্ধন সফল হয়েছে! স্বাগতম, ${user.fullName}`, "success");
+  showToast(`নিবন্ধন সফল হয়েছে! স্বাগতম, ${user.fullName} (অ্যাডমিন যাচাই অপেক্ষমাণ)`, "success");
   navigate(role === "FARMER" ? "farmer-dashboard" : "home");
   return true;
 }
@@ -1022,30 +1023,39 @@ async function submitComplaint(orderId, subjectBn, descriptionBn) {
   renderCurrentView();
 }
 
-async function adminVerifyFarmer(farmerId, approved) {
+async function adminVerifyUser(userId, approved) {
   const admin = getActiveUser();
   if (!admin || admin.role !== "ADMIN") return;
-  const farmer = state.users.find((u) => u.id === farmerId);
-  if (!farmer) return;
+  const person = state.users.find((u) => u.id === userId);
+  if (!person) return;
+  const isFarmer = person.role === "FARMER";
   const status = approved ? "VERIFIED" : "REJECTED";
-  farmer.verificationStatus = status;
+  person.verificationStatus = status;
 
-  for (const prod of state.products) {
-    if (prod.farmerId === farmerId) {
-      prod.farmerVerified = approved;
-      await rtdbPush(`products/${prod.id}`, prod);
+  if (isFarmer) {
+    for (const prod of state.products) {
+      if (prod.farmerId === userId) {
+        prod.farmerVerified = approved;
+        await rtdbPush(`products/${prod.id}`, prod);
+      }
     }
   }
 
   const notif = {
     id: shortId("not"),
-    userId: farmerId,
-    targetRole: "FARMER",
+    userId: userId,
+    targetRole: person.role || "BUYER",
     senderRole: "ADMIN",
     orderId: "",
     type: "VERIFICATION",
-    titleBn: approved ? "কৃষক পরিচয় যাচাই সম্পন্ন" : "পরিচয় যাচাই প্রত্যাখ্যাত",
-    messageBn: approved ? "আপনার প্রোফাইল যাচাইকৃত ব্যাজ পেয়েছে।" : "সঠিক তথ্য দিয়ে পুনরায় আবেদন করুন।",
+    titleBn: approved
+      ? isFarmer ? "কৃষক পরিচয় যাচাই সম্পন্ন" : "ক্রেতা পরিচয় যাচাই সম্পন্ন"
+      : "পরিচয় যাচাই প্রত্যাখ্যাত",
+    messageBn: approved
+      ? isFarmer
+        ? "আপনার কৃষক প্রোফাইল যাচাইকৃত ব্যাজ পেয়েছে।"
+        : "অ্যাডমিন আপনার ক্রেতা অ্যাকাউন্ট যাচাই সম্পন্ন করেছেন।"
+      : "সঠিক তথ্য দিয়ে পুনরায় আবেদন করুন।",
     isRead: false,
     createdAt: Date.now()
   };
@@ -1053,10 +1063,10 @@ async function adminVerifyFarmer(farmerId, approved) {
     id: shortId("aud"),
     actorId: admin.id,
     actorRole: "ADMIN",
-    actionBn: `কৃষক যাচাইকরণ (${status})`,
+    actionBn: `${isFarmer ? "কৃষক" : "ক্রেতা"} যাচাইকরণ (${status})`,
     targetEntity: "User",
-    targetId: farmerId,
-    detailsBn: `${farmer.fullName} — ${status}`,
+    targetId: userId,
+    detailsBn: `${person.fullName} — ${status}`,
     createdAt: Date.now()
   };
 
@@ -1064,11 +1074,16 @@ async function adminVerifyFarmer(farmerId, approved) {
   state.auditLogs.unshift(audit);
   saveLocalSnapshot();
 
-  await rtdbPush(`users/${farmerId}`, farmer);
+  await rtdbPush(`users/${userId}`, person);
   await rtdbPush(`notifications/${notif.id}`, notif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
-  showToast(approved ? "কৃষক যাচাই সম্পন্ন হয়েছে!" : "আবেদন বাতিল করা হয়েছে।", "success");
+  showToast(
+    approved
+      ? `${isFarmer ? "কৃষক" : "ক্রেতা"} যাচাই সম্পন্ন হয়েছে!`
+      : "আবেদন বাতিল করা হয়েছে।",
+    "success"
+  );
   renderCurrentView();
 }
 
@@ -1943,7 +1958,7 @@ function renderRegisterPage(defaultRole) {
       <div class="flex items-center justify-between">
         <div>
           <h1 class="text-2xl font-bold text-[#105B34]">${isFarmer ? "👨‍🌾 কৃষক নিবন্ধন" : "🛍️ ক্রেতা নিবন্ধন"}</h1>
-          <p class="text-xs text-gray-600">সারা বাংলাদেশের ৬৪ জেলার যেকোনো এলাকা থেকে বিনামূল্যে নিবন্ধন করুন</p>
+          <p class="text-xs text-gray-600">কোনো OTP ছাড়াই সরাসরি মোবাইল নম্বর ও পাসওয়ার্ড দিয়ে নিবন্ধন করুন (সারা বাংলাদেশ)</p>
         </div>
         <div class="flex gap-1 bg-[#EAF7EF] p-1 rounded-xl text-xs font-bold">
           <button onclick="window.kbApp.navigate('auth-register-farmer')" class="px-3 py-1.5 rounded-lg ${isFarmer ? "bg-[#168447] text-white" : "text-[#105B34]"}">কৃষক</button>
@@ -2009,23 +2024,23 @@ function renderRegisterPage(defaultRole) {
           </div>
         </div>
 
-        ${
-          isFarmer
-            ? `<div class="grid sm:grid-cols-2 gap-3 pt-1">
-                <div>
-                  <label class="text-xs font-bold text-gray-700 block mb-1">এনআইডি শেষ ৪ সংখ্যা (যাচাইয়ের জন্য)</label>
-                  <input name="nidLastFour" maxlength="4" placeholder="1234" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
-                </div>
-                <div>
+        <div class="grid ${isFarmer ? "sm:grid-cols-2" : ""} gap-3 pt-1">
+          <div>
+            <label class="text-xs font-bold text-gray-700 block mb-1">এনআইডি শেষ ৪ সংখ্যা (অ্যাডমিন যাচাইয়ের জন্য ঐচ্ছিক)</label>
+            <input name="nidLastFour" maxlength="4" placeholder="1234" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+          </div>
+          ${
+            isFarmer
+              ? `<div>
                   <label class="text-xs font-bold text-gray-700 block mb-1">খামার/ফসল পরিচিতি</label>
                   <input name="farmBio" placeholder="যেমন: ধান ও মৌসুমি সবজি চাষি" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
-                </div>
-              </div>`
-            : ""
-        }
+                </div>`
+              : ""
+          }
+        </div>
 
         <button type="submit" class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm">
-          ${isFarmer ? "কৃষক হিসেবে নিবন্ধন সম্পন্ন করুন" : "ক্রেতা হিসেবে নিবন্ধন সম্পন্ন করুন"}
+          ${isFarmer ? "OTP ছাড়াই কৃষক হিসেবে নিবন্ধন করুন" : "OTP ছাড়াই ক্রেতা হিসেবে নিবন্ধন করুন"}
         </button>
       </form>
       <p class="text-center text-xs text-gray-600">ইতোমধ্যে অ্যাকাউন্ট আছে? <button onclick="window.kbApp.navigate('auth-login')" class="text-[#168447] font-bold hover:underline">লগইন করুন</button></p>
@@ -2346,10 +2361,29 @@ function renderOrdersPage() {
       ? state.orders.filter((o) => o.farmerId === user.id || o.buyerId === user.id)
       : state.orders.filter((o) => o.buyerId === user.id);
 
+  const verifyStatusBadge = user.role === "ADMIN"
+    ? ""
+    : `<span class="px-2.5 py-1 rounded-full text-xs font-bold ${
+        user.verificationStatus === "VERIFIED"
+          ? "bg-emerald-100 text-emerald-800"
+          : user.verificationStatus === "REJECTED"
+          ? "bg-red-100 text-red-700"
+          : "bg-amber-100 text-amber-800"
+      }">${
+        user.verificationStatus === "VERIFIED"
+          ? "✓ যাচাইকৃত অ্যাকাউন্ট"
+          : user.verificationStatus === "REJECTED"
+          ? "যাচাই প্রত্যাখ্যাত"
+          : "অ্যাডমিন যাচাই অপেক্ষমাণ"
+      }</span>`;
+
   return `
     <div class="space-y-5">
-      <div class="flex items-center justify-between">
-        <h1 class="text-2xl font-bold text-[#105B34]">📦 আমার অর্ডার ও ট্র্যাকিং (${myOrders.length})</h1>
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <h1 class="text-2xl font-bold text-[#105B34]">📦 আমার অর্ডার ও ট্র্যাকিং (${myOrders.length})</h1>
+          ${verifyStatusBadge}
+        </div>
         <button onclick="window.kbApp.navigate('browse')" class="px-4 py-2 rounded-xl bg-[#EAF7EF] text-[#105B34] text-xs font-bold">+ আরও ফসল কিনুন</button>
       </div>
       ${
@@ -2436,6 +2470,8 @@ function renderAdminDashboardPage() {
 
   const farmers = state.users.filter((u) => u.role === "FARMER");
   const buyers = state.users.filter((u) => u.role === "BUYER");
+  const verifiedFarmers = farmers.filter((u) => u.verificationStatus === "VERIFIED").length;
+  const verifiedBuyers = buyers.filter((u) => u.verificationStatus === "VERIFIED").length;
   const validOrders = state.orders.filter((o) => !["CANCELLED", "REJECTED"].includes(o.status));
   const totalSales = validOrders.reduce((s, o) => s + Number(o.productTotal || 0), 0);
   const districtTotals = new Map();
@@ -2448,11 +2484,11 @@ function renderAdminDashboardPage() {
   const tabs = [
     ["overview", "সারসংক্ষেপ"],
     ["notifications", "🔔 নোটিফিকেশন পাঠান"],
-    ["farmers", `কৃষক যাচাই (${farmers.length})`],
+    ["farmers", `কৃষক ও ক্রেতা (${farmers.length + buyers.length})`],
     ["orders", `অর্ডার (${state.orders.length})`],
     ["categories", "ক্যাটাগরি ও এলাকা"],
     ["complaints", `অভিযোগ (${state.complaints.length})`],
-    ["ads", "💰 বিজ্ঞাপন ও মনিটাইজেশন"],
+    ["ads", "💰 বিজ্ঞাপন ও সব নেটওয়ার্ক"],
     ["audit", "অডিট লগ"]
   ];
 
@@ -2461,8 +2497,8 @@ function renderAdminDashboardPage() {
     const entries = Array.from(districtTotals.entries()).sort((a, b) => b[1] - a[1]);
     bodyHtml = `
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট কৃষক</div><div class="text-2xl font-extrabold text-[#105B34]">${farmers.length}</div></div>
-        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট ক্রেতা</div><div class="text-2xl font-extrabold text-[#105B34]">${buyers.length}</div></div>
+        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট কৃষক (${verifiedFarmers} যাচাইকৃত)</div><div class="text-2xl font-extrabold text-[#105B34]">${farmers.length}</div></div>
+        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট ক্রেতা (${verifiedBuyers} যাচাইকৃত)</div><div class="text-2xl font-extrabold text-[#105B34]">${buyers.length}</div></div>
         <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">সক্রিয় ফসল</div><div class="text-2xl font-extrabold text-[#105B34]">${state.products.filter((p) => p.status === "ACTIVE").length}</div></div>
         <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট বিক্রয়</div><div class="text-2xl font-extrabold text-[#168447]">${formatBdt(totalSales)}</div></div>
       </div>
@@ -2540,26 +2576,63 @@ function renderAdminDashboardPage() {
       </div>
     `;
   } else if (tab === "farmers") {
+    const uFilter = state.adminUserFilter || "ALL";
+    const pendingFarmersCount = farmers.filter((u) => u.verificationStatus === "PENDING").length;
+    const pendingBuyersCount = buyers.filter((u) => u.verificationStatus === "PENDING").length;
+    const combinedUsers = (uFilter === "FARMER" ? farmers : uFilter === "BUYER" ? buyers : [...farmers, ...buyers])
+      .slice()
+      .sort((a, b) => {
+        const rank = (s) => (s === "PENDING" ? 0 : s === "REJECTED" ? 1 : 2);
+        const diff = rank(a.verificationStatus) - rank(b.verificationStatus);
+        return diff !== 0 ? diff : (b.createdAt || 0) - (a.createdAt || 0);
+      });
+
     bodyHtml = `
-      <div class="space-y-3">
-        ${
-          !farmers.length
-            ? `<div class="bg-white rounded-3xl p-8 text-center">কোনো নিবন্ধিত কৃষক নেই।</div>`
-            : farmers
-                .map(
-                  (f) => `<div class="bg-white rounded-2xl p-4 border border-emerald-100 flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div class="font-bold text-sm text-[#105B34]">${escapeHtml(f.fullName)} (${escapeHtml(f.phone)})</div>
-                      <div class="text-xs text-gray-600">${escapeHtml(f.upazila)}, ${escapeHtml(f.district)}, ${escapeHtml(f.division)} • NID: ${escapeHtml(f.nidMasked || "N/A")} • অবস্থা: <strong>${escapeHtml(f.verificationStatus)}</strong></div>
-                    </div>
-                    <div class="flex gap-2">
-                      <button onclick="window.kbApp.adminVerifyFarmer('${escapeHtml(f.id)}', true)" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">✓ অনুমোদন</button>
-                      <button onclick="window.kbApp.adminVerifyFarmer('${escapeHtml(f.id)}', false)" class="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold">✕ বাতিল</button>
-                    </div>
-                  </div>`
-                )
-                .join("")
-        }
+      <div class="space-y-4">
+        <div class="bg-white rounded-2xl p-4 border border-emerald-100 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 class="font-bold text-sm text-[#105B34]">কৃষক ও ক্রেতা যাচাইকরণ এবং তালিকা</h3>
+            <p class="text-xs text-gray-600">অপেক্ষমাণ কৃষক: ${pendingFarmersCount} জন • অপেক্ষমাণ ক্রেতা: ${pendingBuyersCount} জন</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button onclick="window.kbApp.setAdminUserFilter('ALL')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${uFilter === "ALL" ? "bg-[#105B34] text-white" : "bg-[#EAF7EF] text-[#105B34]"}">সবাই (${farmers.length + buyers.length})</button>
+            <button onclick="window.kbApp.setAdminUserFilter('FARMER')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${uFilter === "FARMER" ? "bg-[#105B34] text-white" : "bg-[#EAF7EF] text-[#105B34]"}">👨‍🌾 কৃষক (${farmers.length})</button>
+            <button onclick="window.kbApp.setAdminUserFilter('BUYER')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${uFilter === "BUYER" ? "bg-[#105B34] text-white" : "bg-[#EAF7EF] text-[#105B34]"}">🛍️ ক্রেতা (${buyers.length})</button>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          ${
+            !combinedUsers.length
+              ? `<div class="bg-white rounded-3xl p-8 text-center">এই তালিকায় এখনো কোনো নিবন্ধিত কৃষক বা ক্রেতা নেই।</div>`
+              : combinedUsers
+                  .map((person) => {
+                    const isFarmer = person.role === "FARMER";
+                    const stColor =
+                      person.verificationStatus === "VERIFIED"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : person.verificationStatus === "REJECTED"
+                        ? "bg-red-100 text-red-700"
+                        : "bg-amber-100 text-amber-800";
+                    return `<div class="bg-white rounded-2xl p-4 border border-emerald-100 flex flex-wrap items-center justify-between gap-3">
+                      <div class="space-y-1">
+                        <div class="flex flex-wrap items-center gap-2">
+                          <span class="font-bold text-sm text-[#105B34]">${isFarmer ? "👨‍🌾" : "🛍️"} ${escapeHtml(person.fullName)} (${escapeHtml(person.phone)})</span>
+                          <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isFarmer ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-sky-50 text-sky-700 border border-sky-200"}">${isFarmer ? "কৃষক (Farmer)" : "ক্রেতা (Buyer)"}</span>
+                          <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${stColor}">${escapeHtml(person.verificationStatus || "PENDING")}</span>
+                        </div>
+                        <div class="text-xs text-gray-600">${escapeHtml(person.upazila)}, ${escapeHtml(person.district)}, ${escapeHtml(person.division)} • NID: ${escapeHtml(person.nidMasked || "N/A")}</div>
+                        ${isFarmer && person.farmBio ? `<div class="text-[11px] text-gray-500">খামার: ${escapeHtml(person.farmBio)}</div>` : ""}
+                      </div>
+                      <div class="flex gap-2">
+                        ${person.verificationStatus !== "VERIFIED" ? `<button onclick="window.kbApp.adminVerifyUser('${escapeHtml(person.id)}', true)" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">✓ অনুমোদন</button>` : ""}
+                        ${person.verificationStatus !== "REJECTED" ? `<button onclick="window.kbApp.adminVerifyUser('${escapeHtml(person.id)}', false)" class="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold">✕ বাতিল</button>` : ""}
+                      </div>
+                    </div>`;
+                  })
+                  .join("")
+          }
+        </div>
       </div>
     `;
   } else if (tab === "orders") {
@@ -2619,11 +2692,24 @@ function renderAdminDashboardPage() {
             </div>
           </div>
 
-          <!-- Android Google AdMob -->
+          <!-- Android Google AdMob + Multi-Network Mobile Controls -->
           <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
             <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">2️⃣ Google AdMob (Android App)</h4>
-              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="androidAdsEnabled" ${cfg.androidAdsEnabled ? "checked" : ""} /> সক্রিয়</label>
+              <h4 class="font-bold text-[#105B34]">2️⃣ মোবাইল অ্যাপ মনিটাইজেশন (AdMob + সব নেটওয়ার্ক)</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="androidAdsEnabled" ${cfg.androidAdsEnabled ? "checked" : ""} /> AdMob সক্রিয়</label>
+            </div>
+            <label class="text-xs font-bold flex items-center gap-1.5 bg-[#EAF7EF] px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="mobileWebAdsEnabled" ${cfg.mobileWebAdsEnabled !== false ? "checked" : ""} /> মোবাইলে Multi-Network Ads (Adsterra/Monetag/AdSense/Custom) চালু</label>
+            <div>
+              <label class="text-xs font-bold block mb-1">মোবাইল অগ্রাধিকার নেটওয়ার্ক</label>
+              <select name="mobileAdNetworkPriority" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs bg-white">
+                <option value="ALL" ${(cfg.mobileAdNetworkPriority || "ALL") === "ALL" ? "selected" : ""}>সব নেটওয়ার্ক (All Networks)</option>
+                <option value="ADMOB" ${cfg.mobileAdNetworkPriority === "ADMOB" ? "selected" : ""}>Google AdMob / Mediation</option>
+                <option value="ADSTERRA" ${cfg.mobileAdNetworkPriority === "ADSTERRA" ? "selected" : ""}>Adsterra</option>
+                <option value="MONETAG" ${cfg.mobileAdNetworkPriority === "MONETAG" ? "selected" : ""}>Monetag / PropellerAds</option>
+                <option value="ADSENSE" ${cfg.mobileAdNetworkPriority === "ADSENSE" ? "selected" : ""}>Google AdSense</option>
+                <option value="CUSTOM" ${cfg.mobileAdNetworkPriority === "CUSTOM" ? "selected" : ""}>Unity / AppLovin / Start.io / Custom HTML</option>
+                <option value="SPONSOR" ${cfg.mobileAdNetworkPriority === "SPONSOR" ? "selected" : ""}>শুধুমাত্র সরাসরি স্পন্সর</option>
+              </select>
             </div>
             <div>
               <label class="text-xs font-bold block mb-1">Android Banner Ad Unit ID (ফাঁকা থাকলে Google Test ID)</label>
@@ -2632,6 +2718,14 @@ function renderAdminDashboardPage() {
             <div>
               <label class="text-xs font-bold block mb-1">Android Interstitial Ad Unit ID</label>
               <input name="androidInterstitialId" value="${escapeHtml(cfg.androidInterstitialId)}" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">মোবাইল Direct Link / SmartLink URL</label>
+              <input name="mobileDirectLinkUrl" value="${escapeHtml(cfg.mobileDirectLinkUrl || "")}" placeholder="https://..." class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">মোবাইল Custom HTML5 / Unity / AppLovin / Start.io ট্যাগ</label>
+              <textarea name="mobileCustomAdHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.mobileCustomAdHtml || "")}</textarea>
             </div>
           </div>
 
@@ -2714,7 +2808,7 @@ function renderAdminDashboardPage() {
       <div class="bg-amber-50 border border-amber-200 rounded-3xl p-5 flex flex-wrap justify-between items-center gap-3">
         <div>
           <h1 class="text-2xl font-bold text-[#105B34]">🛡️ সুপার অ্যাডমিন ড্যাশবোর্ড</h1>
-          <p class="text-xs text-gray-700">সারা বাংলাদেশ (৬৪ জেলা) প্ল্যাটফর্ম তদারকি, কৃষক যাচাই ও লাইভ নোটিফিকেশন নিয়ন্ত্রণ</p>
+          <p class="text-xs text-gray-700">সারা বাংলাদেশ (৬৪ জেলা) প্ল্যাটফর্ম তদারকি, কৃষক ও ক্রেতা যাচাই, সব অ্যাড নেটওয়ার্ক ও লাইভ নোটিফিকেশন নিয়ন্ত্রণ</p>
         </div>
       </div>
 
@@ -3069,8 +3163,10 @@ window.kbApp = {
   updateOrderStatus,
   setFarmerTab(t) { state.farmerTab = t; renderCurrentView(); },
   setAdminTab(t) { state.adminTab = t; renderCurrentView(); },
+  setAdminUserFilter(f) { state.adminUserFilter = f; renderCurrentView(); },
   setInfoTab(t) { state.infoTab = t; renderCurrentView(); },
-  adminVerifyFarmer,
+  adminVerifyUser,
+  adminVerifyFarmer: adminVerifyUser,
   adminResolveComplaint,
   exportCsvReport,
   markVisibleNotificationsRead,
@@ -3116,6 +3212,10 @@ window.kbApp = {
       androidAdsEnabled: fd.get("androidAdsEnabled") === "on",
       androidBannerId: String(fd.get("androidBannerId") || "").trim(),
       androidInterstitialId: String(fd.get("androidInterstitialId") || "").trim(),
+      mobileWebAdsEnabled: fd.get("mobileWebAdsEnabled") === "on",
+      mobileAdNetworkPriority: String(fd.get("mobileAdNetworkPriority") || "ALL").trim() || "ALL",
+      mobileCustomAdHtml: String(fd.get("mobileCustomAdHtml") || ""),
+      mobileDirectLinkUrl: String(fd.get("mobileDirectLinkUrl") || "").trim(),
       adsenseEnabled: fd.get("adsenseEnabled") === "on",
       adsenseClient: String(fd.get("adsenseClient") || "").trim(),
       adsenseTopSlot: String(fd.get("adsenseTopSlot") || "").trim(),

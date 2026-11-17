@@ -202,10 +202,15 @@ fun ProfileScreen(
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
+                        val verificationLabel = when (user.verificationStatus) {
+                            "VERIFIED" -> "যাচাইকৃত ✓ (Verified)"
+                            "REJECTED" -> "যাচাই প্রত্যাখ্যাত (Rejected)"
+                            else -> "অ্যাডমিন যাচাই অপেক্ষমাণ (Pending)"
+                        }
                         Text(
-                            text = "যাচাই অবস্থা: ${user.verificationStatus}",
+                            text = "যাচাই অবস্থা: $verificationLabel",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = if (user.verificationStatus == "VERIFIED") PrimaryGreen else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         OutlinedButton(
                             onClick = onLogout,
@@ -241,7 +246,7 @@ fun ProfileScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("সুপার অ্যাডমিন ড্যাশবোর্ড", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = DarkGreen)
                             Text(
-                                "কৃষক যাচাই, ২৪ ক্যাটাগরি, এলাকা, রিপোর্ট, অভিযোগ ও অডিট লগ",
+                                "কৃষক ও ক্রেতা যাচাই, সব অ্যাড নেটওয়ার্ক, ২৪ ক্যাটাগরি ও অডিট লগ",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = DarkGreen
                             )

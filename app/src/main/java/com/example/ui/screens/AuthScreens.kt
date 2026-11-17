@@ -128,9 +128,6 @@ fun RegisterScreen(
     var role by remember { mutableStateOf(initialRole) }
     var fullName by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
-    var otpCode by remember { mutableStateOf("") }
-    var otpSent by remember { mutableStateOf(false) }
-    var otpVerified by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
 
     var selectedDivision by remember { mutableStateOf(BangladeshLocations.divisions.first()) }
@@ -237,44 +234,15 @@ fun RegisterScreen(
             }
 
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = phone,
-                        onValueChange = { phone = it },
-                        label = { Text("মোবাইল নম্বর *") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedButton(
-                        onClick = { otpSent = true },
-                        enabled = phone.length >= 10
-                    ) {
-                        Text(if (otpSent) "পুনরায় পাঠান" else "OTP পাঠান")
-                    }
-                }
-                if (otpSent && !otpVerified) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = otpCode,
-                            onValueChange = { otpCode = it },
-                            label = { Text("OTP কোড") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.weight(1f)
-                        )
-                        Button(
-                            onClick = { if (otpCode.length >= 4) otpVerified = true },
-                            enabled = otpCode.length >= 4
-                        ) {
-                            Text("যাচাই")
-                        }
-                    }
-                }
-                if (otpVerified) {
-                    Text("মোবাইল নম্বর যাচাইকৃত ✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                }
+                OutlinedTextField(
+                    value = phone,
+                    onValueChange = { phone = it },
+                    label = { Text("মোবাইল নম্বর *") },
+                    supportingText = { Text("কোনো OTP ছাড়াই সরাসরি মোবাইল নম্বর ও পাসওয়ার্ড দিয়ে নিবন্ধন হবে") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth().testTag("register_phone_input")
+                )
             }
 
             item {
@@ -402,16 +370,16 @@ fun RegisterScreen(
                 }
             }
 
-            if (role == UserRole.FARMER) {
-                item {
-                    OutlinedTextField(
-                        value = nidLastFour,
-                        onValueChange = { if (it.length <= 4) nidLastFour = it },
-                        label = { Text("এনআইডি শেষ ৪ অঙ্ক (গোপন ও মাস্কড থাকবে)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+            item {
+                OutlinedTextField(
+                    value = nidLastFour,
+                    onValueChange = { if (it.length <= 4) nidLastFour = it },
+                    label = { Text("এনআইডি শেষ ৪ অঙ্ক (অ্যাডমিন যাচাইয়ের জন্য — গোপন থাকবে)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth().testTag("register_nid_input")
+                )
+                if (role == UserRole.FARMER) {
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedTextField(
                         value = farmBio,

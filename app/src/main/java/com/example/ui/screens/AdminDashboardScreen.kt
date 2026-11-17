@@ -37,7 +37,7 @@ import com.example.ui.viewmodel.MarketplaceUiState
 fun AdminDashboardScreen(
     uiState: MarketplaceUiState,
     onBack: () -> Unit,
-    onVerifyFarmer: (farmerId: String, approved: Boolean) -> Unit,
+    onVerifyUser: (userId: String, approved: Boolean) -> Unit,
     onSendNotification: (targetUserId: String, targetRole: String, titleBn: String, messageBn: String) -> Unit,
     onAddCategory: (nameBn: String, nameEn: String, emoji: String) -> Unit,
     onAddLocation: (division: String, district: String, upazila: String, union: String, village: String) -> Unit,
@@ -48,7 +48,16 @@ fun AdminDashboardScreen(
     val context = LocalContext.current
     val stats = uiState.adminStats
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("সারসংক্ষেপ", "কৃষক যাচাই", "নোটিফিকেশন পাঠান", "ক্যাটাগরি", "এলাকা", "অর্ডার ও অভিযোগ", "অডিট লগ", "বিজ্ঞাপন ও AdMob")
+    val tabs = listOf(
+        "সারসংক্ষেপ",
+        "কৃষক ও ক্রেতা",
+        "নোটিফিকেশন পাঠান",
+        "ক্যাটাগরি",
+        "এলাকা",
+        "অর্ডার ও অভিযোগ",
+        "অডিট লগ",
+        "বিজ্ঞাপন ও সব নেটওয়ার্ক"
+    )
 
     Scaffold(
         topBar = {
@@ -119,7 +128,7 @@ fun AdminDashboardScreen(
 
             when (selectedTab) {
                 0 -> AdminOverviewTab(stats = stats)
-                1 -> AdminVerificationTab(uiState = uiState, onVerifyFarmer = onVerifyFarmer)
+                1 -> AdminVerificationTab(uiState = uiState, onVerifyUser = onVerifyUser)
                 2 -> AdminNotificationsTab(uiState = uiState, onSendNotification = onSendNotification)
                 3 -> AdminCategoriesTab(uiState = uiState, onAddCategory = onAddCategory)
                 4 -> AdminLocationsTab(uiState = uiState, onAddLocation = onAddLocation)
@@ -146,17 +155,20 @@ private fun AdminOverviewTab(stats: com.example.data.model.AdminDashboardStats) 
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AdminKpiCard("মোট ক্রেতা", "${stats.totalBuyers}", InfoBlue, Modifier.weight(1f))
-                AdminKpiCard("সক্রিয় ফসল", "${stats.activeProducts}", Color(0xFFB45309), Modifier.weight(1f))
+                AdminKpiCard("যাচাইকৃত ক্রেতা", "${stats.verifiedBuyers}", DarkGreen, Modifier.weight(1f))
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AdminKpiCard("সক্রিয় ফসল", "${stats.activeProducts}", Color(0xFFB45309), Modifier.weight(1f))
                 AdminKpiCard("আজকের অর্ডার", "${stats.todaysOrders}", PrimaryGreen, Modifier.weight(1f))
-                AdminKpiCard("সম্পন্ন অর্ডার", "${stats.completedOrders}", DarkGreen, Modifier.weight(1f))
             }
         }
         item {
-            AdminKpiCard("মোট পণ্য বিক্রয় (৳)", stats.totalSalesAmount.formatBdt(), PrimaryGreen, Modifier.fillMaxWidth())
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AdminKpiCard("সম্পন্ন অর্ডার", "${stats.completedOrders}", DarkGreen, Modifier.weight(1f))
+                AdminKpiCard("মোট বিক্রয় (৳)", stats.totalSalesAmount.formatBdt(), PrimaryGreen, Modifier.weight(1f))
+            }
         }
 
         // Upazila-wise Sales Bar Chart using Compose Canvas
@@ -234,48 +246,155 @@ private fun AdminKpiCard(title: String, value: String, accent: Color, modifier: 
 @Composable
 private fun AdminVerificationTab(
     uiState: MarketplaceUiState,
-    onVerifyFarmer: (String, Boolean) -> Unit
+    onVerifyUser: (String, Boolean) -> Unit
 ) {
-    val sortedFarmers = uiState.farmers.sortedBy { if (it.verificationStatus == "PENDING") 0 else 1 }
+    var roleFilter by remember { mutableStateOf("ALL") } // ALL, FARMER, BUYER
+    val pendingFarmers = uiState.farmers.count { it.verificationStatus == "PENDING" }
+    val pendingBuyers = uiState.buyers.count { it.verificationStatus == "PENDING" }
+
+    val visibleUsers = remember(uiState.farmers, uiState.buyers, roleFilter) {
+        val pool = when (roleFilter) {
+            "FARMER" -> uiState.farmers
+            "BUYER" -> uiState.buyers
+            else -> uiState.farmers + uiState.buyers
+        }
+        pool.sortedWith(
+            compareBy<com.example.data.local.UserEntity> {
+                when (it.verificationStatus) {
+                    "PENDING" -> 0
+                    "REJECTED" -> 1
+                    else -> 2
+                }
+            }.thenByDescending { it.createdAt }
+        )
+    }
+
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        items(sortedFarmers, key = { it.id }) { farmer ->
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "কৃষক ও ক্রেতা যাচাইকরণ এবং তালিকা",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = DarkGreen
+                )
+                Text(
+                    text = "অপেক্ষমাণ কৃষক: $pendingFarmers জন • অপেক্ষমাণ ক্রেতা: $pendingBuyers জন",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        FilterChip(
+                            selected = roleFilter == "ALL",
+                            onClick = { roleFilter = "ALL" },
+                            label = { Text("সবাই (${uiState.farmers.size + uiState.buyers.size})") },
+                            modifier = Modifier.testTag("admin_users_filter_all")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = roleFilter == "FARMER",
+                            onClick = { roleFilter = "FARMER" },
+                            label = { Text("কৃষক (${uiState.farmers.size})") },
+                            modifier = Modifier.testTag("admin_users_filter_farmers")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = roleFilter == "BUYER",
+                            onClick = { roleFilter = "BUYER" },
+                            label = { Text("ক্রেতা (${uiState.buyers.size})") },
+                            modifier = Modifier.testTag("admin_users_filter_buyers")
+                        )
+                    }
+                }
+            }
+        }
+
+        if (visibleUsers.isEmpty()) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Text(
+                        text = "এখনো এই তালিকায় কোনো নিবন্ধিত কৃষক বা ক্রেতা নেই।",
+                        modifier = Modifier.padding(18.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+
+        items(visibleUsers, key = { it.id }) { person ->
+            val isFarmer = person.role == "FARMER"
+            val statusColor = when (person.verificationStatus) {
+                "VERIFIED" -> LightGreen
+                "REJECTED" -> Color(0xFFFEE2E2)
+                else -> HarvestGoldLight
+            }
+            val statusTextColor = when (person.verificationStatus) {
+                "VERIFIED" -> DarkGreen
+                "REJECTED" -> AlertRed
+                else -> Color(0xFF92400E)
+            }
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.testTag("admin_user_card_${person.id}")
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(farmer.fullName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Surface(
-                            color = if (farmer.verificationStatus == "VERIFIED") LightGreen else HarvestGoldLight,
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = farmer.verificationStatus,
+                                text = "${if (isFarmer) "🧑‍🌾" else "🛍️"} ${person.fullName}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = if (isFarmer) "ভূমিকা: কৃষক (Farmer)" else "ভূমিকা: ক্রেতা (Buyer)",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = DarkGreen,
+                                color = if (isFarmer) PrimaryGreen else InfoBlue,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Surface(color = statusColor, shape = RoundedCornerShape(6.dp)) {
+                            Text(
+                                text = person.verificationStatus,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = statusTextColor,
+                                fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
                         }
                     }
-                    Text("${farmer.upazila}, ${farmer.district} • ${farmer.phone}", style = MaterialTheme.typography.bodySmall)
-                    Text("মাস্কড এনআইডি: ${farmer.nidMasked}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (farmer.verificationStatus != "VERIFIED") {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${person.upazila}, ${person.district}, ${person.division} • ${person.phone}", style = MaterialTheme.typography.bodySmall)
+                    if (person.nidMasked.isNotBlank()) {
+                        Text("মাস্কড এনআইডি: ${person.nidMasked}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (isFarmer && person.farmBio.isNotBlank()) {
+                        Text("খামার পরিচিতি: ${person.farmBio}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (person.verificationStatus != "VERIFIED") {
                             Button(
-                                onClick = { onVerifyFarmer(farmer.id, true) },
-                                modifier = Modifier.weight(1f).testTag("verify_approve_${farmer.id}")
-                            ) { Text("অনুমোদন দিন") }
+                                onClick = { onVerifyUser(person.id, true) },
+                                modifier = Modifier.weight(1f).testTag("verify_approve_${person.id}")
+                            ) { Text("✓ অনুমোদন দিন") }
+                        }
+                        if (person.verificationStatus != "REJECTED") {
                             OutlinedButton(
-                                onClick = { onVerifyFarmer(farmer.id, false) },
-                                modifier = Modifier.weight(1f)
+                                onClick = { onVerifyUser(person.id, false) },
+                                modifier = Modifier.weight(1f).testTag("verify_reject_${person.id}")
                             ) { Text("প্রত্যাখ্যান") }
                         }
                     }
@@ -629,6 +748,10 @@ private fun AdminAdMonetizationTab(
     var androidAdsEnabled by remember(adConfig) { mutableStateOf(adConfig.androidAdsEnabled) }
     var androidBannerId by remember(adConfig) { mutableStateOf(adConfig.androidBannerId) }
     var androidInterstitialId by remember(adConfig) { mutableStateOf(adConfig.androidInterstitialId) }
+    var mobileWebAdsEnabled by remember(adConfig) { mutableStateOf(adConfig.mobileWebAdsEnabled) }
+    var mobileAdNetworkPriority by remember(adConfig) { mutableStateOf(adConfig.mobileAdNetworkPriority) }
+    var mobileCustomAdHtml by remember(adConfig) { mutableStateOf(adConfig.mobileCustomAdHtml) }
+    var mobileDirectLinkUrl by remember(adConfig) { mutableStateOf(adConfig.mobileDirectLinkUrl) }
 
     var sponsorEnabled by remember(adConfig) { mutableStateOf(adConfig.sponsorEnabled) }
     var sponsorTitle by remember(adConfig) { mutableStateOf(adConfig.sponsorTitle) }
@@ -656,6 +779,16 @@ private fun AdminAdMonetizationTab(
     var customAdName by remember(adConfig) { mutableStateOf(adConfig.customAdName) }
     var customTopHtml by remember(adConfig) { mutableStateOf(adConfig.customTopHtml) }
 
+    val priorityOptions = listOf(
+        "ALL" to "সব নেটওয়ার্ক (All)",
+        "ADMOB" to "AdMob / Mediation",
+        "ADSTERRA" to "Adsterra",
+        "MONETAG" to "Monetag",
+        "ADSENSE" to "AdSense",
+        "CUSTOM" to "Unity/AppLovin/Start.io/Custom",
+        "SPONSOR" to "শুধু স্পন্সর"
+    )
+
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -667,9 +800,9 @@ private fun AdminAdMonetizationTab(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("গ্লোবাল ও অ্যান্ড্রয়েড AdMob মনিটাইজেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text("মোবাইল অ্যাপ — সব অ্যাড নেটওয়ার্ক মনিটাইজেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
                     Text(
-                        "এখান থেকে সেভ করলে Firebase RTDB (/adConfig)-এর মাধ্যমে মোবাইল অ্যাপ ও ওয়েবসাইট দুই জায়গাতেই লাইভ আপডেট হবে।",
+                        "সাপোর্টেড নেটওয়ার্ক: Google AdMob (ও Mediation: Meta, Unity Ads, AppLovin, Start.io), Adsterra, Monetag / PropellerAds, Google AdSense, Custom HTML5 এবং ডাইরেক্ট স্পন্সর।",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -682,13 +815,27 @@ private fun AdminAdMonetizationTab(
                         Switch(checked = showAdsLabel, onCheckedChange = { showAdsLabel = it })
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text("Android Google AdMob ব্যানার ও ইন্টারস্টিশিয়াল", modifier = Modifier.weight(1f))
+                        Text("Android Google AdMob (SDK + Mediation)", modifier = Modifier.weight(1f))
                         Switch(checked = androidAdsEnabled, onCheckedChange = { androidAdsEnabled = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("মোবাইলে Multi-Network Web Ads (Adsterra/Monetag/AdSense/Custom)", modifier = Modifier.weight(1f))
+                        Switch(checked = mobileWebAdsEnabled, onCheckedChange = { mobileWebAdsEnabled = it })
+                    }
+                    Text("মোবাইল অগ্রাধিকার নেটওয়ার্ক:", style = MaterialTheme.typography.labelLarge)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(priorityOptions) { (key, label) ->
+                            FilterChip(
+                                selected = mobileAdNetworkPriority.equals(key, ignoreCase = true),
+                                onClick = { mobileAdNetworkPriority = key },
+                                label = { Text(label) }
+                            )
+                        }
                     }
                     OutlinedTextField(
                         value = androidBannerId,
                         onValueChange = { androidBannerId = it },
-                        label = { Text("AdMob Banner Unit ID (ফাঁকা রাখলে Google Test ID)") },
+                        label = { Text("AdMob Banner / Mediation Unit ID (ফাঁকা রাখলে Google Test ID)") },
                         placeholder = { Text("ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("admin_admob_banner_input")
@@ -700,6 +847,21 @@ private fun AdminAdMonetizationTab(
                         placeholder = { Text("ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("admin_admob_interstitial_input")
+                    )
+                    OutlinedTextField(
+                        value = mobileDirectLinkUrl,
+                        onValueChange = { mobileDirectLinkUrl = it },
+                        label = { Text("মোবাইল Direct Link / SmartLink URL (Adsterra/Monetag)") },
+                        placeholder = { Text("https://...") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = mobileCustomAdHtml,
+                        onValueChange = { mobileCustomAdHtml = it },
+                        label = { Text("মোবাইল কাস্টম HTML5 / Unity / AppLovin / Start.io অ্যাড ট্যাগ") },
+                        minLines = 2,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             }
@@ -734,7 +896,7 @@ private fun AdminAdMonetizationTab(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("ওয়েবসাইট অ্যাড নেটওয়ার্কসমূহ (Web Monetization)", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text("ক্রস-প্ল্যাটফর্ম অ্যাড নেটওয়ার্কসমূহ (অ্যাপ + ওয়েবসাইট)", fontWeight = FontWeight.Bold, color = DarkGreen)
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Google AdSense চালু", modifier = Modifier.weight(1f))
@@ -789,6 +951,10 @@ private fun AdminAdMonetizationTab(
                             androidAdsEnabled = androidAdsEnabled,
                             androidBannerId = androidBannerId.trim(),
                             androidInterstitialId = androidInterstitialId.trim(),
+                            mobileWebAdsEnabled = mobileWebAdsEnabled,
+                            mobileAdNetworkPriority = mobileAdNetworkPriority,
+                            mobileCustomAdHtml = mobileCustomAdHtml,
+                            mobileDirectLinkUrl = mobileDirectLinkUrl.trim(),
                             sponsorEnabled = sponsorEnabled,
                             sponsorTitle = sponsorTitle.trim(),
                             sponsorSubtitle = sponsorSubtitle.trim(),
@@ -818,7 +984,7 @@ private fun AdminAdMonetizationTab(
                     .height(50.dp)
                     .testTag("admin_save_ad_config_button")
             ) {
-                Text("বিজ্ঞাপন সেটিংস সেভ করুন (RTDB Live)", fontWeight = FontWeight.Bold)
+                Text("বিজ্ঞাপন সেটিংস সেভ করুন (অ্যাপ + ওয়েবসাইট লাইভ)", fontWeight = FontWeight.Bold)
             }
         }
     }

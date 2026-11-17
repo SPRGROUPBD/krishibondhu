@@ -166,7 +166,7 @@ class MarketplaceRepository(
             village = village.trim(),
             farmBio = farmBio.trim(),
             nidMasked = maskedNid,
-            verificationStatus = if (role == UserRole.FARMER) "PENDING" else "VERIFIED",
+            verificationStatus = "PENDING",
             isMobileVerified = true,
             rating = 5.0,
             reviewCount = 0,
@@ -587,21 +587,38 @@ class MarketplaceRepository(
         rtdbSync.pushComplaint(complaint)
     }
 
-    suspend fun adminVerifyFarmer(admin: UserEntity, farmerId: String, approved: Boolean) {
-        if (admin.role != UserRole.ADMIN.name) return
+    suspend fun adminVerifyFarmer(admin: UserEntity, farmerId: String, approved: Boolean): Result<Unit> =
+        adminVerifyUser(admin, farmerId, approved)
+
+    suspend fun adminVerifyUser(admin: UserEntity, userId: String, approved: Boolean): Result<Unit> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন ব্যবহারকারী যাচাই করতে পারেন।"))
+        }
+        val targetUser = db.userDao().getUserById(userId)
+            ?: return Result.failure(IllegalArgumentException("ব্যবহারকারী পাওয়া যায়নি।"))
+        val isFarmer = targetUser.role == UserRole.FARMER.name
+        val roleTitle = if (isFarmer) "কৃষক" else "ক্রেতা"
         val status = if (approved) "VERIFIED" else "REJECTED"
-        db.userDao().updateVerificationStatus(farmerId, status)
-        db.productDao().updateFarmerVerifiedOnProducts(farmerId, approved)
-        db.userDao().getUserById(farmerId)?.let { rtdbSync.pushUser(it) }
+
+        db.userDao().updateVerificationStatus(userId, status)
+        if (isFarmer) {
+            db.productDao().updateFarmerVerifiedOnProducts(userId, approved)
+            db.productDao().getProductsForFarmer(userId).forEach { rtdbSync.pushProduct(it) }
+        }
+        db.userDao().getUserById(userId)?.let { rtdbSync.pushUser(it) }
 
         val notif = NotificationEntity(
             id = "not_${UUID.randomUUID().toString().take(8)}",
-            userId = farmerId,
-            targetRole = UserRole.FARMER.name,
+            userId = userId,
+            targetRole = targetUser.role,
             senderRole = UserRole.ADMIN.name,
             type = "VERIFICATION",
-            titleBn = if (approved) "কৃষক পরিচয় যাচাই সম্পন্ন" else "পরিচয় যাচাই প্রত্যাখ্যাত",
-            messageBn = if (approved) "আপনার প্রোফাইল যাচাইকৃত ব্যাজ পেয়েছে।" else "অনুগ্রহ করে সঠিক তথ্য দিয়ে পুনরায় আবেদন করুন।",
+            titleBn = if (approved) "$roleTitle পরিচয় যাচাই সম্পন্ন" else "$roleTitle পরিচয় যাচাই প্রত্যাখ্যাত",
+            messageBn = if (approved) {
+                "অভিনন্দন! আপনার $roleTitle অ্যাকাউন্টটি অ্যাডমিন কর্তৃক যাচাইকৃত হয়েছে।"
+            } else {
+                "অনুগ্রহ করে সঠিক তথ্য দিয়ে পুনরায় যাচাইয়ের জন্য আবেদন করুন।"
+            },
             isRead = false
         )
         db.notificationAuditDao().insertNotification(notif)
@@ -611,13 +628,14 @@ class MarketplaceRepository(
             id = "aud_${UUID.randomUUID().toString().take(8)}",
             actorId = admin.id,
             actorRole = admin.role,
-            actionBn = "কৃষক যাচাইকরণ ($status)",
+            actionBn = "$roleTitle যাচাইকরণ ($status)",
             targetEntity = "User",
-            targetId = farmerId,
-            detailsBn = "অ্যাডমিন দ্বারা কৃষকের পরিচয় $status করা হয়েছে"
+            targetId = userId,
+            detailsBn = "${targetUser.fullName} ($roleTitle) — অ্যাডমিন দ্বারা $status করা হয়েছে"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)
+        return Result.success(Unit)
     }
 
     suspend fun adminSendNotification(

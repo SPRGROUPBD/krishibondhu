@@ -105,6 +105,9 @@ interface ProductDao {
     @Query("UPDATE products SET pricePerUnit = :price, availableQuantity = :stock, status = CASE WHEN :stock > 0 THEN 'ACTIVE' ELSE 'OUT_OF_STOCK' END, updatedAt = :now WHERE id = :productId AND farmerId = :farmerId")
     suspend fun updateFarmerPriceAndStock(productId: String, farmerId: String, price: Double, stock: Double, now: Long): Int
 
+    @Query("SELECT * FROM products WHERE farmerId = :farmerId")
+    suspend fun getProductsForFarmer(farmerId: String): List<ProductEntity>
+
     @Query("UPDATE products SET farmerVerified = :verified WHERE farmerId = :farmerId")
     suspend fun updateFarmerVerifiedOnProducts(farmerId: String, verified: Boolean)
 }
