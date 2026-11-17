@@ -40,6 +40,10 @@
     "auditLogs": {
       ".read": true,
       ".write": true
+    },
+    "adConfig": {
+      ".read": true,
+      ".write": true
     }
   }
 }

@@ -16,6 +16,38 @@ export const SUPERADMIN_CREDENTIALS = {
   userId: "admin_super"
 };
 
+export const DEFAULT_AD_CONFIG = {
+  adsEnabled: true,
+  showAdsLabel: true,
+  androidAdsEnabled: true,
+  androidBannerId: "",
+  androidInterstitialId: "",
+  adsenseEnabled: false,
+  adsenseClient: "",
+  adsenseTopSlot: "",
+  adsenseFeedSlot: "",
+  adsenseFooterSlot: "",
+  adsterraEnabled: false,
+  adsterraBannerKey: "",
+  adsterraScriptUrl: "",
+  adsterraSocialBarUrl: "",
+  monetagEnabled: false,
+  monetagZoneId: "",
+  monetagScriptUrl: "",
+  customAdEnabled: false,
+  customAdName: "Ezoic / Media.net / Custom",
+  customTopHtml: "",
+  customFeedHtml: "",
+  customFooterHtml: "",
+  sponsorEnabled: true,
+  sponsorTitle: "সরাসরি কৃষকের বীজ, সার ও আধুনিক কৃষি পরামর্শ",
+  sponsorSubtitle: "কৃষি বন্ধু স্পন্সর স্লট — অ্যাডমিন প্যানেল থেকে আপনার বিজ্ঞাপন নেটওয়ার্ক বা স্পন্সর ব্যানার যুক্ত করুন।",
+  sponsorImageUrl: "",
+  sponsorTargetUrl: "",
+  sponsorCtaText: "বিস্তারিত দেখুন",
+  updatedAt: 0
+};
+
 export const MASTER_CATEGORIES = [
   { id: "cat_paddy", nameBn: "ধান", nameEn: "Paddy", groupKey: "GRAIN", emoji: "🌾", sortOrder: 1, isActive: true },
   { id: "cat_rice", nameBn: "চাল", nameEn: "Rice", groupKey: "GRAIN", emoji: "🍚", sortOrder: 2, isActive: true },

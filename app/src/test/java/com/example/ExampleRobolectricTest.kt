@@ -431,4 +431,132 @@ class ExampleRobolectricTest {
         assertTrue(decoded is ByteArray)
         assertEquals("https://example.com/crop.jpg", com.example.util.MediaCaptureHelper.imageModelFromUri("https://example.com/crop.jpg"))
     }
+
+    @Test
+    fun admobResourcesAndManifestMetaDataAreConfigured() {
+        val appId = context.getString(R.string.admob_app_id)
+        val bannerId = context.getString(R.string.admob_banner_unit_id)
+        val interstitialId = context.getString(R.string.admob_interstitial_unit_id)
+
+        assertTrue(appId.startsWith("ca-app-pub-"))
+        assertTrue(bannerId.startsWith("ca-app-pub-"))
+        assertTrue(interstitialId.startsWith("ca-app-pub-"))
+
+        val appInfo = context.packageManager.getApplicationInfo(
+            context.packageName,
+            android.content.pm.PackageManager.GET_META_DATA
+        )
+        val manifestAppId = appInfo.metaData?.getString("com.google.android.gms.ads.APPLICATION_ID")
+        assertEquals(appId, manifestAppId)
+    }
+
+    @Test
+    fun adminSaveAdConfigEnforcesAdminPermissionAndWritesAuditLog() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val buyer = repo.registerUser(
+            fullName = "অ্যাড টেস্ট ক্রেতা",
+            phone = "01755000001",
+            rawPassword = "pass1234",
+            role = UserRole.BUYER,
+            division = "ঢাকা",
+            district = "ঢাকা",
+            upazila = "সাভার",
+            unionName = "",
+            village = "",
+            nidLastFour = "",
+            farmBio = ""
+        ).getOrThrow()
+
+        val updatedConfig = com.example.data.model.AdConfig(
+            adsEnabled = true,
+            androidAdsEnabled = true,
+            androidBannerId = "ca-app-pub-1234567890123456/1111111111",
+            adsenseEnabled = true,
+            adsenseClient = "ca-pub-1234567890123456",
+            adsterraEnabled = true,
+            monetagEnabled = true
+        )
+
+        val blocked = repo.adminSaveAdConfig(buyer, updatedConfig)
+        assertTrue(blocked.isFailure)
+
+        val allowed = repo.adminSaveAdConfig(admin, updatedConfig)
+        assertTrue(allowed.isSuccess)
+        assertEquals("ca-app-pub-1234567890123456/1111111111", repo.adConfig.value.androidBannerId)
+        assertTrue(repo.adConfig.value.adsenseEnabled)
+        assertTrue(repo.adConfig.value.adsterraEnabled)
+        assertTrue(repo.adConfig.value.monetagEnabled)
+
+        val logs = repo.auditLogs.first()
+        assertTrue(logs.any { it.actionBn == "বিজ্ঞাপন ও মনিটাইজেশন আপডেট" })
+    }
+
+    @Test
+    fun markNotificationsReadMarksOnlyMatchingUserOrRoleAndPreservesOthers() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val farmer = repo.registerUser(
+            fullName = "নোটিফিকেশন কৃষক",
+            phone = "01766000001",
+            rawPassword = "pass1234",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "কুষ্টিয়া সদর",
+            unionName = "",
+            village = "",
+            nidLastFour = "9988",
+            farmBio = ""
+        ).getOrThrow()
+
+        val buyer = repo.registerUser(
+            fullName = "নোটিফিকেশন ক্রেতা",
+            phone = "01766000002",
+            rawPassword = "pass1234",
+            role = UserRole.BUYER,
+            division = "ঢাকা",
+            district = "ঢাকা",
+            upazila = "সাভার",
+            unionName = "",
+            village = "",
+            nidLastFour = "",
+            farmBio = ""
+        ).getOrThrow()
+
+        val farmerDirect = com.example.data.local.NotificationEntity(
+            id = "not_f1",
+            userId = farmer.id,
+            targetRole = UserRole.FARMER.name,
+            titleBn = "কৃষকের অর্ডার",
+            messageBn = "অর্ডার ১",
+            isRead = false
+        )
+        val farmerRoleBroadcast = com.example.data.local.NotificationEntity(
+            id = "not_fall",
+            userId = "ALL",
+            targetRole = UserRole.FARMER.name,
+            titleBn = "সকল কৃষক",
+            messageBn = "ঘোষণা",
+            isRead = false
+        )
+        val buyerDirect = com.example.data.local.NotificationEntity(
+            id = "not_b1",
+            userId = buyer.id,
+            targetRole = UserRole.BUYER.name,
+            titleBn = "ক্রেতার আপডেট",
+            messageBn = "অর্ডার ২",
+            isRead = false
+        )
+
+        val dao = db.notificationAuditDao()
+        dao.insertNotification(farmerDirect)
+        dao.insertNotification(farmerRoleBroadcast)
+        dao.insertNotification(buyerDirect)
+
+        repo.markNotificationsRead(farmer)
+
+        assertTrue(dao.getNotificationById("not_f1")!!.isRead)
+        assertTrue(dao.getNotificationById("not_fall")!!.isRead)
+        assertFalse(dao.getNotificationById("not_b1")!!.isRead)
+    }
 }

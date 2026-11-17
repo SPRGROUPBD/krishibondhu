@@ -195,6 +195,15 @@ interface NotificationAuditDao {
     @Query("SELECT * FROM notifications ORDER BY createdAt DESC")
     fun observeNotifications(): Flow<List<NotificationEntity>>
 
+    @Query("SELECT * FROM notifications WHERE id = :id LIMIT 1")
+    suspend fun getNotificationById(id: String): NotificationEntity?
+
+    @Query("SELECT * FROM notifications WHERE isRead = 0")
+    suspend fun getUnreadNotifications(): List<NotificationEntity>
+
+    @Query("SELECT * FROM notifications WHERE isRead = 0 AND (userId = :userId OR userId = 'ALL' OR targetRole = :role)")
+    suspend fun getUnreadNotificationsForUser(userId: String, role: String): List<NotificationEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertNotification(notification: NotificationEntity)
 

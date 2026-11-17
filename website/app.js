@@ -1,6 +1,7 @@
 import {
   RTDB_CONFIG,
   SUPERADMIN_CREDENTIALS,
+  DEFAULT_AD_CONFIG,
   MASTER_CATEGORIES,
   BD_DIVISIONS,
   BD_DISTRICTS,
@@ -48,11 +49,13 @@ const state = {
   },
   farmerTab: "orders",
   adminTab: "overview",
-  infoTab: "about"
+  infoTab: "about",
+  adConfig: { ...DEFAULT_AD_CONFIG }
 };
 
 let rtdbRef = null;
 let rtdbApi = null;
+let lastAdScriptSignature = "";
 const alertedNotifIds = new Set();
 
 // ---------------------- Persistence (LocalStorage + RTDB) ----------------------
@@ -74,6 +77,9 @@ function loadLocalSnapshot() {
     if (Array.isArray(saved.complaints)) state.complaints = saved.complaints;
     if (Array.isArray(saved.auditLogs)) state.auditLogs = saved.auditLogs;
     if (Array.isArray(saved.cart)) state.cart = saved.cart;
+    if (saved.adConfig && typeof saved.adConfig === "object") {
+      state.adConfig = { ...DEFAULT_AD_CONFIG, ...saved.adConfig };
+    }
   } catch (err) {
     console.warn("Local cache restore skipped:", err);
   }
@@ -95,7 +101,8 @@ function saveLocalSnapshot() {
         reviews: state.reviews,
         complaints: state.complaints,
         auditLogs: state.auditLogs,
-        cart: state.cart
+        cart: state.cart,
+        adConfig: state.adConfig
       })
     );
   } catch (err) {
@@ -250,6 +257,15 @@ async function initFirebaseRealtime() {
         ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
       saveLocalSnapshot();
+    });
+
+    onValue(child(rtdbRef, "adConfig"), (snap) => {
+      const val = snap.val();
+      if (val && typeof val === "object") {
+        state.adConfig = { ...DEFAULT_AD_CONFIG, ...val };
+        saveLocalSnapshot();
+        renderCurrentView();
+      }
     });
   } catch (err) {
     console.warn("Firebase RTDB running in local fallback mode:", err);
@@ -1190,6 +1206,228 @@ function exportCsvReport() {
   URL.revokeObjectURL(url);
 }
 
+// ---------------------- Ad Monetization Engine (Multi-Network) ----------------------
+
+function safeHttpUrl(url) {
+  const s = String(url || "").trim();
+  return s.startsWith("https://") || s.startsWith("http://") ? s : "";
+}
+
+async function adminSaveAdConfig(nextConfig) {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") {
+    showToast("শুধুমাত্র সুপার অ্যাডমিন বিজ্ঞাপন সেটিংস সংরক্ষণ করতে পারেন।", "error");
+    return false;
+  }
+  const now = Date.now();
+  const merged = { ...DEFAULT_AD_CONFIG, ...nextConfig, updatedAt: now };
+  state.adConfig = merged;
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: "বিজ্ঞাপন ও মনিটাইজেশন আপডেট (ওয়েব)",
+    targetEntity: "AdConfig",
+    targetId: "adConfig",
+    detailsBn: `Ads: ${merged.adsEnabled ? "চালু" : "বন্ধ"}, AdSense: ${merged.adsenseEnabled ? "চালু" : "বন্ধ"}, Adsterra: ${merged.adsterraEnabled ? "চালু" : "বন্ধ"}, Monetag: ${merged.monetagEnabled ? "চালু" : "বন্ধ"}, AdMob: ${merged.androidAdsEnabled ? "চালু" : "বন্ধ"}`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+  saveLocalSnapshot();
+
+  await rtdbPush("adConfig", merged);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+  lastAdScriptSignature = "";
+  showToast("বিজ্ঞাপন সেটিংস সফলভাবে সেভ ও লাইভ হয়েছে!", "success");
+  renderCurrentView();
+  return true;
+}
+
+function syncExternalAdNetworkScripts() {
+  const cfg = state.adConfig || DEFAULT_AD_CONFIG;
+  const sig = JSON.stringify({
+    e: cfg.adsEnabled,
+    ac: cfg.adsenseEnabled ? cfg.adsenseClient : "",
+    asb: cfg.adsterraEnabled ? cfg.adsterraSocialBarUrl : "",
+    m: cfg.monetagEnabled ? `${cfg.monetagZoneId}|${cfg.monetagScriptUrl}` : ""
+  });
+  if (sig === lastAdScriptSignature) return;
+  lastAdScriptSignature = sig;
+
+  const scriptsRoot = document.getElementById("ad-scripts-root");
+  if (!scriptsRoot) return;
+  scriptsRoot.innerHTML = "";
+  if (!cfg.adsEnabled) return;
+
+  if (cfg.adsenseEnabled && cfg.adsenseClient) {
+    const existing = document.querySelector(`script[data-kb-ad-net="adsense"]`);
+    if (existing) existing.remove();
+    const s = document.createElement("script");
+    s.async = true;
+    s.crossOrigin = "anonymous";
+    s.dataset.kbAdNet = "adsense";
+    s.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(cfg.adsenseClient.trim())}`;
+    document.head.appendChild(s);
+  }
+
+  const socialBarUrl = safeHttpUrl(cfg.adsterraSocialBarUrl);
+  if (cfg.adsterraEnabled && socialBarUrl) {
+    const s = document.createElement("script");
+    s.async = true;
+    s.src = socialBarUrl;
+    scriptsRoot.appendChild(s);
+  }
+
+  const monetagUrl = safeHttpUrl(cfg.monetagScriptUrl);
+  if (cfg.monetagEnabled && (monetagUrl || cfg.monetagZoneId)) {
+    const s = document.createElement("script");
+    s.async = true;
+    if (cfg.monetagZoneId) s.dataset.zone = cfg.monetagZoneId.trim();
+    s.src = monetagUrl || `https://alwingulla.com/88/tag.min.js`;
+    scriptsRoot.appendChild(s);
+  }
+}
+
+function renderAdPlacement(slotName) {
+  const cfg = state.adConfig || DEFAULT_AD_CONFIG;
+  if (!cfg.adsEnabled) return "";
+
+  const parts = [];
+  const labelBadge = cfg.showAdsLabel
+    ? `<span class="inline-block px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-bold uppercase tracking-wider">বিজ্ঞাপন • Sponsored</span>`
+    : "";
+
+  // 1. Google AdSense Slot
+  const adsenseSlotId =
+    slotName === "top"
+      ? cfg.adsenseTopSlot
+      : slotName === "feed"
+      ? cfg.adsenseFeedSlot
+      : cfg.adsenseFooterSlot;
+  if (cfg.adsenseEnabled && cfg.adsenseClient && adsenseSlotId) {
+    parts.push(`
+      <div class="bg-white rounded-2xl border border-emerald-100 p-3 text-center shadow-sm">
+        ${labelBadge ? `<div class="mb-1.5 text-left">${labelBadge} <span class="text-[10px] text-gray-400">Google AdSense</span></div>` : ""}
+        <ins class="adsbygoogle"
+          style="display:block"
+          data-ad-client="${escapeHtml(cfg.adsenseClient)}"
+          data-ad-slot="${escapeHtml(adsenseSlotId)}"
+          data-ad-format="auto"
+          data-full-width-responsive="true"></ins>
+      </div>
+    `);
+  }
+
+  // 2. Adsterra Banner Slot
+  const adsterraInvokeUrl = safeHttpUrl(cfg.adsterraScriptUrl);
+  if (cfg.adsterraEnabled && (cfg.adsterraBannerKey || adsterraInvokeUrl)) {
+    parts.push(`
+      <div class="bg-white rounded-2xl border border-emerald-100 p-3 text-center shadow-sm" data-adsterra-slot="${escapeHtml(slotName)}">
+        ${labelBadge ? `<div class="mb-1 text-left">${labelBadge} <span class="text-[10px] text-gray-400">Adsterra</span></div>` : ""}
+        <div id="adsterra-box-${escapeHtml(slotName)}" class="min-h-[60px] flex items-center justify-center text-xs text-gray-500">
+          Adsterra Zone Ready (${escapeHtml(cfg.adsterraBannerKey || "Active")})
+        </div>
+      </div>
+    `);
+  }
+
+  // 3. Monetag / PropellerAds Banner Container
+  if (cfg.monetagEnabled && (cfg.monetagZoneId || cfg.monetagScriptUrl)) {
+    parts.push(`
+      <div class="bg-white rounded-2xl border border-emerald-100 p-3 text-center shadow-sm" data-monetag-zone="${escapeHtml(cfg.monetagZoneId)}">
+        ${labelBadge ? `<div class="mb-1 text-left">${labelBadge} <span class="text-[10px] text-gray-400">Monetag</span></div>` : ""}
+        <div class="text-xs text-gray-500 py-2">Monetag Zone Active (${escapeHtml(cfg.monetagZoneId || "Connected")})</div>
+      </div>
+    `);
+  }
+
+  // 4. Custom HTML / Ezoic / Media.net Tag (Admin configured)
+  const customHtml =
+    slotName === "top"
+      ? cfg.customTopHtml
+      : slotName === "feed"
+      ? cfg.customFeedHtml || cfg.customTopHtml
+      : cfg.customFooterHtml || cfg.customTopHtml;
+  if (cfg.customAdEnabled && customHtml && String(customHtml).trim()) {
+    parts.push(`
+      <div class="bg-white rounded-2xl border border-emerald-100 p-3 shadow-sm">
+        ${labelBadge ? `<div class="mb-1.5 flex items-center justify-between">${labelBadge}<span class="text-[10px] text-gray-400">${escapeHtml(cfg.customAdName || "Custom Ad")}</span></div>` : ""}
+        <div class="overflow-x-auto">${customHtml}</div>
+      </div>
+    `);
+  }
+
+  // 5. Direct Sponsor Card (Always clean M3/Tailwind card on feed/footer)
+  if (cfg.sponsorEnabled && cfg.sponsorTitle && (slotName === "feed" || slotName === "footer" || parts.length === 0)) {
+    const imgUrl = safeHttpUrl(cfg.sponsorImageUrl);
+    const targetUrl = safeHttpUrl(cfg.sponsorTargetUrl);
+    parts.push(`
+      <div class="bg-gradient-to-r from-[#EAF7EF] via-white to-amber-50 rounded-2xl border border-emerald-200 p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div class="flex items-center gap-3.5">
+          ${
+            imgUrl
+              ? `<img src="${escapeHtml(imgUrl)}" alt="${escapeHtml(cfg.sponsorTitle)}" class="w-16 h-16 rounded-xl object-cover border border-emerald-200 shrink-0" />`
+              : `<div class="w-12 h-12 rounded-xl bg-[#168447] text-white flex items-center justify-center text-xl shrink-0">📣</div>`
+          }
+          <div class="space-y-0.5">
+            ${labelBadge}
+            <h4 class="font-bold text-sm sm:text-base text-[#105B34]">${escapeHtml(cfg.sponsorTitle)}</h4>
+            ${cfg.sponsorSubtitle ? `<p class="text-xs text-gray-600">${escapeHtml(cfg.sponsorSubtitle)}</p>` : ""}
+          </div>
+        </div>
+        ${
+          targetUrl
+            ? `<a href="${escapeHtml(targetUrl)}" target="_blank" rel="noopener noreferrer" class="shrink-0 px-4 py-2 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white text-xs font-bold text-center">${escapeHtml(cfg.sponsorCtaText || "বিস্তারিত দেখুন")} ↗</a>`
+            : `<button onclick="window.kbApp.navigate('browse')" class="shrink-0 px-4 py-2 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white text-xs font-bold">${escapeHtml(cfg.sponsorCtaText || "ফসল দেখুন")}</button>`
+        }
+      </div>
+    `);
+  }
+
+  if (!parts.length) return "";
+  return `<section class="kb-ad-placement space-y-2" data-slot="${escapeHtml(slotName)}">${parts.join("")}</section>`;
+}
+
+function mountPageAdPlacements() {
+  syncExternalAdNetworkScripts();
+  const cfg = state.adConfig || DEFAULT_AD_CONFIG;
+  const topEl = document.getElementById("ad-slot-top");
+  const footerEl = document.getElementById("ad-slot-footer");
+
+  if (topEl) topEl.innerHTML = cfg.adsEnabled ? renderAdPlacement("top") : "";
+  if (footerEl) footerEl.innerHTML = cfg.adsEnabled ? renderAdPlacement("footer") : "";
+
+  if (cfg.adsEnabled && cfg.adsenseEnabled && cfg.adsenseClient && typeof window !== "undefined") {
+    try {
+      const insNodes = document.querySelectorAll("ins.adsbygoogle:not([data-adsbygoogle-status])");
+      if (insNodes.length) {
+        window.adsbygoogle = window.adsbygoogle || [];
+        insNodes.forEach(() => window.adsbygoogle.push({}));
+      }
+    } catch (_) {}
+  }
+
+  const invokeUrl = safeHttpUrl(cfg.adsterraScriptUrl);
+  if (cfg.adsEnabled && cfg.adsterraEnabled && invokeUrl) {
+    ["top", "feed", "footer"].forEach((slot) => {
+      const box = document.getElementById(`adsterra-box-${slot}`);
+      if (!box || box.dataset.loaded === "1") return;
+      box.dataset.loaded = "1";
+      box.innerHTML = "";
+      if (cfg.adsterraBannerKey) {
+        const cfgScript = document.createElement("script");
+        cfgScript.text = `atOptions = { 'key': ${JSON.stringify(cfg.adsterraBannerKey)}, 'format': 'iframe', 'height': 90, 'width': 728, 'params': {} };`;
+        box.appendChild(cfgScript);
+      }
+      const invokeScript = document.createElement("script");
+      invokeScript.async = true;
+      invokeScript.src = invokeUrl;
+      box.appendChild(invokeScript);
+    });
+  }
+}
+
 // ---------------------- Render Helpers ----------------------
 
 function getFilteredProducts() {
@@ -1378,6 +1616,8 @@ function renderHomePage() {
         }
       </section>
 
+      ${renderAdPlacement("feed")}
+
       <!-- Zero Middleman Promise -->
       <section class="bg-[#EAF7EF] rounded-3xl p-6 sm:p-8 border border-emerald-200 grid sm:grid-cols-3 gap-6">
         <div>
@@ -1473,6 +1713,7 @@ function renderBrowsePage() {
             </div>`
           : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">${filtered.map(renderProductCard).join("")}</div>`
       }
+      ${renderAdPlacement("feed")}
     </div>
   `;
 }
@@ -1536,6 +1777,7 @@ function renderProductDetailPage() {
           </div>
         </div>
       </div>
+      ${renderAdPlacement("feed")}
     </div>
   `;
 }
@@ -2210,6 +2452,7 @@ function renderAdminDashboardPage() {
     ["orders", `অর্ডার (${state.orders.length})`],
     ["categories", "ক্যাটাগরি ও এলাকা"],
     ["complaints", `অভিযোগ (${state.complaints.length})`],
+    ["ads", "💰 বিজ্ঞাপন ও মনিটাইজেশন"],
     ["audit", "অডিট লগ"]
   ];
 
@@ -2343,6 +2586,125 @@ function renderAdminDashboardPage() {
     `;
   } else if (tab === "complaints") {
     bodyHtml = `<div class="space-y-3">${state.complaints.length ? state.complaints.map((c) => `<div class="bg-white rounded-2xl p-4 border border-emerald-100 flex justify-between items-center text-xs"><div><strong>${escapeHtml(c.subjectBn)}</strong> (${escapeHtml(c.reporterName)})<p class="text-gray-600">${escapeHtml(c.descriptionBn)}</p></div><button onclick="window.kbApp.adminResolveComplaint('${escapeHtml(c.id)}')" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white font-bold">${c.status === "RESOLVED" ? "✓ নিষ্পত্তি" : "সমাধান করুন"}</button></div>`).join("") : `<div class="bg-white rounded-2xl p-8 text-center">কোনো অভিযোগ নেই।</div>`}</div>`;
+  } else if (tab === "ads") {
+    const cfg = state.adConfig || DEFAULT_AD_CONFIG;
+    bodyHtml = `
+      <form onsubmit="window.kbApp.handleAdminSaveAdConfig(event)" class="space-y-5">
+        <div class="bg-emerald-50 border border-emerald-200 rounded-3xl p-5 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 class="text-lg font-bold text-[#105B34]">💰 ওয়েবসাইট ও মোবাইল অ্যাপ — সব অ্যাড নেটওয়ার্ক মনিটাইজেশন</h3>
+            <p class="text-xs text-gray-700">এখান থেকে Google AdSense, Adsterra, Monetag, Ezoic/Custom HTML, Direct Sponsor এবং Android AdMob একসাথে নিয়ন্ত্রণ করুন (Firebase RTDB-তে তাৎক্ষণিক সেভ হবে)।</p>
+          </div>
+          <div class="flex flex-wrap gap-4 text-xs font-bold">
+            <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="adsEnabled" ${cfg.adsEnabled ? "checked" : ""} /> সব বিজ্ঞাপন চালু</label>
+            <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="showAdsLabel" ${cfg.showAdsLabel ? "checked" : ""} /> Sponsored ব্যাজ দেখান</label>
+          </div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-5">
+          <!-- Google AdSense -->
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="font-bold text-[#105B34]">1️⃣ Google AdSense (Website)</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="adsenseEnabled" ${cfg.adsenseEnabled ? "checked" : ""} /> সক্রিয়</label>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Publisher Client ID (ca-pub-...)</label>
+              <input name="adsenseClient" value="${escapeHtml(cfg.adsenseClient)}" placeholder="ca-pub-xxxxxxxxxxxxxxxx" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div><label class="text-[11px] font-bold block mb-1">Top Slot</label><input name="adsenseTopSlot" value="${escapeHtml(cfg.adsenseTopSlot)}" placeholder="1234567890" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+              <div><label class="text-[11px] font-bold block mb-1">Feed Slot</label><input name="adsenseFeedSlot" value="${escapeHtml(cfg.adsenseFeedSlot)}" placeholder="2345678901" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+              <div><label class="text-[11px] font-bold block mb-1">Footer Slot</label><input name="adsenseFooterSlot" value="${escapeHtml(cfg.adsenseFooterSlot)}" placeholder="3456789012" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+            </div>
+          </div>
+
+          <!-- Android Google AdMob -->
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="font-bold text-[#105B34]">2️⃣ Google AdMob (Android App)</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="androidAdsEnabled" ${cfg.androidAdsEnabled ? "checked" : ""} /> সক্রিয়</label>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Android Banner Ad Unit ID (ফাঁকা থাকলে Google Test ID)</label>
+              <input name="androidBannerId" value="${escapeHtml(cfg.androidBannerId)}" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Android Interstitial Ad Unit ID</label>
+              <input name="androidInterstitialId" value="${escapeHtml(cfg.androidInterstitialId)}" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+          </div>
+
+          <!-- Adsterra -->
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="font-bold text-[#105B34]">3️⃣ Adsterra Ad Network</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="adsterraEnabled" ${cfg.adsterraEnabled ? "checked" : ""} /> সক্রিয়</label>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Adsterra Banner Key</label>
+              <input name="adsterraBannerKey" value="${escapeHtml(cfg.adsterraBannerKey)}" placeholder="32-char Adsterra key" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Banner invoke.js URL</label>
+              <input name="adsterraScriptUrl" value="${escapeHtml(cfg.adsterraScriptUrl)}" placeholder="https://www.topcreativeformat.com/.../invoke.js" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Social Bar / Popunder Script URL</label>
+              <input name="adsterraSocialBarUrl" value="${escapeHtml(cfg.adsterraSocialBarUrl)}" placeholder="https://pl...effectivegatecpm.com/...js" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+          </div>
+
+          <!-- Monetag / PropellerAds -->
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="font-bold text-[#105B34]">4️⃣ Monetag / PropellerAds</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="monetagEnabled" ${cfg.monetagEnabled ? "checked" : ""} /> সক্রিয়</label>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Monetag Zone ID</label>
+              <input name="monetagZoneId" value="${escapeHtml(cfg.monetagZoneId)}" placeholder="Zone ID (e.g. 8123456)" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Monetag Script Tag URL</label>
+              <input name="monetagScriptUrl" value="${escapeHtml(cfg.monetagScriptUrl)}" placeholder="https://alwingulla.com/88/tag.min.js" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Ezoic / Media.net / Custom HTML + Direct Sponsor -->
+        <div class="grid md:grid-cols-2 gap-5">
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="font-bold text-[#105B34]">5️⃣ Ezoic / Media.net / Infolinks / Custom Tag</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="customAdEnabled" ${cfg.customAdEnabled ? "checked" : ""} /> সক্রিয়</label>
+            </div>
+            <input name="customAdName" value="${escapeHtml(cfg.customAdName)}" placeholder="Network Name" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            <div><label class="text-[11px] font-bold block mb-1">Top Banner HTML / Embed</label><textarea name="customTopHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customTopHtml)}</textarea></div>
+            <div><label class="text-[11px] font-bold block mb-1">In-Feed Banner HTML / Embed</label><textarea name="customFeedHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customFeedHtml)}</textarea></div>
+            <div><label class="text-[11px] font-bold block mb-1">Footer Banner HTML / Embed</label><textarea name="customFooterHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customFooterHtml)}</textarea></div>
+          </div>
+
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="font-bold text-[#105B34]">6️⃣ সরাসরি কৃষি স্পন্সর ব্যানার (Direct Ads)</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="sponsorEnabled" ${cfg.sponsorEnabled ? "checked" : ""} /> সক্রিয়</label>
+            </div>
+            <div><label class="text-[11px] font-bold block mb-1">স্পন্সর শিরোনাম</label><input name="sponsorTitle" value="${escapeHtml(cfg.sponsorTitle)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+            <div><label class="text-[11px] font-bold block mb-1">সংক্ষিপ্ত বিবরণ</label><input name="sponsorSubtitle" value="${escapeHtml(cfg.sponsorSubtitle)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+            <div><label class="text-[11px] font-bold block mb-1">ব্যানার ছবি URL (ঐচ্ছিক)</label><input name="sponsorImageUrl" value="${escapeHtml(cfg.sponsorImageUrl)}" placeholder="https://..." class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+            <div class="grid grid-cols-2 gap-2">
+              <div><label class="text-[11px] font-bold block mb-1">লিংক URL</label><input name="sponsorTargetUrl" value="${escapeHtml(cfg.sponsorTargetUrl)}" placeholder="https://..." class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+              <div><label class="text-[11px] font-bold block mb-1">বাটন টেক্সট</label><input name="sponsorCtaText" value="${escapeHtml(cfg.sponsorCtaText)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+            </div>
+          </div>
+        </div>
+
+        <button type="submit" class="w-full py-3.5 rounded-2xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm shadow">
+          💾 সব বিজ্ঞাপন সেটিংস সেভ করুন (অ্যাপ ও ওয়েবসাইটে লাইভ হবে)
+        </button>
+      </form>
+    `;
   } else {
     bodyHtml = `<div class="space-y-2">${state.auditLogs.slice(0, 60).map((a) => `<div class="bg-white rounded-xl p-3 border border-emerald-100 text-xs flex justify-between"><div><strong>${escapeHtml(a.actionBn)}</strong> — ${escapeHtml(a.detailsBn)}</div><span class="text-gray-500">${new Date(a.createdAt).toLocaleString("bn-BD")}</span></div>`).join("") || `<div class="bg-white rounded-2xl p-8 text-center">কোনো লগ নেই।</div>`}</div>`;
   }
@@ -2370,8 +2732,8 @@ function renderInfoPage() {
   const content = {
     about: `<h2 class="text-xl font-bold text-[#105B34]">আমাদের সম্পর্কে</h2><p class="text-sm text-gray-700 leading-relaxed">কৃষি বন্ধু (Krishi Bondhu) হলো বাংলাদেশের কৃষকদের ন্যায্য মূল্য নিশ্চিত করার জন্য নির্মিত একটি ১০০% দালালমুক্ত, শূন্য-কমিশন ডিজিটাল কৃষিপণ্য বাজার। কুষ্টিয়া জেলা থেকে সূচনা হয়ে এখন সারা বাংলাদেশের ৮টি বিভাগ ও ৬৪টি জেলায় কৃষক ও ক্রেতার মধ্যে সরাসরি সংযোগ স্থাপন করছে।</p>`,
     contact: `<h2 class="text-xl font-bold text-[#105B34]">যোগাযোগ</h2><p class="text-sm text-gray-700">সহায়তা কেন্দ্র: support@krishibondhu.bd • হেল্পলাইন: +৮৮০ ১৭০০-০০০০০০ • সারা বাংলাদেশ (৬৪ জেলা)</p>`,
-    privacy: `<h2 class="text-xl font-bold text-[#105B34]">গোপনীয়তা নীতি</h2><p class="text-sm text-gray-700 leading-relaxed">ব্যবহারকারীদের পাসওয়ার্ড SHA-256 হ্যাশ দিয়ে সুরক্ষিত রাখা হয় এবং প্রতিটি নোটিফিকেশন শুধুমাত্র নির্দিষ্ট প্রাপক বা অনুমোদিত ঘোষণার মধ্যেই সীমাবদ্ধ থাকে।</p>`,
-    terms: `<h2 class="text-xl font-bold text-[#105B34]">শর্তাবলী</h2><p class="text-sm text-gray-700 leading-relaxed">কৃষক নিজেই ফসলের দাম ও মান নির্ধারণ করেন। প্ল্যাটফর্ম কোনো দালাল বা বাধ্যতামূলক লেনদেন কমিশন গ্রহণ করে না।</p>`
+    privacy: `<h2 class="text-xl font-bold text-[#105B34]">গোপনীয়তা নীতি (Privacy Policy)</h2><p class="text-sm text-gray-700 leading-relaxed">ব্যবহারকারীদের পাসওয়ার্ড SHA-256 হ্যাশ দিয়ে সুরক্ষিত রাখা হয় এবং প্রতিটি নোটিফিকেশন শুধুমাত্র নির্দিষ্ট প্রাপক বা অনুমোদিত ঘোষণার মধ্যেই সীমাবদ্ধ থাকে।</p><p class="text-sm text-gray-700 leading-relaxed mt-2">বিজ্ঞাপন ও মনিটাইজেশন: মোবাইল অ্যাপে Google AdMob এবং ওয়েবসাইটে Google AdSense, Adsterra, Monetag বা অনুমোদিত বিজ্ঞাপন নেটওয়ার্ক ব্যবহার হতে পারে। প্রাসঙ্গিক বিজ্ঞাপন দেখাতে কুকি বা Advertising ID ব্যবহৃত হতে পারে, তবে আপনার এনআইডি বা পাসওয়ার্ড কখনোই বিজ্ঞাপনদাতার সাথে শেয়ার করা হয় না।</p>`,
+    terms: `<h2 class="text-xl font-bold text-[#105B34]">শর্তাবলী</h2><p class="text-sm text-gray-700 leading-relaxed">কৃষক নিজেই ফসলের দাম ও মান নির্ধারণ করেন। প্ল্যাটফর্ম কোনো দালাল বা বাধ্যতামূলক লেনদেন কমিশন গ্রহণ করে না। অ্যাপ ও ওয়েবসাইটের রক্ষণাবেক্ষণের জন্য নির্ধারিত স্থানে বিজ্ঞাপন প্রদর্শিত হতে পারে।</p>`
   };
 
   return `
@@ -2439,6 +2801,7 @@ function renderCurrentView() {
     default:
       root.innerHTML = renderHomePage();
   }
+  mountPageAdPlacements();
 }
 
 // ---------------------- Event Bridge ----------------------
@@ -2743,6 +3106,40 @@ window.kbApp = {
     const fd = new FormData(e.target);
     await adminAddLocation(fd.get("divisionBn"), fd.get("districtBn"), fd.get("upazilaBn"), fd.get("unionBn"), "");
     e.target.reset();
+  },
+  async handleAdminSaveAdConfig(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    await adminSaveAdConfig({
+      adsEnabled: fd.get("adsEnabled") === "on",
+      showAdsLabel: fd.get("showAdsLabel") === "on",
+      androidAdsEnabled: fd.get("androidAdsEnabled") === "on",
+      androidBannerId: String(fd.get("androidBannerId") || "").trim(),
+      androidInterstitialId: String(fd.get("androidInterstitialId") || "").trim(),
+      adsenseEnabled: fd.get("adsenseEnabled") === "on",
+      adsenseClient: String(fd.get("adsenseClient") || "").trim(),
+      adsenseTopSlot: String(fd.get("adsenseTopSlot") || "").trim(),
+      adsenseFeedSlot: String(fd.get("adsenseFeedSlot") || "").trim(),
+      adsenseFooterSlot: String(fd.get("adsenseFooterSlot") || "").trim(),
+      adsterraEnabled: fd.get("adsterraEnabled") === "on",
+      adsterraBannerKey: String(fd.get("adsterraBannerKey") || "").trim(),
+      adsterraScriptUrl: String(fd.get("adsterraScriptUrl") || "").trim(),
+      adsterraSocialBarUrl: String(fd.get("adsterraSocialBarUrl") || "").trim(),
+      monetagEnabled: fd.get("monetagEnabled") === "on",
+      monetagZoneId: String(fd.get("monetagZoneId") || "").trim(),
+      monetagScriptUrl: String(fd.get("monetagScriptUrl") || "").trim(),
+      customAdEnabled: fd.get("customAdEnabled") === "on",
+      customAdName: String(fd.get("customAdName") || "").trim() || "Custom Ad",
+      customTopHtml: String(fd.get("customTopHtml") || ""),
+      customFeedHtml: String(fd.get("customFeedHtml") || ""),
+      customFooterHtml: String(fd.get("customFooterHtml") || ""),
+      sponsorEnabled: fd.get("sponsorEnabled") === "on",
+      sponsorTitle: String(fd.get("sponsorTitle") || "").trim(),
+      sponsorSubtitle: String(fd.get("sponsorSubtitle") || "").trim(),
+      sponsorImageUrl: String(fd.get("sponsorImageUrl") || "").trim(),
+      sponsorTargetUrl: String(fd.get("sponsorTargetUrl") || "").trim(),
+      sponsorCtaText: String(fd.get("sponsorCtaText") || "").trim() || "বিস্তারিত দেখুন"
+    });
   },
   openReviewModal(orderId) {
     openModal(`

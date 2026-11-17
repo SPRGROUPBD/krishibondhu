@@ -493,6 +493,14 @@ fun HomeScreen(
                 }
             }
         }
+
+        item {
+            AdBannerSection(
+                adConfig = uiState.adConfig,
+                placementTag = "home",
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+        }
     }
 }
 

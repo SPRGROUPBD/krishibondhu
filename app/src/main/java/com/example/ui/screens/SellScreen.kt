@@ -208,6 +208,7 @@ fun SellScreen(
                 AddProductFormCard(
                     categories = uiState.categories.filter { it.isActive },
                     defaultAddress = "${activeUser.village}, ${activeUser.upazila}, ${activeUser.district}",
+                    defaultDistrict = activeUser.district.ifBlank { "কুষ্টিয়া" },
                     onSubmit = { cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, delivery, fee, wholesale ->
                         onAddProduct(cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, delivery, fee, wholesale)
                         showAddForm = false
@@ -301,6 +302,7 @@ private fun FarmerStatBox(label: String, value: String, modifier: Modifier = Mod
 private fun AddProductFormCard(
     categories: List<CategoryEntity>,
     defaultAddress: String,
+    defaultDistrict: String = "কুষ্টিয়া",
     onSubmit: (
         CategoryEntity, String, String, String, Double, String, Double,
         String, String, String, Boolean, Boolean, Double, Boolean
@@ -624,7 +626,7 @@ private fun AddProductFormCard(
 
     if (showMapDialog) {
         InteractiveBangladeshMapDialog(
-            initialDistrictBn = "কুষ্টিয়া",
+            initialDistrictBn = defaultDistrict,
             onDismiss = { showMapDialog = false },
             onLocationConfirmed = { detected ->
                 pickupAddress = detected.addressLine

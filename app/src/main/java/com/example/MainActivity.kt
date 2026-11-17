@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ads.AdMonetizationManager
 import com.example.ui.navigation.KrishiBondhuApp
 import com.example.ui.theme.KrishiBondhuTheme
 import com.example.ui.viewmodel.KrishiBondhuViewModel
@@ -22,6 +23,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        AdMonetizationManager.initialize(this)
         setContent {
             val viewModel: KrishiBondhuViewModel = viewModel()
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -40,6 +42,14 @@ class MainActivity : ComponentActivity() {
                         notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 }
+            }
+
+            LaunchedEffect(uiState.adConfig.adsEnabled, uiState.adConfig.androidAdsEnabled, uiState.adConfig.androidInterstitialId) {
+                AdMonetizationManager.preloadInterstitial(
+                    context = this@MainActivity,
+                    overrideUnitId = uiState.adConfig.androidInterstitialId,
+                    enabled = uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled
+                )
             }
 
             KrishiBondhuTheme(darkTheme = uiState.darkMode) {

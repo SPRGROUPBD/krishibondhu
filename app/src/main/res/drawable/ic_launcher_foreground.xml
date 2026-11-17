@@ -1,32 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <!-- Subtle dark green shadow under emblem -->
-    <path
-        android:fillColor="#26000000"
-        android:pathData="M54,30 C44,30 37,39 37,49 C37,54 41,58 46,60 L46,63 L33,63 C31,63 30,65 30,67 C30,74 39,80 54,80 C69,80 78,74 78,67 C78,65 77,63 75,63 L62,63 L62,60 C67,58 71,54 71,49 C71,39 64,30 54,30 Z"
-        android:translateY="2" />
-    <!-- Center upright sprout leaf -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,28 C48,35 48,47 54,55 C60,47 60,35 54,28 Z" />
-    <!-- Left leaf -->
-    <path
-        android:fillColor="#EAF7EF"
-        android:pathData="M52,54 C42,53 33,46 31,37 C40,37 49,43 52,54 Z" />
-    <!-- Right leaf -->
-    <path
-        android:fillColor="#EAF7EF"
-        android:pathData="M56,54 C66,53 75,46 77,37 C68,37 59,43 56,54 Z" />
-    <!-- Stem and curved fertile field arc -->
-    <path
-        android:fillColor="#F9C74F"
-        android:pathData="M29,66 C37,59 45,58 54,58 C63,58 71,59 79,66 C73,63 64,62 54,62 C44,62 35,63 29,66 Z" />
-    <!-- Harvest basket / soil base arc -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M33,69 L75,69 C73,75 64,79 54,79 C44,79 35,75 33,69 Z" />
-</vector>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:width="72dp"
+        android:height="72dp"
+        android:drawable="@drawable/ic_launcher_foreground_img"
+        android:gravity="center" />
+</layer-list>

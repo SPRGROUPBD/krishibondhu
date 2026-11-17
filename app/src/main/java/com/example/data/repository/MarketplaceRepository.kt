@@ -6,6 +6,9 @@ import com.example.data.model.*
 import com.example.data.remote.FirebaseRealtimeSyncManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 
 class MarketplaceRepository(
@@ -33,6 +36,9 @@ class MarketplaceRepository(
     val notifications: Flow<List<NotificationEntity>> = db.notificationAuditDao().observeNotifications()
     val auditLogs: Flow<List<AuditLogEntity>> = db.notificationAuditDao().observeAuditLogs()
 
+    private val _adConfig = MutableStateFlow(AdConfig())
+    val adConfig: StateFlow<AdConfig> = _adConfig.asStateFlow()
+
     fun observeOrderItems(orderId: String): Flow<List<OrderItemEntity>> =
         db.orderDao().observeOrderItems(orderId)
 
@@ -42,7 +48,12 @@ class MarketplaceRepository(
     ) {
         MasterCatalogSeeder.initialize(db)
         if (scope != null) {
-            rtdbSync.startRealtimeListeners(db, scope, onIncomingNotification)
+            rtdbSync.startRealtimeListeners(
+                localDb = db,
+                scope = scope,
+                onAdConfigChanged = { _adConfig.value = it },
+                onIncomingNotification = onIncomingNotification
+            )
         }
     }
 
@@ -725,12 +736,39 @@ class MarketplaceRepository(
         rtdbSync.pushAuditLog(audit)
     }
 
+    suspend fun adminSaveAdConfig(admin: UserEntity, config: AdConfig): Result<Unit> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন বিজ্ঞাপন সেটিংস পরিবর্তন করতে পারেন।"))
+        }
+        val stamped = config.copy(updatedAt = System.currentTimeMillis())
+        _adConfig.value = stamped
+        rtdbSync.pushAdConfig(stamped)
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "বিজ্ঞাপন ও মনিটাইজেশন আপডেট",
+            targetEntity = "AdConfig",
+            targetId = "adConfig",
+            detailsBn = "Android Ads: ${if (stamped.androidAdsEnabled) "চালু" else "বন্ধ"}, AdSense: ${if (stamped.adsenseEnabled) "চালু" else "বন্ধ"}, Adsterra: ${if (stamped.adsterraEnabled) "চালু" else "বন্ধ"}, Monetag: ${if (stamped.monetagEnabled) "চালু" else "বন্ধ"}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(Unit)
+    }
+
     suspend fun markNotificationsRead(activeUser: UserEntity?) {
         if (activeUser == null) return
-        if (activeUser.role == UserRole.ADMIN.name) {
-            db.notificationAuditDao().markAllNotificationsRead()
+        val dao = db.notificationAuditDao()
+        val toMark = if (activeUser.role == UserRole.ADMIN.name) {
+            val list = dao.getUnreadNotifications()
+            dao.markAllNotificationsRead()
+            list
         } else {
-            db.notificationAuditDao().markNotificationsReadForUser(activeUser.id, activeUser.role)
+            val list = dao.getUnreadNotificationsForUser(activeUser.id, activeUser.role)
+            dao.markNotificationsReadForUser(activeUser.id, activeUser.role)
+            list
         }
+        toMark.forEach { rtdbSync.pushNotificationRead(it.id) }
     }
 }

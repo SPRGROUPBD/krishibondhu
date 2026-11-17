@@ -1,5 +1,8 @@
 package com.example.ui.navigation
 
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -8,6 +11,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import android.app.Activity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -18,6 +23,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.ads.AdMonetizationManager
 import com.example.data.model.AppLanguage
 import com.example.data.model.UserRole
 import com.example.ui.components.EmptyStateView
@@ -26,6 +32,7 @@ import com.example.ui.screens.*
 import com.example.ui.viewmodel.KrishiBondhuViewModel
 
 object Routes {
+    const val SPLASH = "splash"
     const val HOME = "home"
     const val BROWSE = "browse?farmers={farmers}"
     const val SELL = "sell"
@@ -63,6 +70,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
+    val activity = LocalContext.current as? Activity
 
     LaunchedEffect(uiState.toastMessage) {
         val msg = uiState.toastMessage
@@ -73,7 +81,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
     }
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = navBackStackEntry?.destination?.route ?: Routes.HOME
+    val currentRoute = navBackStackEntry?.destination?.route ?: Routes.SPLASH
 
     val topLevelRoutes = setOf(Routes.HOME, Routes.BROWSE, Routes.SELL, Routes.ORDERS, Routes.PROFILE)
     val isTopLevel = topLevelRoutes.any { currentRoute.startsWith(it.substringBefore("?")) }
@@ -93,6 +101,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
 
         Scaffold(
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+            contentWindowInsets = if (currentRoute == Routes.SPLASH) WindowInsets(0, 0, 0, 0) else ScaffoldDefaults.contentWindowInsets,
             topBar = {
                 if (isTopLevel) {
                     KrishiTopBar(
@@ -182,10 +191,28 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
 
                 NavHost(
                     navController = navController,
-                    startDestination = Routes.HOME,
+                    startDestination = Routes.SPLASH,
                     modifier = Modifier.weight(1f)
                 ) {
-                    composable(Routes.HOME) {
+                    composable(
+                        route = Routes.SPLASH,
+                        exitTransition = { fadeOut(animationSpec = tween(350)) }
+                    ) {
+                        SplashScreen(
+                            isAppLoading = uiState.isLoading,
+                            onSplashComplete = {
+                                navController.navigate(Routes.HOME) {
+                                    popUpTo(Routes.SPLASH) { inclusive = true }
+                                    launchSingleTop = true
+                                }
+                            }
+                        )
+                    }
+
+                    composable(
+                        route = Routes.HOME,
+                        enterTransition = { fadeIn(animationSpec = tween(350)) }
+                    ) {
                         HomeScreen(
                             uiState = uiState,
                             onNavigateToBrowse = { navController.navigate(Routes.browse(false)) },
@@ -280,7 +307,14 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         ProductDetailScreen(
                             productId = pid,
                             uiState = uiState,
-                            onBack = { navController.popBackStack() },
+                            onBack = {
+                                navController.popBackStack()
+                                AdMonetizationManager.maybeShowInterstitial(
+                                    activity = activity,
+                                    overrideUnitId = uiState.adConfig.androidInterstitialId,
+                                    enabled = uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled
+                                )
+                            },
                             onFarmerClick = { fid -> navController.navigate(Routes.farmerProfile(fid)) },
                             onAddToCart = { qty ->
                                 uiState.products.firstOrNull { it.id == pid }?.let {
@@ -324,6 +358,11 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                     navController.navigate(Routes.ORDERS) {
                                         popUpTo(Routes.HOME)
                                     }
+                                    AdMonetizationManager.maybeShowInterstitial(
+                                        activity = activity,
+                                        overrideUnitId = uiState.adConfig.androidInterstitialId,
+                                        enabled = uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled
+                                    )
                                 }
                             }
                         )
@@ -358,6 +397,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 onAddCategory = viewModel::adminAddCategory,
                                 onAddLocation = viewModel::adminAddLocation,
                                 onResolveComplaint = viewModel::adminResolveComplaint,
+                                onSaveAdConfig = viewModel::adminSaveAdConfig,
                                 onBuildCsvReport = viewModel::buildCsvReport
                             )
                         } else {

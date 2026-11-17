@@ -20,19 +20,17 @@ object KrishiNotificationHelper {
     private const val CHANNEL_DESC = "নতুন অর্ডার, ডেলিভারি আপডেট ও অ্যাডমিন নোটিফিকেশন"
 
     fun ensureChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            runCatching {
-                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-                    ?: return
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    CHANNEL_NAME,
-                    NotificationManager.IMPORTANCE_HIGH
-                ).apply {
-                    description = CHANNEL_DESC
-                }
-                manager.createNotificationChannel(channel)
+        runCatching {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                ?: return
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = CHANNEL_DESC
             }
+            manager.createNotificationChannel(channel)
         }
     }
 

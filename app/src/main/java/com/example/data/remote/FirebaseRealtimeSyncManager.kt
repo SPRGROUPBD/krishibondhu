@@ -2,6 +2,7 @@ package com.example.data.remote
 
 import android.util.Log
 import com.example.data.local.*
+import com.example.data.model.AdConfig
 import com.google.firebase.FirebaseApp
 import com.google.firebase.database.*
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +38,7 @@ class FirebaseRealtimeSyncManager {
     fun startRealtimeListeners(
         localDb: KrishiBondhuDatabase,
         scope: CoroutineScope,
+        onAdConfigChanged: (AdConfig) -> Unit = {},
         onIncomingNotification: (NotificationEntity) -> Unit
     ) {
         if (listenersAttached) return
@@ -137,14 +139,17 @@ class FirebaseRealtimeSyncManager {
             }
         })
 
-        // 6. Notifications real-time ChildEventListener (triggers local alert on incoming events)
+        // 6. Notifications real-time ChildEventListener (preserves local read state & alerts on new unread items)
         root.child("notifications").addChildEventListener(object : ChildEventListener {
             override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
                 val notif = snapToNotification(snapshot) ?: return
                 scope.launch(Dispatchers.IO) {
-                    runCatching { localDb.notificationAuditDao().insertNotification(notif) }
-                    if (!notif.isRead) {
-                        onIncomingNotification(notif)
+                    val dao = localDb.notificationAuditDao()
+                    val existing = runCatching { dao.getNotificationById(notif.id) }.getOrNull()
+                    val merged = if (existing != null && existing.isRead) notif.copy(isRead = true) else notif
+                    runCatching { dao.insertNotification(merged) }
+                    if (existing == null && !merged.isRead) {
+                        onIncomingNotification(merged)
                     }
                 }
             }
@@ -152,7 +157,10 @@ class FirebaseRealtimeSyncManager {
             override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
                 val notif = snapToNotification(snapshot) ?: return
                 scope.launch(Dispatchers.IO) {
-                    runCatching { localDb.notificationAuditDao().insertNotification(notif) }
+                    val dao = localDb.notificationAuditDao()
+                    val existing = runCatching { dao.getNotificationById(notif.id) }.getOrNull()
+                    val merged = if (existing != null && existing.isRead) notif.copy(isRead = true) else notif
+                    runCatching { dao.insertNotification(merged) }
                 }
             }
 
@@ -160,6 +168,19 @@ class FirebaseRealtimeSyncManager {
             override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
             override fun onCancelled(error: DatabaseError) {
                 Log.w(TAG, "notifications listener cancelled: ${error.message}")
+            }
+        })
+
+        // 6b. Ad Monetization Configuration listener
+        root.child("adConfig").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (snapshot.exists()) {
+                    snapToAdConfig(snapshot)?.let { onAdConfigChanged(it) }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "adConfig listener cancelled: ${error.message}")
             }
         })
 
@@ -279,6 +300,20 @@ class FirebaseRealtimeSyncManager {
             val root = rootRefOrNull() ?: return
             root.child("auditLogs").child(log.id).setValue(auditLogToMap(log)).await()
         }.onFailure { Log.w(TAG, "pushAuditLog skipped: ${it.message}") }
+    }
+
+    suspend fun pushNotificationRead(notificationId: String) {
+        runCatching {
+            val root = rootRefOrNull() ?: return
+            root.child("notifications").child(notificationId).child("isRead").setValue(true).await()
+        }.onFailure { Log.w(TAG, "pushNotificationRead skipped: ${it.message}") }
+    }
+
+    suspend fun pushAdConfig(config: AdConfig) {
+        runCatching {
+            val root = rootRefOrNull() ?: return
+            root.child("adConfig").setValue(adConfigToMap(config)).await()
+        }.onFailure { Log.w(TAG, "pushAdConfig skipped: ${it.message}") }
     }
 
     // Explicit Map conversions (avoids Kotlin boolean `is*` getter naming mismatch with JS/Web)
@@ -636,6 +671,72 @@ class FirebaseRealtimeSyncManager {
             createdAt = s.lng("createdAt") ?: System.currentTimeMillis()
         )
     }
+
+    private fun adConfigToMap(a: AdConfig): Map<String, Any?> = mapOf(
+        "adsEnabled" to a.adsEnabled,
+        "showAdsLabel" to a.showAdsLabel,
+        "androidAdsEnabled" to a.androidAdsEnabled,
+        "androidBannerId" to a.androidBannerId,
+        "androidInterstitialId" to a.androidInterstitialId,
+        "adsenseEnabled" to a.adsenseEnabled,
+        "adsenseClient" to a.adsenseClient,
+        "adsenseTopSlot" to a.adsenseTopSlot,
+        "adsenseFeedSlot" to a.adsenseFeedSlot,
+        "adsenseFooterSlot" to a.adsenseFooterSlot,
+        "adsterraEnabled" to a.adsterraEnabled,
+        "adsterraBannerKey" to a.adsterraBannerKey,
+        "adsterraScriptUrl" to a.adsterraScriptUrl,
+        "adsterraSocialBarUrl" to a.adsterraSocialBarUrl,
+        "monetagEnabled" to a.monetagEnabled,
+        "monetagZoneId" to a.monetagZoneId,
+        "monetagScriptUrl" to a.monetagScriptUrl,
+        "customAdEnabled" to a.customAdEnabled,
+        "customAdName" to a.customAdName,
+        "customTopHtml" to a.customTopHtml,
+        "customFeedHtml" to a.customFeedHtml,
+        "customFooterHtml" to a.customFooterHtml,
+        "sponsorEnabled" to a.sponsorEnabled,
+        "sponsorTitle" to a.sponsorTitle,
+        "sponsorSubtitle" to a.sponsorSubtitle,
+        "sponsorImageUrl" to a.sponsorImageUrl,
+        "sponsorTargetUrl" to a.sponsorTargetUrl,
+        "sponsorCtaText" to a.sponsorCtaText,
+        "updatedAt" to a.updatedAt
+    )
+
+    private fun snapToAdConfig(s: DataSnapshot): AdConfig? = runCatching {
+        AdConfig(
+            adsEnabled = s.bool("adsEnabled") ?: true,
+            showAdsLabel = s.bool("showAdsLabel") ?: true,
+            androidAdsEnabled = s.bool("androidAdsEnabled") ?: true,
+            androidBannerId = s.str("androidBannerId") ?: "",
+            androidInterstitialId = s.str("androidInterstitialId") ?: "",
+            adsenseEnabled = s.bool("adsenseEnabled") ?: false,
+            adsenseClient = s.str("adsenseClient") ?: "",
+            adsenseTopSlot = s.str("adsenseTopSlot") ?: "",
+            adsenseFeedSlot = s.str("adsenseFeedSlot") ?: "",
+            adsenseFooterSlot = s.str("adsenseFooterSlot") ?: "",
+            adsterraEnabled = s.bool("adsterraEnabled") ?: false,
+            adsterraBannerKey = s.str("adsterraBannerKey") ?: "",
+            adsterraScriptUrl = s.str("adsterraScriptUrl") ?: "",
+            adsterraSocialBarUrl = s.str("adsterraSocialBarUrl") ?: "",
+            monetagEnabled = s.bool("monetagEnabled") ?: false,
+            monetagZoneId = s.str("monetagZoneId") ?: "",
+            monetagScriptUrl = s.str("monetagScriptUrl") ?: "",
+            customAdEnabled = s.bool("customAdEnabled") ?: false,
+            customAdName = s.str("customAdName") ?: "Ezoic / Media.net / Custom",
+            customTopHtml = s.str("customTopHtml") ?: "",
+            customFeedHtml = s.str("customFeedHtml") ?: "",
+            customFooterHtml = s.str("customFooterHtml") ?: "",
+            sponsorEnabled = s.bool("sponsorEnabled") ?: true,
+            sponsorTitle = s.str("sponsorTitle") ?: "সরাসরি কৃষকের বীজ, সার ও আধুনিক কৃষি পরামর্শ",
+            sponsorSubtitle = s.str("sponsorSubtitle") ?: "কৃষি বন্ধু স্পন্সর স্লট — অ্যাডমিন প্যানেল থেকে কাস্টম বিজ্ঞাপন বা ব্যানার যুক্ত করুন।",
+            sponsorImageUrl = s.str("sponsorImageUrl") ?: "",
+            sponsorTargetUrl = s.str("sponsorTargetUrl") ?: "",
+            sponsorCtaText = s.str("sponsorCtaText") ?: "বিস্তারিত দেখুন",
+            updatedAt = s.lng("updatedAt") ?: 0L
+        )
+    }.getOrNull()
 
     private fun DataSnapshot.str(key: String): String? = child(key).getValue(String::class.java)
     private fun DataSnapshot.bool(key: String): Boolean? = child(key).getValue(Boolean::class.java)

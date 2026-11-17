@@ -26,6 +26,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.data.model.AdConfig
 import com.example.data.model.formatBdt
 import com.example.ui.components.OrderStatusChip
 import com.example.ui.theme.*
@@ -41,12 +42,13 @@ fun AdminDashboardScreen(
     onAddCategory: (nameBn: String, nameEn: String, emoji: String) -> Unit,
     onAddLocation: (division: String, district: String, upazila: String, union: String, village: String) -> Unit,
     onResolveComplaint: (complaintId: String) -> Unit,
+    onSaveAdConfig: (AdConfig) -> Unit = {},
     onBuildCsvReport: () -> String
 ) {
     val context = LocalContext.current
     val stats = uiState.adminStats
     var selectedTab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("সারসংক্ষেপ", "কৃষক যাচাই", "নোটিফিকেশন পাঠান", "ক্যাটাগরি", "এলাকা", "অর্ডার ও অভিযোগ", "অডিট লগ")
+    val tabs = listOf("সারসংক্ষেপ", "কৃষক যাচাই", "নোটিফিকেশন পাঠান", "ক্যাটাগরি", "এলাকা", "অর্ডার ও অভিযোগ", "অডিট লগ", "বিজ্ঞাপন ও AdMob")
 
     Scaffold(
         topBar = {
@@ -123,6 +125,7 @@ fun AdminDashboardScreen(
                 4 -> AdminLocationsTab(uiState = uiState, onAddLocation = onAddLocation)
                 5 -> AdminOrdersComplaintsTab(uiState = uiState, onResolveComplaint = onResolveComplaint)
                 6 -> AdminAuditLogTab(uiState = uiState)
+                7 -> AdminAdMonetizationTab(adConfig = uiState.adConfig, onSaveAdConfig = onSaveAdConfig)
             }
         }
     }
@@ -611,6 +614,211 @@ private fun AdminAuditLogTab(uiState: MarketplaceUiState) {
                     Text("${log.actionBn} (${log.actorRole})", fontWeight = FontWeight.Bold, color = DarkGreen)
                     Text(log.detailsBn, style = MaterialTheme.typography.bodySmall)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdminAdMonetizationTab(
+    adConfig: AdConfig,
+    onSaveAdConfig: (AdConfig) -> Unit
+) {
+    var adsEnabled by remember(adConfig) { mutableStateOf(adConfig.adsEnabled) }
+    var showAdsLabel by remember(adConfig) { mutableStateOf(adConfig.showAdsLabel) }
+    var androidAdsEnabled by remember(adConfig) { mutableStateOf(adConfig.androidAdsEnabled) }
+    var androidBannerId by remember(adConfig) { mutableStateOf(adConfig.androidBannerId) }
+    var androidInterstitialId by remember(adConfig) { mutableStateOf(adConfig.androidInterstitialId) }
+
+    var sponsorEnabled by remember(adConfig) { mutableStateOf(adConfig.sponsorEnabled) }
+    var sponsorTitle by remember(adConfig) { mutableStateOf(adConfig.sponsorTitle) }
+    var sponsorSubtitle by remember(adConfig) { mutableStateOf(adConfig.sponsorSubtitle) }
+    var sponsorImageUrl by remember(adConfig) { mutableStateOf(adConfig.sponsorImageUrl) }
+    var sponsorTargetUrl by remember(adConfig) { mutableStateOf(adConfig.sponsorTargetUrl) }
+    var sponsorCtaText by remember(adConfig) { mutableStateOf(adConfig.sponsorCtaText) }
+
+    var adsenseEnabled by remember(adConfig) { mutableStateOf(adConfig.adsenseEnabled) }
+    var adsenseClient by remember(adConfig) { mutableStateOf(adConfig.adsenseClient) }
+    var adsenseTopSlot by remember(adConfig) { mutableStateOf(adConfig.adsenseTopSlot) }
+    var adsenseFeedSlot by remember(adConfig) { mutableStateOf(adConfig.adsenseFeedSlot) }
+    var adsenseFooterSlot by remember(adConfig) { mutableStateOf(adConfig.adsenseFooterSlot) }
+
+    var adsterraEnabled by remember(adConfig) { mutableStateOf(adConfig.adsterraEnabled) }
+    var adsterraBannerKey by remember(adConfig) { mutableStateOf(adConfig.adsterraBannerKey) }
+    var adsterraScriptUrl by remember(adConfig) { mutableStateOf(adConfig.adsterraScriptUrl) }
+    var adsterraSocialBarUrl by remember(adConfig) { mutableStateOf(adConfig.adsterraSocialBarUrl) }
+
+    var monetagEnabled by remember(adConfig) { mutableStateOf(adConfig.monetagEnabled) }
+    var monetagZoneId by remember(adConfig) { mutableStateOf(adConfig.monetagZoneId) }
+    var monetagScriptUrl by remember(adConfig) { mutableStateOf(adConfig.monetagScriptUrl) }
+
+    var customAdEnabled by remember(adConfig) { mutableStateOf(adConfig.customAdEnabled) }
+    var customAdName by remember(adConfig) { mutableStateOf(adConfig.customAdName) }
+    var customTopHtml by remember(adConfig) { mutableStateOf(adConfig.customTopHtml) }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("গ্লোবাল ও অ্যান্ড্রয়েড AdMob মনিটাইজেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text(
+                        "এখান থেকে সেভ করলে Firebase RTDB (/adConfig)-এর মাধ্যমে মোবাইল অ্যাপ ও ওয়েবসাইট দুই জায়গাতেই লাইভ আপডেট হবে।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("সব বিজ্ঞাপন সক্রিয় রাখুন", modifier = Modifier.weight(1f))
+                        Switch(checked = adsEnabled, onCheckedChange = { adsEnabled = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("বিজ্ঞাপন লেবেল (Sponsored) দেখান", modifier = Modifier.weight(1f))
+                        Switch(checked = showAdsLabel, onCheckedChange = { showAdsLabel = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("Android Google AdMob ব্যানার ও ইন্টারস্টিশিয়াল", modifier = Modifier.weight(1f))
+                        Switch(checked = androidAdsEnabled, onCheckedChange = { androidAdsEnabled = it })
+                    }
+                    OutlinedTextField(
+                        value = androidBannerId,
+                        onValueChange = { androidBannerId = it },
+                        label = { Text("AdMob Banner Unit ID (ফাঁকা রাখলে Google Test ID)") },
+                        placeholder = { Text("ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_admob_banner_input")
+                    )
+                    OutlinedTextField(
+                        value = androidInterstitialId,
+                        onValueChange = { androidInterstitialId = it },
+                        label = { Text("AdMob Interstitial Unit ID (ফাঁকা রাখলে Google Test ID)") },
+                        placeholder = { Text("ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_admob_interstitial_input")
+                    )
+                }
+            }
+        }
+
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("সরাসরি স্পন্সর ব্যানার (অ্যাপ + ওয়েবসাইট)", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Switch(checked = sponsorEnabled, onCheckedChange = { sponsorEnabled = it })
+                    }
+                    OutlinedTextField(value = sponsorTitle, onValueChange = { sponsorTitle = it }, label = { Text("স্পন্সর শিরোনাম") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = sponsorSubtitle, onValueChange = { sponsorSubtitle = it }, label = { Text("বিবরণ") }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = sponsorImageUrl, onValueChange = { sponsorImageUrl = it }, label = { Text("ব্যানার ছবির URL (ঐচ্ছিক)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(value = sponsorTargetUrl, onValueChange = { sponsorTargetUrl = it }, label = { Text("লিঙ্ক URL") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = sponsorCtaText, onValueChange = { sponsorCtaText = it }, label = { Text("বাটন টেক্সট") }, singleLine = true, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("ওয়েবসাইট অ্যাড নেটওয়ার্কসমূহ (Web Monetization)", fontWeight = FontWeight.Bold, color = DarkGreen)
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Google AdSense চালু", modifier = Modifier.weight(1f))
+                        Switch(checked = adsenseEnabled, onCheckedChange = { adsenseEnabled = it })
+                    }
+                    OutlinedTextField(value = adsenseClient, onValueChange = { adsenseClient = it }, label = { Text("AdSense Publisher ID (ca-pub-...)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(value = adsenseTopSlot, onValueChange = { adsenseTopSlot = it }, label = { Text("Top Slot ID") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = adsenseFeedSlot, onValueChange = { adsenseFeedSlot = it }, label = { Text("Feed Slot ID") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = adsenseFooterSlot, onValueChange = { adsenseFooterSlot = it }, label = { Text("Footer Slot ID") }, singleLine = true, modifier = Modifier.weight(1f))
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Adsterra Ad Network চালু", modifier = Modifier.weight(1f))
+                        Switch(checked = adsterraEnabled, onCheckedChange = { adsterraEnabled = it })
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(value = adsterraBannerKey, onValueChange = { adsterraBannerKey = it }, label = { Text("Adsterra Banner Key") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = adsterraScriptUrl, onValueChange = { adsterraScriptUrl = it }, label = { Text("invoke.js URL") }, singleLine = true, modifier = Modifier.weight(1f))
+                    }
+                    OutlinedTextField(value = adsterraSocialBarUrl, onValueChange = { adsterraSocialBarUrl = it }, label = { Text("Adsterra Social Bar / Pop Script URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Monetag / PropellerAds চালু", modifier = Modifier.weight(1f))
+                        Switch(checked = monetagEnabled, onCheckedChange = { monetagEnabled = it })
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(value = monetagZoneId, onValueChange = { monetagZoneId = it }, label = { Text("Monetag Zone ID") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = monetagScriptUrl, onValueChange = { monetagScriptUrl = it }, label = { Text("Monetag Script URL") }, singleLine = true, modifier = Modifier.weight(1f))
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Ezoic / Media.net / Custom HTML বিজ্ঞাপন", modifier = Modifier.weight(1f))
+                        Switch(checked = customAdEnabled, onCheckedChange = { customAdEnabled = it })
+                    }
+                    OutlinedTextField(value = customAdName, onValueChange = { customAdName = it }, label = { Text("কাস্টম নেটওয়ার্ক নাম") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = customTopHtml, onValueChange = { customTopHtml = it }, label = { Text("Custom Top Banner HTML / Tag") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+                }
+            }
+        }
+
+        item {
+            Button(
+                onClick = {
+                    onSaveAdConfig(
+                        adConfig.copy(
+                            adsEnabled = adsEnabled,
+                            showAdsLabel = showAdsLabel,
+                            androidAdsEnabled = androidAdsEnabled,
+                            androidBannerId = androidBannerId.trim(),
+                            androidInterstitialId = androidInterstitialId.trim(),
+                            sponsorEnabled = sponsorEnabled,
+                            sponsorTitle = sponsorTitle.trim(),
+                            sponsorSubtitle = sponsorSubtitle.trim(),
+                            sponsorImageUrl = sponsorImageUrl.trim(),
+                            sponsorTargetUrl = sponsorTargetUrl.trim(),
+                            sponsorCtaText = sponsorCtaText.trim(),
+                            adsenseEnabled = adsenseEnabled,
+                            adsenseClient = adsenseClient.trim(),
+                            adsenseTopSlot = adsenseTopSlot.trim(),
+                            adsenseFeedSlot = adsenseFeedSlot.trim(),
+                            adsenseFooterSlot = adsenseFooterSlot.trim(),
+                            adsterraEnabled = adsterraEnabled,
+                            adsterraBannerKey = adsterraBannerKey.trim(),
+                            adsterraScriptUrl = adsterraScriptUrl.trim(),
+                            adsterraSocialBarUrl = adsterraSocialBarUrl.trim(),
+                            monetagEnabled = monetagEnabled,
+                            monetagZoneId = monetagZoneId.trim(),
+                            monetagScriptUrl = monetagScriptUrl.trim(),
+                            customAdEnabled = customAdEnabled,
+                            customAdName = customAdName.trim(),
+                            customTopHtml = customTopHtml
+                        )
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp)
+                    .testTag("admin_save_ad_config_button")
+            ) {
+                Text("বিজ্ঞাপন সেটিংস সেভ করুন (RTDB Live)", fontWeight = FontWeight.Bold)
             }
         }
     }

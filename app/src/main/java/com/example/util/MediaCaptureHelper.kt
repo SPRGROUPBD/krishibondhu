@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
 import androidx.core.content.FileProvider
+import androidx.core.graphics.scale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -42,7 +43,7 @@ object MediaCaptureHelper {
                 val targetW = max(1, (original.width * scale).roundToInt())
                 val targetH = max(1, (original.height * scale).roundToInt())
                 val scaled = if (scale < 1f) {
-                    Bitmap.createScaledBitmap(original, targetW, targetH, true)
+                    original.scale(targetW, targetH)
                 } else {
                     original
                 }

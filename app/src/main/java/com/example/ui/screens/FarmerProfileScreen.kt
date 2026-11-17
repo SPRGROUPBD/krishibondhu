@@ -1,7 +1,6 @@
 package com.example.ui.screens
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.net.toUri
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.ProductCard
 import com.example.ui.theme.DarkGreen
@@ -152,7 +152,7 @@ fun FarmerProfileScreen(
                             Button(
                                 onClick = {
                                     runCatching {
-                                        context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:${farmer.phone}")))
+                                        context.startActivity(Intent(Intent.ACTION_DIAL, "tel:${farmer.phone}".toUri()))
                                     }
                                 },
                                 modifier = Modifier.weight(1f)
@@ -164,7 +164,7 @@ fun FarmerProfileScreen(
                             OutlinedButton(
                                 onClick = {
                                     runCatching {
-                                        context.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${farmer.phone}")))
+                                        context.startActivity(Intent(Intent.ACTION_SENDTO, "smsto:${farmer.phone}".toUri()))
                                     }
                                 },
                                 modifier = Modifier.weight(1f)

@@ -106,8 +106,14 @@
   <!-- Toast Banner -->
   <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-sm pointer-events-none"></div>
 
+  <!-- Top Ad Slot -->
+  <div id="ad-slot-top" class="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 empty:hidden"></div>
+
   <!-- Main Content -->
   <main id="app-root" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6"></main>
+
+  <!-- Footer Ad Slot -->
+  <div id="ad-slot-footer" class="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pb-4 empty:hidden"></div>
 
   <!-- Modal Container -->
   <div id="modal-root" class="hidden fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4"></div>
@@ -150,6 +156,9 @@
       © ২০২৬ কৃষি বন্ধু (Krishi Bondhu) • দালালমুক্ত সরাসরি কৃষক-ক্রেতা প্ল্যাটফর্ম • বাংলাদেশ
     </div>
   </footer>
+
+  <!-- Dynamic Ad Network Script Container -->
+  <div id="ad-scripts-root" class="hidden" aria-hidden="true"></div>
 
   <script type="module" src="app.js"></script>
 </body>

@@ -11,9 +11,9 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,6 +24,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import com.example.ui.theme.DarkGreen
 import com.example.ui.theme.LightGreen
 import com.example.ui.theme.PrimaryGreen
@@ -222,13 +223,13 @@ fun InteractiveBangladeshMapDialog(
                         onClick = {
                             val res = customDetected ?: LocationHelper.locationForDistrictCentroid(selectedCentroid.districtBn)
                             runCatching {
-                                val geoUri = Uri.parse("geo:${res.latitude},${res.longitude}?q=${res.latitude},${res.longitude}(${Uri.encode(res.districtBn)})")
+                                val geoUri = "geo:${res.latitude},${res.longitude}?q=${res.latitude},${res.longitude}(${Uri.encode(res.districtBn)})".toUri()
                                 context.startActivity(Intent(Intent.ACTION_VIEW, geoUri))
                             }
                         },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(Icons.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("ম্যাপ খুলুন")
                     }

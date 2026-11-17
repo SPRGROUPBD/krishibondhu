@@ -94,6 +94,38 @@ data class AdminDashboardStats(
     val districtSales: Map<String, Double> = emptyMap()
 )
 
+data class AdConfig(
+    val adsEnabled: Boolean = true,
+    val showAdsLabel: Boolean = true,
+    val androidAdsEnabled: Boolean = true,
+    val androidBannerId: String = "",
+    val androidInterstitialId: String = "",
+    val adsenseEnabled: Boolean = false,
+    val adsenseClient: String = "",
+    val adsenseTopSlot: String = "",
+    val adsenseFeedSlot: String = "",
+    val adsenseFooterSlot: String = "",
+    val adsterraEnabled: Boolean = false,
+    val adsterraBannerKey: String = "",
+    val adsterraScriptUrl: String = "",
+    val adsterraSocialBarUrl: String = "",
+    val monetagEnabled: Boolean = false,
+    val monetagZoneId: String = "",
+    val monetagScriptUrl: String = "",
+    val customAdEnabled: Boolean = false,
+    val customAdName: String = "Ezoic / Media.net / Custom",
+    val customTopHtml: String = "",
+    val customFeedHtml: String = "",
+    val customFooterHtml: String = "",
+    val sponsorEnabled: Boolean = true,
+    val sponsorTitle: String = "সরাসরি কৃষকের বীজ, সার ও আধুনিক কৃষি পরামর্শ",
+    val sponsorSubtitle: String = "কৃষি বন্ধু স্পন্সর স্লট — অ্যাডমিন প্যানেল থেকে কাস্টম বিজ্ঞাপন বা ব্যানার যুক্ত করুন।",
+    val sponsorImageUrl: String = "",
+    val sponsorTargetUrl: String = "",
+    val sponsorCtaText: String = "বিস্তারিত দেখুন",
+    val updatedAt: Long = 0L
+)
+
 fun Double.formatBdt(): String {
     val rounded = kotlin.math.round(this * 100.0) / 100.0
     return if (rounded % 1.0 == 0.0) {

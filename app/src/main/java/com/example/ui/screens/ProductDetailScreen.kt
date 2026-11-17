@@ -1,7 +1,6 @@
 package com.example.ui.screens
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,9 +20,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import com.example.data.model.AppLanguage
 import com.example.data.model.formatBdt
 import com.example.data.model.formatQty
+import com.example.ui.components.AdBannerSection
 import com.example.ui.components.ProductVisualArtwork
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.MarketplaceUiState
@@ -229,7 +230,7 @@ fun ProductDetailScreen(
                                     OutlinedButton(
                                         onClick = {
                                             runCatching {
-                                                val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${farmer.phone}"))
+                                                val intent = Intent(Intent.ACTION_DIAL, "tel:${farmer.phone}".toUri())
                                                 context.startActivity(intent)
                                             }
                                         },
@@ -242,7 +243,7 @@ fun ProductDetailScreen(
                                     OutlinedButton(
                                         onClick = {
                                             runCatching {
-                                                val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${farmer.phone}"))
+                                                val intent = Intent(Intent.ACTION_SENDTO, "smsto:${farmer.phone}".toUri())
                                                 context.startActivity(intent)
                                             }
                                         },
@@ -341,6 +342,14 @@ fun ProductDetailScreen(
                         }
                     }
                 }
+            }
+
+            item {
+                AdBannerSection(
+                    adConfig = uiState.adConfig,
+                    placementTag = "product_detail",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                )
             }
         }
     }

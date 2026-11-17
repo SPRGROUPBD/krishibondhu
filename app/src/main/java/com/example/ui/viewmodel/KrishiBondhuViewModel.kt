@@ -36,6 +36,7 @@ data class MarketplaceUiState(
     val selectedUpazila: String? = null,
     val wholesaleOnly: Boolean? = null,
     val priceSort: PriceSort = PriceSort.NEWEST,
+    val adConfig: AdConfig = AdConfig(),
     val toastMessage: String? = null
 ) {
     val activeRole: UserRole?
@@ -205,8 +206,12 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         commerceDataFlow,
         repo.auditLogs,
         filterState,
-        combine(toastFlow, NetworkMonitor.observeIsOnline(application)) { t, online -> t to online }
-    ) { core, commerce, audits, filter, (toast, online) ->
+        combine(
+            toastFlow,
+            NetworkMonitor.observeIsOnline(application),
+            repo.adConfig
+        ) { t, online, adCfg -> Triple(t, online, adCfg) }
+    ) { core, commerce, audits, filter, (toast, online, adConfig) ->
         val activeUser = if (core.session.activeUserId.isNotBlank()) {
             core.users.firstOrNull { it.id == core.session.activeUserId }
         } else {
@@ -237,6 +242,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             selectedUpazila = filter.upazila,
             wholesaleOnly = filter.wholesaleOnly,
             priceSort = filter.priceSort,
+            adConfig = adConfig,
             toastMessage = toast
         )
     }.stateIn(
@@ -515,6 +521,16 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             repo.adminResolveComplaint(admin, complaintId)
             showToast("অভিযোগ সমাধান হিসেবে চিহ্নিত")
+        }
+    }
+
+    fun adminSaveAdConfig(config: AdConfig) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminSaveAdConfig(admin, config)
+                .onSuccess { showToast("বিজ্ঞাপন ও মনিটাইজেশন সেটিংস সংরক্ষিত হয়েছে!") }
+                .onFailure { showToast(it.message ?: "বিজ্ঞাপন সেটিংস সংরক্ষণ ব্যর্থ হয়েছে") }
         }
     }
 

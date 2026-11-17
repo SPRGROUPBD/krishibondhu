@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -32,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.model.AppLanguage
 import com.example.data.model.BangladeshLocations
 import com.example.data.model.PriceSort
+import com.example.ui.components.AdBannerSection
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.FarmerCard
 import com.example.ui.components.InteractiveBangladeshMapDialog
@@ -363,7 +365,7 @@ fun BrowseScreen(
                             sortLow to PriceSort.PRICE_LOW_HIGH,
                             sortHigh to PriceSort.PRICE_HIGH_LOW
                         ),
-                        onSelect = { selected -> if (selected != null) onSortSelect(selected) },
+                        onSelect = onSortSelect,
                         modifier = Modifier.weight(1f),
                         testTag = "filter_sort_dropdown"
                     )
@@ -402,6 +404,13 @@ fun BrowseScreen(
                             onQuickAddToCart = { onQuickAddToCart(prod.id) }
                         )
                     }
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        AdBannerSection(
+                            adConfig = uiState.adConfig,
+                            placementTag = "browse_crops",
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
                 }
             }
         } else {
@@ -429,6 +438,13 @@ fun BrowseScreen(
                             productCount = count,
                             language = lang,
                             onClick = { onFarmerClick(farmer.id) }
+                        )
+                    }
+                    item {
+                        AdBannerSection(
+                            adConfig = uiState.adConfig,
+                            placementTag = "browse_farmers",
+                            modifier = Modifier.padding(top = 4.dp)
                         )
                     }
                 }

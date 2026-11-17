@@ -1,7 +1,6 @@
 package com.example.ui.screens
 
 import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -21,6 +20,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.OrderItemEntity
 import com.example.data.model.OrderStatus
@@ -191,7 +191,7 @@ fun OrderDetailScreen(
                         }
                         Button(onClick = {
                             runCatching {
-                                context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$targetPhone")))
+                                context.startActivity(Intent(Intent.ACTION_DIAL, "tel:$targetPhone".toUri()))
                             }
                         }) {
                             Icon(Icons.Filled.Call, contentDescription = null, modifier = Modifier.size(18.dp))
