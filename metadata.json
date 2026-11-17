@@ -1,5 +1,5 @@
 {
-  "name": "কৃষি বন্ধু",
+  "name": "KrishiBondhu",
   "description": "সারা বাংলাদেশের (৬৪ জেলা) জন্য সরাসরি কৃষক থেকে ক্রেতা দালালমুক্ত ও শূন্য-কমিশন ডিজিটাল কৃষিপণ্য বাজার।",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

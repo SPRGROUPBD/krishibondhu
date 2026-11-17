@@ -52,7 +52,7 @@ class ExampleRobolectricTest {
     @Test
     fun appNameAndPackageIdMatchRequirements() {
         val appName = context.getString(R.string.app_name)
-        assertEquals("কৃষি বন্ধু", appName)
+        assertEquals("KrishiBondhu", appName)
         assertEquals("com.krishibondhu.bd", BuildConfig.APPLICATION_ID)
     }
 
