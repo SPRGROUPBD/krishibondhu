@@ -1,0 +1,467 @@
+package com.example.ui.screens
+
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.unit.dp
+import com.example.data.model.BangladeshLocations
+import com.example.data.model.UserRole
+import com.example.ui.components.InteractiveBangladeshMapDialog
+import com.example.ui.theme.DarkGreen
+import com.example.ui.theme.LightGreen
+import com.example.ui.viewmodel.MarketplaceUiState
+import com.example.util.LocationHelper
+import kotlinx.coroutines.launch
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LoginScreen(
+    onBack: () -> Unit,
+    onLogin: (identifier: String, password: String) -> Unit,
+    onGoToRegister: () -> Unit
+) {
+    var loginId by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("লগইন করুন") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "ফিরে যান")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(MaterialTheme.colorScheme.background)
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "আপনার নিবন্ধিত মোবাইল নম্বর বা ইউজার আইডি দিয়ে প্রবেশ করুন।",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            OutlinedTextField(
+                value = loginId,
+                onValueChange = { loginId = it },
+                label = { Text("মোবাইল নম্বর বা ইউজার আইডি *") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                modifier = Modifier.fillMaxWidth().testTag("login_phone_input")
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("পাসওয়ার্ড *") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth().testTag("login_password_input")
+            )
+
+            Button(
+                onClick = { onLogin(loginId, password) },
+                enabled = loginId.isNotBlank() && password.isNotBlank(),
+                modifier = Modifier.fillMaxWidth().height(50.dp).testTag("login_submit_button")
+            ) {
+                Text("প্রবেশ করুন", fontWeight = FontWeight.Bold)
+            }
+
+            TextButton(onClick = onGoToRegister, modifier = Modifier.fillMaxWidth()) {
+                Text("অ্যাকাউন্ট নেই? নতুন নিবন্ধন করুন")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RegisterScreen(
+    uiState: MarketplaceUiState,
+    initialRole: UserRole = UserRole.BUYER,
+    onBack: () -> Unit,
+    onRegister: (
+        fullName: String,
+        phone: String,
+        password: String,
+        role: UserRole,
+        division: String,
+        district: String,
+        upazila: String,
+        unionName: String,
+        village: String,
+        nidLastFour: String,
+        farmBio: String
+    ) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var role by remember { mutableStateOf(initialRole) }
+    var fullName by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var otpCode by remember { mutableStateOf("") }
+    var otpSent by remember { mutableStateOf(false) }
+    var otpVerified by remember { mutableStateOf(false) }
+    var password by remember { mutableStateOf("") }
+
+    var selectedDivision by remember { mutableStateOf(BangladeshLocations.divisions.first()) }
+    var selectedDistrict by remember {
+        mutableStateOf(BangladeshLocations.districtsForDivision(BangladeshLocations.divisions.first()).firstOrNull()?.districtBn ?: "ঢাকা")
+    }
+    var selectedUpazila by remember {
+        mutableStateOf(BangladeshLocations.upazilasForDistrict(selectedDistrict).firstOrNull() ?: selectedDistrict)
+    }
+
+    val districtsForDivision = remember(selectedDivision) {
+        BangladeshLocations.districtsForDivision(selectedDivision).map { it.districtBn }
+    }
+    val upazilasForDistrict = remember(selectedDistrict, uiState.locations) {
+        (BangladeshLocations.upazilasForDistrict(selectedDistrict) +
+            uiState.locations.filter { it.districtBn == selectedDistrict }.map { it.upazilaBn }).distinct()
+    }
+    var unionName by remember { mutableStateOf("") }
+    var village by remember { mutableStateOf("") }
+    var nidLastFour by remember { mutableStateOf("") }
+    var farmBio by remember { mutableStateOf("") }
+
+    var showMapDialog by remember { mutableStateOf(false) }
+    var detectingLocation by remember { mutableStateOf(false) }
+    var autoLocationStatus by remember { mutableStateOf<String?>(null) }
+
+    val runAutoGps: () -> Unit = {
+        detectingLocation = true
+        autoLocationStatus = "ম্যাপ ও GPS থেকে লোকেশন শনাক্ত করা হচ্ছে..."
+        scope.launch {
+            LocationHelper.detectCurrentLocation(context)
+                .onSuccess { detected ->
+                    selectedDivision = detected.divisionBn
+                    selectedDistrict = detected.districtBn
+                    selectedUpazila = detected.upazilaBn
+                    autoLocationStatus = "অটো লোকেশন: ${detected.upazilaBn}, ${detected.districtBn} (${detected.divisionBn})"
+                }
+                .onFailure {
+                    autoLocationStatus = "GPS পাওয়া যায়নি — ম্যাপ ডায়ালগ থেকে জেলা নির্বাচন করুন"
+                    showMapDialog = true
+                }
+            detectingLocation = false
+        }
+    }
+
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val granted = grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true ||
+            grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        if (granted) {
+            runAutoGps()
+        } else {
+            autoLocationStatus = "লোকেশন অনুমতি দেওয়া হয়নি — ম্যাপ থেকে জেলা নির্বাচন করুন"
+            showMapDialog = true
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("নতুন নিবন্ধন (Registration)") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "ফিরে যান")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .background(MaterialTheme.colorScheme.background),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FilterChip(
+                        selected = role == UserRole.BUYER,
+                        onClick = { role = UserRole.BUYER },
+                        label = { Text("ক্রেতা (Buyer)") },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = role == UserRole.FARMER,
+                        onClick = { role = UserRole.FARMER },
+                        label = { Text("কৃষক (Farmer)") },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            item {
+                OutlinedTextField(
+                    value = fullName,
+                    onValueChange = { fullName = it },
+                    label = { Text("পূর্ণ নাম *") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = phone,
+                        onValueChange = { phone = it },
+                        label = { Text("মোবাইল নম্বর *") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = { otpSent = true },
+                        enabled = phone.length >= 10
+                    ) {
+                        Text(if (otpSent) "পুনরায় পাঠান" else "OTP পাঠান")
+                    }
+                }
+                if (otpSent && !otpVerified) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = otpCode,
+                            onValueChange = { otpCode = it },
+                            label = { Text("OTP কোড") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f)
+                        )
+                        Button(
+                            onClick = { if (otpCode.length >= 4) otpVerified = true },
+                            enabled = otpCode.length >= 4
+                        ) {
+                            Text("যাচাই")
+                        }
+                    }
+                }
+                if (otpVerified) {
+                    Text("মোবাইল নম্বর যাচাইকৃত ✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = LightGreen),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "ম্যাপ / GPS থেকে অটো লোকেশন",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = DarkGreen
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    if (LocationHelper.hasLocationPermission(context)) {
+                                        runAutoGps()
+                                    } else {
+                                        locationPermissionLauncher.launch(
+                                            arrayOf(
+                                                Manifest.permission.ACCESS_COARSE_LOCATION,
+                                                Manifest.permission.ACCESS_FINE_LOCATION
+                                            )
+                                        )
+                                    }
+                                },
+                                enabled = !detectingLocation,
+                                modifier = Modifier.weight(1f).testTag("register_auto_gps_button")
+                            ) {
+                                if (detectingLocation) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                                } else {
+                                    Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp))
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("অটো GPS")
+                            }
+                            OutlinedButton(
+                                onClick = { showMapDialog = true },
+                                modifier = Modifier.weight(1f).testTag("register_open_map_button")
+                            ) {
+                                Icon(Icons.Filled.Map, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("ম্যাপ খুলুন")
+                            }
+                        }
+                        autoLocationStatus?.let {
+                            Text(it, style = MaterialTheme.typography.labelSmall, color = DarkGreen)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("বিভাগ নির্বাচন করুন (সারা বাংলাদেশ) *", style = MaterialTheme.typography.labelLarge)
+                Spacer(modifier = Modifier.height(4.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(BangladeshLocations.divisions) { div ->
+                        FilterChip(
+                            selected = selectedDivision == div,
+                            onClick = {
+                                selectedDivision = div
+                                val firstDist = BangladeshLocations.districtsForDivision(div).firstOrNull()?.districtBn ?: "ঢাকা"
+                                selectedDistrict = firstDist
+                                selectedUpazila = BangladeshLocations.upazilasForDistrict(firstDist).firstOrNull() ?: firstDist
+                            },
+                            label = { Text(div) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("জেলা নির্বাচন করুন (${districtsForDivision.size}টি) *", style = MaterialTheme.typography.labelLarge)
+                Spacer(modifier = Modifier.height(4.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(districtsForDivision) { dist ->
+                        FilterChip(
+                            selected = selectedDistrict == dist,
+                            onClick = {
+                                selectedDistrict = dist
+                                selectedUpazila = BangladeshLocations.upazilasForDistrict(dist).firstOrNull() ?: dist
+                            },
+                            label = { Text(dist) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("উপজেলা নির্বাচন করুন *", style = MaterialTheme.typography.labelLarge)
+                Spacer(modifier = Modifier.height(4.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(upazilasForDistrict) { u ->
+                        FilterChip(
+                            selected = selectedUpazila == u,
+                            onClick = { selectedUpazila = u },
+                            label = { Text(u) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = selectedUpazila,
+                    onValueChange = { selectedUpazila = it },
+                    label = { Text("উপজেলা / থানা *") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = unionName,
+                        onValueChange = { unionName = it },
+                        label = { Text("ইউনিয়ন") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = village,
+                        onValueChange = { village = it },
+                        label = { Text("গ্রাম") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            if (role == UserRole.FARMER) {
+                item {
+                    OutlinedTextField(
+                        value = nidLastFour,
+                        onValueChange = { if (it.length <= 4) nidLastFour = it },
+                        label = { Text("এনআইডি শেষ ৪ অঙ্ক (গোপন ও মাস্কড থাকবে)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = farmBio,
+                        onValueChange = { farmBio = it },
+                        label = { Text("আপনার খামার ও ফসলের বিবরণ") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+
+            item {
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text("পাসওয়ার্ড (সর্বনিম্ন ৬ অক্ষর) *") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            item {
+                val canSubmit = fullName.isNotBlank() && phone.length >= 10 && password.length >= 6
+                Button(
+                    onClick = {
+                        onRegister(
+                            fullName, phone, password, role,
+                            selectedDivision, selectedDistrict, selectedUpazila, unionName, village, nidLastFour, farmBio
+                        )
+                    },
+                    enabled = canSubmit,
+                    modifier = Modifier.fillMaxWidth().height(50.dp).testTag("register_submit_button")
+                ) {
+                    Text("নিবন্ধন সম্পন্ন করুন", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+
+    if (showMapDialog) {
+        InteractiveBangladeshMapDialog(
+            initialDistrictBn = selectedDistrict,
+            onDismiss = { showMapDialog = false },
+            onLocationConfirmed = { detected ->
+                selectedDivision = detected.divisionBn
+                selectedDistrict = detected.districtBn
+                selectedUpazila = detected.upazilaBn
+                autoLocationStatus = "নির্বাচিত (${detected.sourceLabel}): ${detected.upazilaBn}, ${detected.districtBn}"
+                showMapDialog = false
+            }
+        )
+    }
+}

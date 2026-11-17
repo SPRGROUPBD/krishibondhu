@@ -1,0 +1,112 @@
+package com.example.data.model
+
+enum class AppLanguage(val labelBn: String, val labelEn: String) {
+    BENGALI("বাংলা", "Bengali"),
+    ENGLISH("English", "English")
+}
+
+enum class UserRole(val titleBn: String, val titleEn: String) {
+    BUYER("ক্রেতা", "Buyer"),
+    FARMER("কৃষক", "Farmer"),
+    ADMIN("সুপার অ্যাডমিন", "Super Admin")
+}
+
+enum class ProductUnit(val labelBn: String, val labelEn: String) {
+    KG("কেজি", "Kg"),
+    MON("মণ", "Maund"),
+    BAG("বস্তা", "Bag"),
+    TON("টন", "Ton"),
+    PIECE("পিস", "Piece"),
+    LITER("লিটার", "Liter");
+
+    companion object {
+        val allLabelsBn: List<String> = entries.map { it.labelBn }
+    }
+}
+
+enum class OrderStatus(val labelBn: String, val labelEn: String) {
+    PENDING("Pending", "Pending"),
+    ACCEPTED("Accepted", "Accepted"),
+    REJECTED("Rejected", "Rejected"),
+    PROCESSING("Processing", "Processing"),
+    READY_FOR_PICKUP("Ready for Pickup", "Ready for Pickup"),
+    SHIPPED("Shipped", "Shipped"),
+    DELIVERED("Delivered", "Delivered"),
+    COMPLETED("Completed", "Completed"),
+    CANCELLED("Cancelled", "Cancelled"),
+    DISPUTED("Disputed", "Disputed");
+
+    fun display(lang: AppLanguage): String = when (this) {
+        PENDING -> if (lang == AppLanguage.BENGALI) "অপেক্ষমান (Pending)" else "Pending"
+        ACCEPTED -> if (lang == AppLanguage.BENGALI) "গৃহীত (Accepted)" else "Accepted"
+        REJECTED -> if (lang == AppLanguage.BENGALI) "প্রত্যাখ্যাত (Rejected)" else "Rejected"
+        PROCESSING -> if (lang == AppLanguage.BENGALI) "প্রস্তুত হচ্ছে (Processing)" else "Processing"
+        READY_FOR_PICKUP -> if (lang == AppLanguage.BENGALI) "সংগ্রহের জন্য প্রস্তুত" else "Ready for Pickup"
+        SHIPPED -> if (lang == AppLanguage.BENGALI) "পথে আছে (Shipped)" else "Shipped"
+        DELIVERED -> if (lang == AppLanguage.BENGALI) "পৌঁছেছে (Delivered)" else "Delivered"
+        COMPLETED -> if (lang == AppLanguage.BENGALI) "সম্পন্ন (Completed)" else "Completed"
+        CANCELLED -> if (lang == AppLanguage.BENGALI) "বাতিল (Cancelled)" else "Cancelled"
+        DISPUTED -> if (lang == AppLanguage.BENGALI) "বিরোধপূর্ণ (Disputed)" else "Disputed"
+    }
+}
+
+enum class DeliveryOption(val labelBn: String, val labelEn: String) {
+    FARM_PICKUP(
+        "ক্রেতা সরাসরি কৃষকের কাছ থেকে পণ্য সংগ্রহ করবেন",
+        "Buyer collects directly from farmer"
+    ),
+    DIRECT_DELIVERY(
+        "কৃষক ও ক্রেতা সরাসরি ডেলিভারি ব্যবস্থা করবেন",
+        "Farmer & buyer arrange delivery directly"
+    )
+}
+
+enum class PaymentMethod(val labelBn: String, val labelEn: String, val isDigital: Boolean) {
+    CASH_ON_PICKUP("Cash on Pickup", "Cash on Pickup", false),
+    DIRECT_CASH("Direct Cash Payment", "Direct Cash Payment", false),
+    BANK_TRANSFER("Direct Bank Transfer", "Direct Bank Transfer", true),
+    BKASH("bKash", "bKash", true),
+    NAGAD("Nagad", "Nagad", true);
+
+    fun display(lang: AppLanguage): String = when (this) {
+        CASH_ON_PICKUP -> if (lang == AppLanguage.BENGALI) "সংগ্রহের সময় নগদ (Cash on Pickup)" else "Cash on Pickup"
+        DIRECT_CASH -> if (lang == AppLanguage.BENGALI) "সরাসরি নগদ প্রদান (Direct Cash)" else "Direct Cash Payment"
+        BANK_TRANSFER -> if (lang == AppLanguage.BENGALI) "সরাসরি ব্যাংক ট্রান্সফার" else "Direct Bank Transfer"
+        BKASH -> if (lang == AppLanguage.BENGALI) "বিকাশ (bKash - গেটওয়ে)" else "bKash (Gateway)"
+        NAGAD -> if (lang == AppLanguage.BENGALI) "নগদ (Nagad - গেটওয়ে)" else "Nagad (Gateway)"
+    }
+}
+
+enum class PriceSort {
+    NEWEST,
+    PRICE_LOW_HIGH,
+    PRICE_HIGH_LOW
+}
+
+data class AdminDashboardStats(
+    val totalFarmers: Int = 0,
+    val verifiedFarmers: Int = 0,
+    val totalBuyers: Int = 0,
+    val activeProducts: Int = 0,
+    val todaysOrders: Int = 0,
+    val completedOrders: Int = 0,
+    val totalSalesAmount: Double = 0.0,
+    val districtSales: Map<String, Double> = emptyMap()
+)
+
+fun Double.formatBdt(): String {
+    val rounded = kotlin.math.round(this * 100.0) / 100.0
+    return if (rounded % 1.0 == 0.0) {
+        "৳ %,d".format(rounded.toLong())
+    } else {
+        "৳ %,.2f".format(rounded)
+    }
+}
+
+fun Double.formatQty(): String {
+    return if (this % 1.0 == 0.0) {
+        this.toLong().toString()
+    } else {
+        "%.1f".format(this)
+    }
+}

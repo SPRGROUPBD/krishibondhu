@@ -1,0 +1,49 @@
+{
+  "project_info": {
+    "project_number": "1022188847076",
+    "firebase_url": "https://screen-playbd-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "screen-playbd",
+    "storage_bucket": "screen-playbd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1022188847076:android:a5869dbc2abab770fd11f1",
+        "android_client_info": {
+          "package_name": "com.krishibondhu.bd"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3Cd6qJVF8cl7mK4z_7egEdxXcn-hHDoA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1022188847076:android:49e654ebe8a64e42fd11f1",
+        "android_client_info": {
+          "package_name": "com.screen.play"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3Cd6qJVF8cl7mK4z_7egEdxXcn-hHDoA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
