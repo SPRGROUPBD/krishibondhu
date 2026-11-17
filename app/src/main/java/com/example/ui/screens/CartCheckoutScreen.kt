@@ -313,7 +313,7 @@ fun CartCheckoutScreen(
                         if (selectedPayment.isDigital) {
                             Surface(color = HarvestGoldLight, shape = RoundedCornerShape(10.dp)) {
                                 Text(
-                                    text = "নিরাপদ পেমেন্ট নীতি: শুধু ট্রানজেকশন/স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না। কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ এবং অ্যাডমিন যাচাইয়ের পর অর্ডার Confirmed হবে।",
+                                    text = "নিরাপদ পেমেন্ট নীতি: শুধু ট্রানজেকশন/স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না। কৃষক টাকা বুঝে পেয়ে অনুমোদন করলেই অর্ডার চূড়ান্ত Confirmed হবে (অ্যাডমিন অনুমোদনের প্রয়োজন নেই)।",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color(0xFF78350F),
                                     modifier = Modifier.padding(10.dp)

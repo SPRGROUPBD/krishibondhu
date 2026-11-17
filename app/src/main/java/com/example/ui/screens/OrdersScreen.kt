@@ -294,13 +294,13 @@ fun OrdersScreen(
                                     )
                                 }
                                 Surface(
-                                    color = if (order.adminPaymentVerified) LightGreen else MaterialTheme.colorScheme.surfaceVariant,
+                                    color = if (order.farmerPaymentConfirmed) LightGreen else MaterialTheme.colorScheme.surfaceVariant,
                                     shape = RoundedCornerShape(6.dp)
                                 ) {
                                     Text(
-                                        text = if (order.adminPaymentVerified) "✓ অ্যাডমিন যাচাইকৃত" else "অ্যাডমিন যাচাই বাকি",
+                                        text = if (order.farmerPaymentConfirmed) "✓ পেমেন্ট অনুমোদিত ও Confirmed" else "অ্যাডমিন অনুমোদন প্রয়োজন নেই",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (order.adminPaymentVerified) DarkGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = if (order.farmerPaymentConfirmed) DarkGreen else MaterialTheme.colorScheme.onSurfaceVariant,
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )

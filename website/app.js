@@ -1702,19 +1702,7 @@ async function submitOrderPayment(orderId, { paymentMethod, senderNumber, transa
     orderId: order.id,
     type: "ORDER_PAYMENT_SUBMITTED",
     titleBn: `ক্রেতা পেমেন্ট তথ্য জমা দিয়েছেন (${order.orderCode})`,
-    messageBn: `ক্রেতা ${buyer.fullName} ${formatBdt(order.grandTotal)} (TxID: ${cleanTx || "রসিদ"}) পাঠিয়েছেন। টাকা বুঝে পেলে 'টাকা বুঝে পেয়েছি' নিশ্চিত করুন।`,
-    isRead: false,
-    createdAt: now
-  };
-  const adminNotif = {
-    id: shortId("not"),
-    userId: "ALL",
-    targetRole: "ADMIN",
-    senderRole: "BUYER",
-    orderId: order.id,
-    type: "ORDER_PAYMENT_VERIFY_REQ",
-    titleBn: `অর্ডার পেমেন্ট যাচাই প্রয়োজন (${order.orderCode})`,
-    messageBn: `${buyer.fullName} -> ${order.farmerName}: ${formatBdt(order.grandTotal)} (TxID: ${cleanTx || "রসিদ সংযুক্ত"})।`,
+    messageBn: `ক্রেতা ${buyer.fullName} ${formatBdt(order.grandTotal)} (TxID: ${cleanTx || "রসিদ"}) পাঠিয়েছেন। টাকা বুঝে পেলে 'টাকা বুঝে পেয়েছি' অনুমোদন দিলেই অর্ডার Confirmed হবে।`,
     isRead: false,
     createdAt: now
   };
@@ -1728,16 +1716,15 @@ async function submitOrderPayment(orderId, { paymentMethod, senderNumber, transa
     detailsBn: `${order.orderCode} — ${order.paymentMethod} | TxID: ${cleanTx || "রসিদ"}`,
     createdAt: now
   };
-  state.notifications.unshift(farmerNotif, adminNotif);
+  state.notifications.unshift(farmerNotif);
   state.auditLogs.unshift(audit);
   saveLocalSnapshot();
 
   await rtdbPush(`orders/${order.id}`, order);
   await rtdbPush(`notifications/${farmerNotif.id}`, farmerNotif);
-  await rtdbPush(`notifications/${adminNotif.id}`, adminNotif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
-  showToast("পেমেন্ট তথ্য জমা হয়েছে! কৃষকের টাকা প্রাপ্তি ও অ্যাডমিন যাচাইয়ের পর অর্ডার নিশ্চিত হবে।", "success");
+  showToast("পেমেন্ট তথ্য জমা হয়েছে! কৃষক টাকা প্রাপ্তি অনুমোদন করলে অর্ডার Confirmed হবে।", "success");
   closeModal();
   renderCurrentView();
   return true;
@@ -1761,7 +1748,7 @@ async function farmerConfirmPaymentReceived(orderId) {
   order.farmerPaymentConfirmed = true;
   order.farmerPaymentConfirmedAt = now;
   const readyToConfirm = ["ACCEPTED", "PROCESSING", "READY_FOR_PICKUP", "READY", "SHIPPED", "DELIVERED"].includes(order.status);
-  if (order.adminPaymentVerified && readyToConfirm) {
+  if (readyToConfirm) {
     order.status = "CONFIRMED";
     order.paymentStatus = "PAID";
   }
@@ -1775,9 +1762,7 @@ async function farmerConfirmPaymentReceived(orderId) {
     orderId: order.id,
     type: "FARMER_PAYMENT_CONFIRMED",
     titleBn: `কৃষক টাকা বুঝে পেয়েছেন (${order.orderCode})`,
-    messageBn: order.adminPaymentVerified
-      ? "কৃষক টাকা প্রাপ্তি নিশ্চিত করেছেন এবং অ্যাডমিন যাচাই সম্পন্ন হওয়ায় অর্ডারটি চূড়ান্ত নিশ্চিত (Confirmed) হয়েছে।"
-      : "কৃষক টাকা পাওয়ার বিষয়টি নিশ্চিত করেছেন। অ্যাডমিন যাচাইয়ের পর চূড়ান্ত কনফার্মেশন সম্পন্ন হবে।",
+    messageBn: `কৃষক ${farmer.fullName} টাকা প্রাপ্তি নিশ্চিত ও পেমেন্ট অনুমোদন করায় অর্ডারটি চূড়ান্ত নিশ্চিত (Confirmed) হয়েছে।`,
     isRead: false,
     createdAt: now
   };
@@ -1785,7 +1770,7 @@ async function farmerConfirmPaymentReceived(orderId) {
     id: shortId("aud"),
     actorId: farmer.id,
     actorRole: farmer.role,
-    actionBn: "কৃষক কর্তৃক টাকা প্রাপ্তি নিশ্চিতকরণ (ওয়েব)",
+    actionBn: "কৃষক কর্তৃক টাকা প্রাপ্তি নিশ্চিতকরণ ও পেমেন্ট অনুমোদন (ওয়েব)",
     targetEntity: "Order",
     targetId: order.id,
     detailsBn: `${order.orderCode} — কৃষক ${farmer.fullName} টাকা বুঝে পেয়েছেন`,
@@ -1798,7 +1783,7 @@ async function farmerConfirmPaymentReceived(orderId) {
   await rtdbPush(`orders/${order.id}`, order);
   await rtdbPush(`notifications/${buyerNotif.id}`, buyerNotif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
-  showToast(order.status === "CONFIRMED" ? "অর্ডার চূড়ান্তভাবে Confirmed হয়েছে!" : "টাকা প্রাপ্তি নিশ্চিত হয়েছে (অ্যাডমিন যাচাই অপেক্ষমাণ)।", "success");
+  showToast("টাকা প্রাপ্তি নিশ্চিত ও অনুমোদিত হয়েছে — অর্ডার চূড়ান্ত Confirmed সম্পন্ন!", "success");
   renderCurrentView();
   return true;
 }
@@ -1889,13 +1874,10 @@ async function updateOrderStatus(orderId, newStatus) {
   }
 
   // Strict Security Rule: Order CANNOT be Confirmed or Completed using buyer screenshot alone!
+  // Only Farmer's payment received confirmation is required (no admin approval needed).
   if (newStatus === "CONFIRMED" || newStatus === "COMPLETED") {
     if (!order.farmerPaymentConfirmed) {
-      showToast("কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ ('টাকা বুঝে পেয়েছি') দেওয়ার আগে অর্ডার কনফার্ম বা সম্পন্ন হবে না।", "error");
-      return;
-    }
-    if (!order.adminPaymentVerified) {
-      showToast("শুধু ক্রেতার পেমেন্ট রসিদ বা স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না — অ্যাডমিন পেমেন্ট যাচাই সম্পন্ন হতে হবে।", "error");
+      showToast("শুধু ক্রেতার পেমেন্ট রসিদ বা স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না — কৃষক 'টাকা বুঝে পেয়েছি' অনুমোদন দিলে অর্ডার কনফার্ম বা সম্পন্ন হবে।", "error");
       return;
     }
   }
@@ -3589,13 +3571,13 @@ function renderOrderSecuritySteps(o) {
   const step1 = true;
   const step2 = !["PENDING", "REJECTED", "CANCELLED"].includes(o.status);
   const step3 = Boolean(o.transactionReference || o.paymentReceiptUri || ["SUBMITTED", "VERIFIED", "PAID"].includes(o.paymentStatus));
-  const step4 = Boolean(o.farmerPaymentConfirmed && o.adminPaymentVerified);
-  const step5 = ["CONFIRMED", "COMPLETED"].includes(o.status);
+  const step4 = Boolean(o.farmerPaymentConfirmed);
+  const step5 = Boolean(o.farmerPaymentConfirmed) && ["CONFIRMED", "COMPLETED"].includes(o.status);
   const steps = [
     ["১. অর্ডার", step1],
     ["২. কৃষক গ্রহণ", step2],
     ["৩. পেমেন্ট জমা", step3],
-    ["৪. কৃষক+অ্যাডমিন যাচাই", step4],
+    ["৪. কৃষক অনুমোদন", step4],
     ["৫. নিশ্চিত/সম্পন্ন", step5]
   ];
   return `
@@ -3617,17 +3599,15 @@ function renderOrderSecuritySteps(o) {
 
 function renderOrderPaymentBadgeRow(o) {
   const farmerBadge = o.farmerPaymentConfirmed
-    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">✓ কৃষক টাকা পেয়েছেন</span>`
-    : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">⏳ কৃষকের টাকা প্রাপ্তি বাকি</span>`;
-  const adminBadge = o.adminPaymentVerified
-    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">✓ অ্যাডমিন পেমেন্ট যাচাইকৃত</span>`
-    : o.paymentStatus === "REJECTED"
-    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-100 text-red-700">✕ পেমেন্ট প্রত্যাখ্যাত</span>`
-    : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-800 border border-sky-200">⏳ অ্যাডমিন যাচাই বাকি</span>`;
+    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">✓ কৃষক টাকা পেয়েছেন ও অনুমোদিত</span>`
+    : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">⏳ কৃষকের টাকা প্রাপ্তি ও অনুমোদন বাকি</span>`;
+  const policyBadge = o.farmerPaymentConfirmed
+    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">✓ চূড়ান্ত Confirmed</span>`
+    : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-700">অ্যাডমিন অনুমোদন প্রয়োজন নেই</span>`;
   return `
     <div class="flex flex-wrap items-center gap-1.5 pt-1">
       ${farmerBadge}
-      ${adminBadge}
+      ${policyBadge}
       ${o.transactionReference ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-800">TxID: ${escapeHtml(o.transactionReference)}</span>` : ""}
       ${o.paymentReceiptUri ? `<button type="button" onclick="window.kbApp.openReceiptPreviewModal('${escapeHtml(o.id)}', 'order')" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#EAF7EF] text-[#105B34] border border-emerald-200">🖼️ রসিদ দেখুন</button>` : ""}
     </div>
@@ -3703,7 +3683,7 @@ function renderFarmerOrdersTab(myOrders, active) {
             !o.farmerPaymentConfirmed &&
             o.status !== "PENDING" &&
             !["CANCELLED", "REJECTED"].includes(o.status);
-          const dualConfirmed = Boolean(o.farmerPaymentConfirmed && o.adminPaymentVerified);
+          const farmerApproved = Boolean(o.farmerPaymentConfirmed);
           return `
             <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
               <div class="flex flex-wrap items-center justify-between gap-2">
@@ -3732,7 +3712,7 @@ function renderFarmerOrdersTab(myOrders, active) {
                 }
                 ${
                   canConfirmMoney
-                    ? `<button onclick="window.kbApp.farmerConfirmPaymentReceived('${escapeHtml(o.id)}')" class="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold">💰 টাকা বুঝে পেয়েছি</button>`
+                    ? `<button onclick="window.kbApp.farmerConfirmPaymentReceived('${escapeHtml(o.id)}')" class="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold">💰 টাকা বুঝে পেয়েছি ও অনুমোদন</button>`
                     : ""
                 }
                 ${o.status === "ACCEPTED" ? `<button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'PROCESSING')" class="px-3.5 py-2 rounded-xl bg-sky-600 disabled:opacity-50 text-white text-xs font-bold">প্রস্তুত হচ্ছে</button>` : ""}
@@ -3740,13 +3720,13 @@ function renderFarmerOrdersTab(myOrders, active) {
                 ${["READY_FOR_PICKUP", "READY"].includes(o.status) ? `<button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'SHIPPED')" class="px-3.5 py-2 rounded-xl bg-indigo-600 disabled:opacity-50 text-white text-xs font-bold">পথে পাঠানো হয়েছে</button>` : ""}
                 ${
                   ["READY_FOR_PICKUP", "READY", "SHIPPED", "DELIVERED", "CONFIRMED"].includes(o.status)
-                    ? `<button ${!active || !dualConfirmed ? "disabled" : ""} title="${dualConfirmed ? "" : "কৃষকের টাকা প্রাপ্তি ও অ্যাডমিন যাচাই উভয়ই প্রয়োজন"}" onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-2 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ সম্পন্ন হয়েছে</button>`
+                    ? `<button ${!active || !farmerApproved ? "disabled" : ""} title="${farmerApproved ? "" : "আপনার 'টাকা বুঝে পেয়েছি' ও পেমেন্ট অনুমোদন প্রয়োজন"}" onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-2 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ সম্পন্ন হয়েছে</button>`
                     : ""
                 }
               </div>
               ${
-                !dualConfirmed && !["PENDING", "CANCELLED", "REJECTED", "COMPLETED"].includes(o.status)
-                  ? `<p class="text-[11px] text-amber-800 bg-amber-50 rounded-xl px-3 py-1.5 border border-amber-200">🔒 নিরাপত্তা নিয়ম: ক্রেতার পেমেন্টের পর আপনার "টাকা বুঝে পেয়েছি" নিশ্চিতকরণ এবং অ্যাডমিনের পেমেন্ট যাচাই সম্পন্ন হলেই অর্ডার Confirmed / Completed হবে।</p>`
+                !farmerApproved && !["PENDING", "CANCELLED", "REJECTED", "COMPLETED"].includes(o.status)
+                  ? `<p class="text-[11px] text-amber-800 bg-amber-50 rounded-xl px-3 py-1.5 border border-amber-200">🔒 নিরাপত্তা নিয়ম: শুধুমাত্র আপনার "টাকা বুঝে পেয়েছি" নিশ্চিতকরণ ও পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed / Completed হবে (অ্যাডমিনের অনুমোদন লাগবে না)।</p>`
                   : ""
               }
             </div>
@@ -3996,7 +3976,7 @@ function renderCartPage() {
                 <span class="text-[#168447]">${formatBdt(productTotal)}</span>
               </div>
             </div>
-            <p class="text-[11px] text-gray-500">১. অর্ডার জমার পর কৃষক গ্রহণ করলে পেমেন্ট ও রসিদ জমা দিন। ২. কৃষকের টাকা প্রাপ্তি ও অ্যাডমিন যাচাইয়ের পর অর্ডার চূড়ান্ত নিশ্চিত হবে।</p>
+            <p class="text-[11px] text-gray-500">১. অর্ডার জমার পর কৃষক গ্রহণ করলে পেমেন্ট ও রসিদ জমা দিন। ২. শুধুমাত্র কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ ও পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed হবে (অ্যাডমিন অনুমোদন লাগবে না)।</p>
             <button type="submit" ${user && !active ? "disabled" : ""} class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] disabled:opacity-50 text-white font-bold">অর্ডার জমা দিন</button>
           </form>
         </div>
@@ -4053,14 +4033,14 @@ function renderOrdersPage() {
                   isBuyer &&
                   o.status !== "PENDING" &&
                   !["CANCELLED", "REJECTED", "COMPLETED"].includes(o.status) &&
-                  !o.adminPaymentVerified;
+                  !o.farmerPaymentConfirmed;
                 const canFarmerConfirmMoney =
                   active &&
                   isFarmer &&
                   !o.farmerPaymentConfirmed &&
                   o.status !== "PENDING" &&
                   !["CANCELLED", "REJECTED"].includes(o.status);
-                const dualConfirmed = Boolean(o.farmerPaymentConfirmed && o.adminPaymentVerified);
+                const farmerApproved = Boolean(o.farmerPaymentConfirmed);
                 const canBuyerComplete =
                   active &&
                   isBuyer &&
@@ -4098,12 +4078,12 @@ function renderOrdersPage() {
                       }
                       ${
                         canFarmerConfirmMoney
-                          ? `<button onclick="window.kbApp.farmerConfirmPaymentReceived('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl bg-amber-600 text-white text-xs font-bold">💰 টাকা বুঝে পেয়েছি</button>`
+                          ? `<button onclick="window.kbApp.farmerConfirmPaymentReceived('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl bg-amber-600 text-white text-xs font-bold">💰 টাকা বুঝে পেয়েছি ও অনুমোদন</button>`
                           : ""
                       }
                       ${
                         canBuyerComplete
-                          ? `<button ${!dualConfirmed ? "disabled" : ""} title="${dualConfirmed ? "" : "কৃষকের টাকা প্রাপ্তি ও অ্যাডমিন যাচাই উভয়ই প্রয়োজন"}" onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-1.5 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ ডেলিভারি সম্পন্ন</button>`
+                          ? `<button ${!farmerApproved ? "disabled" : ""} title="${farmerApproved ? "" : "কৃষকের টাকা প্রাপ্তি ও পেমেন্ট অনুমোদন প্রয়োজন"}" onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-1.5 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ ডেলিভারি সম্পন্ন</button>`
                           : ""
                       }
                       ${canCancel ? `<button onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'CANCELLED')" class="px-3 py-1.5 rounded-xl bg-red-50 text-red-700 border border-red-200 text-xs font-bold">অর্ডার বাতিল করুন</button>` : ""}
@@ -4173,7 +4153,7 @@ function renderAdminDashboardPage() {
   const expiredUsersCount = nonAdminUsers.filter((u) => u.accountStatus === "EXPIRED").length;
   const suspendedUsersCount = nonAdminUsers.filter((u) => u.accountStatus === "SUSPENDED").length;
   const pendingActCount = state.activationPayments.filter((p) => p.status === "PENDING").length;
-  const orderPayVerifyCount = state.orders.filter((o) => o.paymentStatus === "SUBMITTED" && !o.adminPaymentVerified && !["CANCELLED", "REJECTED"].includes(o.status)).length;
+  const orderPayVerifyCount = state.orders.filter((o) => !o.farmerPaymentConfirmed && !["PENDING", "CANCELLED", "REJECTED", "COMPLETED"].includes(o.status)).length;
   const validOrders = state.orders.filter((o) => !["CANCELLED", "REJECTED"].includes(o.status));
   const totalSales = validOrders.reduce((s, o) => s + Number(o.productTotal || 0), 0);
   const districtTotals = new Map();
@@ -4187,7 +4167,7 @@ function renderAdminDashboardPage() {
     ["overview", "সারসংক্ষেপ"],
     ["payments", `💳 অ্যাক্টিভেশন পেমেন্ট${pendingActCount ? ` (${pendingActCount})` : ""}`],
     ["farmers", `কৃষক ও ক্রেতা (${nonAdminUsers.length})`],
-    ["orders", `অর্ডার${orderPayVerifyCount ? ` (যাচাই ${orderPayVerifyCount})` : ` (${state.orders.length})`}`],
+    ["orders", `অর্ডার (${state.orders.length})`],
     ["payment-settings", "⚙️ পেমেন্ট সেটিংস"],
     ["notifications", "🔔 নোটিফিকেশন পাঠান"],
     ["categories", "ক্যাটাগরি ও এলাকা"],
@@ -4203,7 +4183,7 @@ function renderAdminDashboardPage() {
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">অপেক্ষমাণ অ্যাক্টিভেশন পেমেন্ট</div><div class="text-2xl font-extrabold text-amber-700">${pendingActCount}</div><div class="text-[11px] text-gray-500 mt-1">মোট আবেদন: ${state.activationPayments.length}</div></div>
         <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">সক্রিয় অ্যাকাউন্ট (২ বছর)</div><div class="text-2xl font-extrabold text-[#168447]">${activeUsersCount}</div><div class="text-[11px] text-gray-500 mt-1">মেয়াদোত্তীর্ণ: ${expiredUsersCount} • স্থগিত: ${suspendedUsersCount}</div></div>
-        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">অর্ডার পেমেন্ট যাচাই বাকি</div><div class="text-2xl font-extrabold text-sky-700">${orderPayVerifyCount}</div><div class="text-[11px] text-gray-500 mt-1">মোট বৈধ অর্ডার: ${validOrders.length}</div></div>
+        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">কৃষক পেমেন্ট অনুমোদন বাকি</div><div class="text-2xl font-extrabold text-sky-700">${orderPayVerifyCount}</div><div class="text-[11px] text-gray-500 mt-1">মোট বৈধ অর্ডার: ${validOrders.length}</div></div>
         <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট বিক্রয় (${verifiedFarmers} কৃষক • ${verifiedBuyers} ক্রেতা)</div><div class="text-2xl font-extrabold text-[#168447]">${formatBdt(totalSales)}</div></div>
       </div>
       <div class="bg-white rounded-3xl p-6 border border-emerald-100 space-y-3">
@@ -4504,7 +4484,7 @@ function renderAdminDashboardPage() {
     const oFilter = state.adminOrderFilter || "ALL";
     const filteredOrders =
       oFilter === "PAYMENT_VERIFY_REQ"
-        ? state.orders.filter((o) => o.paymentStatus === "SUBMITTED" && !o.adminPaymentVerified && !["CANCELLED", "REJECTED"].includes(o.status))
+        ? state.orders.filter((o) => !o.farmerPaymentConfirmed && !["PENDING", "CANCELLED", "REJECTED", "COMPLETED"].includes(o.status))
         : state.orders;
 
     bodyHtml = `
@@ -4512,11 +4492,11 @@ function renderAdminDashboardPage() {
         <div class="bg-white rounded-2xl p-4 border border-emerald-100 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 class="font-bold text-sm text-[#105B34]">অর্ডার ও পেমেন্ট নিরাপত্তা যাচাই</h3>
-            <p class="text-xs text-gray-600">শুধুমাত্র কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ এবং অ্যাডমিনের পেমেন্ট যাচাই সম্পন্ন হলেই অর্ডার চূড়ান্ত Confirmed হবে।</p>
+            <p class="text-xs text-gray-600">শুধুমাত্র কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ এবং কৃষকের পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed হবে — অ্যাডমিন অনুমোদনের প্রয়োজন নেই।</p>
           </div>
           <div class="flex gap-2">
             <button onclick="window.kbApp.setAdminOrderFilter('ALL')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${oFilter === "ALL" ? "bg-[#105B34] text-white" : "bg-[#EAF7EF] text-[#105B34]"}">সব অর্ডার (${state.orders.length})</button>
-            <button onclick="window.kbApp.setAdminOrderFilter('PAYMENT_VERIFY_REQ')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${oFilter === "PAYMENT_VERIFY_REQ" ? "bg-[#105B34] text-white" : "bg-sky-50 text-sky-900 border border-sky-200"}">পেমেন্ট যাচাই বাকি (${orderPayVerifyCount})</button>
+            <button onclick="window.kbApp.setAdminOrderFilter('PAYMENT_VERIFY_REQ')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${oFilter === "PAYMENT_VERIFY_REQ" ? "bg-[#105B34] text-white" : "bg-sky-50 text-sky-900 border border-sky-200"}">কৃষকের অনুমোদন বাকি (${orderPayVerifyCount})</button>
           </div>
         </div>
 
@@ -4527,7 +4507,6 @@ function renderAdminDashboardPage() {
               : filteredOrders
                   .map((o) => {
                     const meta = ORDER_STATUS_META[o.status] || ORDER_STATUS_META.PENDING;
-                    const canVerify = !["PENDING", "CANCELLED", "REJECTED"].includes(o.status);
                     return `
                       <div class="bg-white rounded-2xl p-4 border border-emerald-100 space-y-2.5 text-xs">
                         <div class="flex flex-wrap justify-between items-center gap-2">
@@ -4544,14 +4523,6 @@ function renderAdminDashboardPage() {
                         </div>
                         ${renderOrderSecuritySteps(o)}
                         ${renderOrderPaymentBadgeRow(o)}
-                        ${
-                          canVerify
-                            ? `<div class="flex flex-wrap gap-2 pt-1">
-                                ${!o.adminPaymentVerified ? `<button onclick="window.kbApp.adminVerifyOrderPayment('${escapeHtml(o.id)}', true)" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white font-bold">✓ পেমেন্ট যাচাই অনুমোদন</button>` : ""}
-                                ${o.paymentStatus !== "REJECTED" ? `<button onclick="window.kbApp.adminVerifyOrderPayment('${escapeHtml(o.id)}', false, 'অ্যাডমিন যাচাইয়ে পেমেন্ট অমিল পাওয়া গেছে')" class="px-3 py-1.5 rounded-xl bg-red-600 text-white font-bold">✕ পেমেন্ট বাতিল</button>` : ""}
-                              </div>`
-                            : ""
-                        }
                       </div>
                     `;
                   })

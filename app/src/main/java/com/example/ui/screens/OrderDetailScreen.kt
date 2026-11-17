@@ -103,7 +103,7 @@ fun OrderDetailScreen(
             order.paymentStatus == "PAID" ||
             order.transactionReference.isNotBlank() ||
             order.paymentReceiptUri.isNotBlank()
-        val dualConfirmed = order.farmerPaymentConfirmed && order.adminPaymentVerified
+        val farmerPaymentApproved = order.farmerPaymentConfirmed
 
         var selectedPayMethod by remember(order.paymentMethod) {
             mutableStateOf(
@@ -178,8 +178,8 @@ fun OrderDetailScreen(
                             ("১. ক্রেতা অর্ডার করেছেন (মণ হিসেবে)") to (!isClosed),
                             ("২. কৃষক অর্ডার গ্রহণ করেছেন") to (currentStatus != OrderStatus.PENDING && !isClosed),
                             ("৩. ক্রেতা পেমেন্ট ও রসিদ/TxID জমা দিয়েছেন") to paymentSubmitted,
-                            ("৪. কৃষক 'টাকা বুঝে পেয়েছি' নিশ্চিত করেছেন") to order.farmerPaymentConfirmed,
-                            ("৫. অ্যাডমিন যাচাই ও চূড়ান্ত নিশ্চিতকরণ (Confirmed)") to dualConfirmed
+                            ("৪. কৃষক টাকা প্রাপ্তি নিশ্চিত ও পেমেন্ট অনুমোদন করেছেন") to order.farmerPaymentConfirmed,
+                            ("৫. অর্ডার চূড়ান্ত নিশ্চিত (Confirmed / সম্পন্ন)") to (farmerPaymentApproved && (currentStatus == OrderStatus.CONFIRMED || currentStatus == OrderStatus.COMPLETED))
                         )
                         steps.forEach { (label, reached) ->
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -205,7 +205,7 @@ fun OrderDetailScreen(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = "নিরাপত্তা নিয়ম: শুধুমাত্র ক্রেতার পেমেন্ট স্ক্রিনশট দিয়ে অর্ডার Confirm হবে না। কৃষকের 'টাকা বুঝে পেয়েছি' এবং অ্যাডমিন/গেটওয়ে যাচাই উভয়ই আবশ্যক।",
+                                text = "নিরাপত্তা নিয়ম: শুধুমাত্র ক্রেতার পেমেন্ট স্ক্রিনশট দিয়ে অর্ডার Confirm হবে না। শুধুমাত্র কৃষকের 'টাকা বুঝে পেয়েছি' ও পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed হবে (অ্যাডমিন অনুমোদনের প্রয়োজন নেই)।",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color(0xFF78350F),
                                 modifier = Modifier.padding(10.dp)
@@ -249,11 +249,11 @@ fun OrderDetailScreen(
                         }
                         KeyValRow(
                             "কৃষক টাকা নিশ্চিতকরণ",
-                            if (order.farmerPaymentConfirmed) "✓ নিশ্চিত (${formatDateBn(order.farmerPaymentConfirmedAt)})" else "অপেক্ষমান"
+                            if (order.farmerPaymentConfirmed) "✓ নিশ্চিত ও অনুমোদিত (${formatDateBn(order.farmerPaymentConfirmedAt)})" else "অপেক্ষমান"
                         )
                         KeyValRow(
-                            "অ্যাডমিন যাচাই",
-                            if (order.adminPaymentVerified) "✓ যাচাইকৃত (${formatDateBn(order.adminPaymentVerifiedAt)})" else "অপেক্ষমান"
+                            "চূড়ান্ত অনুমোদন নীতি",
+                            "কৃষক টাকা বুঝে পেয়ে অনুমোদন করলেই Confirmed (অ্যাডমিন অনুমোদন লাগবে না)"
                         )
                         KeyValRow("ডেলিভারি ঠিকানা", order.deliveryAddress)
 
@@ -273,7 +273,7 @@ fun OrderDetailScreen(
             }
 
             // 3. Buyer Payment & Receipt Submission Card (Step 3)
-            if (isBuyerOwner && !isClosed && !order.adminPaymentVerified &&
+            if (isBuyerOwner && !isClosed && !order.farmerPaymentConfirmed &&
                 currentStatus in setOf(OrderStatus.ACCEPTED, OrderStatus.PROCESSING, OrderStatus.READY_FOR_PICKUP, OrderStatus.SHIPPED, OrderStatus.DELIVERED, OrderStatus.PENDING)
             ) {
                 item {
@@ -424,7 +424,7 @@ fun OrderDetailScreen(
                                 ) {
                                     Icon(Icons.Filled.Verified, contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text("টাকা বুঝে পেয়েছি (Confirm Payment Received)", fontWeight = FontWeight.Bold)
+                                    Text("টাকা বুঝে পেয়েছি ও পেমেন্ট অনুমোদন করুন", fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -491,12 +491,12 @@ fun OrderDetailScreen(
                         if (currentStatus in setOf(OrderStatus.DELIVERED, OrderStatus.READY_FOR_PICKUP, OrderStatus.SHIPPED, OrderStatus.CONFIRMED)) {
                             Button(
                                 onClick = { onUpdateStatus(OrderStatus.COMPLETED) },
-                                enabled = dualConfirmed,
+                                enabled = farmerPaymentApproved,
                                 modifier = Modifier.fillMaxWidth().height(50.dp).testTag("complete_order_button")
                             ) {
                                 Text(
-                                    if (dualConfirmed) "পণ্য বুঝে পেয়েছি — সম্পন্ন চিহ্নিত করুন"
-                                    else "কৃষক ও অ্যাডমিন পেমেন্ট নিশ্চিত হলে সম্পন্ন করা যাবে"
+                                    if (farmerPaymentApproved) "পণ্য বুঝে পেয়েছি — সম্পন্ন চিহ্নিত করুন"
+                                    else "কৃষক টাকা প্রাপ্তি অনুমোদন করলে সম্পন্ন করা যাবে"
                                 )
                             }
                         }

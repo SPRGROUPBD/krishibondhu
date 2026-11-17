@@ -65,7 +65,7 @@ fun AdminDashboardScreen(
         "সারসংক্ষেপ",
         "পেমেন্ট যাচাই (${stats.pendingActivationPayments})",
         "কৃষক ও ক্রেতা",
-        "অর্ডার ও পেমেন্ট (${stats.pendingOrderPaymentVerifications})",
+        "অর্ডার ও অভিযোগ (${uiState.orders.size})",
         "পেমেন্ট সেটিংস",
         "নোটিফিকেশন পাঠান",
         "ক্যাটাগরি",
@@ -198,7 +198,7 @@ private fun AdminOverviewTab(stats: AdminDashboardStats) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AdminKpiCard("সক্রিয় ফসল", "${stats.activeProducts}", Color(0xFFB45309), Modifier.weight(1f))
-                AdminKpiCard("অর্ডার পেমেন্ট যাচাই বাকি", "${stats.pendingOrderPaymentVerifications}", InfoBlue, Modifier.weight(1f))
+                AdminKpiCard("কৃষক পেমেন্ট অনুমোদন বাকি", "${stats.pendingOrderPaymentVerifications}", InfoBlue, Modifier.weight(1f))
             }
         }
         item {
@@ -727,13 +727,8 @@ private fun AdminOrdersComplaintsTab(
     onResolveComplaint: (String) -> Unit
 ) {
     var receiptUriPreview by remember { mutableStateOf<String?>(null) }
-    val pendingOrderPayments = remember(uiState.orders) {
-        uiState.orders.filter {
-            it.status !in setOf(OrderStatus.CANCELLED.name, OrderStatus.REJECTED.name) &&
-                !it.adminPaymentVerified &&
-                (it.paymentStatus == "SUBMITTED" || it.paymentStatus == "AWAITING_GATEWAY" ||
-                    it.transactionReference.isNotBlank() || it.paymentReceiptUri.isNotBlank() || it.farmerPaymentConfirmed)
-        }
+    val trackedOrders = remember(uiState.orders) {
+        uiState.orders.sortedByDescending { it.createdAt }
     }
 
     LazyColumn(
@@ -741,19 +736,41 @@ private fun AdminOrdersComplaintsTab(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                colors = CardDefaults.cardColors(containerColor = LightGreen),
+                border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.4f))
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "অর্ডার ও পেমেন্ট নিরাপত্তা নীতি",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkGreen
+                    )
+                    Text(
+                        text = "শুধুমাত্র কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ এবং কৃষকের পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed হয় — অ্যাডমিনের আলাদা অনুমোদনের প্রয়োজন নেই।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DarkGreen
+                    )
+                }
+            }
+        }
+
+        item {
             Text(
-                text = "অর্ডার পেমেন্ট যাচাই তালিকা (${pendingOrderPayments.size})",
+                text = "সকল অর্ডার পর্যবেক্ষণ (${trackedOrders.size})",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = DarkGreen
             )
         }
 
-        if (pendingOrderPayments.isEmpty()) {
+        if (trackedOrders.isEmpty()) {
             item {
                 Card(shape = RoundedCornerShape(14.dp)) {
                     Text(
-                        text = "যাচাইয়ের জন্য কোনো অপেক্ষমান অর্ডার পেমেন্ট নেই।",
+                        text = "এখনো কোনো অর্ডার নেই।",
                         modifier = Modifier.padding(14.dp),
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -761,10 +778,10 @@ private fun AdminOrdersComplaintsTab(
             }
         }
 
-        items(pendingOrderPayments, key = { "opay_${it.id}" }) { ord ->
+        items(trackedOrders, key = { "opay_${it.id}" }) { ord ->
             Card(
                 shape = RoundedCornerShape(14.dp),
-                border = BorderStroke(1.dp, InfoBlue.copy(alpha = 0.45f)),
+                border = BorderStroke(1.dp, if (ord.farmerPaymentConfirmed) PrimaryGreen.copy(alpha = 0.45f) else InfoBlue.copy(alpha = 0.35f)),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -778,7 +795,7 @@ private fun AdminOrdersComplaintsTab(
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        text = if (ord.farmerPaymentConfirmed) "✓ কৃষক টাকা বুঝে পাওয়া নিশ্চিত করেছেন" else "⏳ কৃষকের টাকা পাওয়ার নিশ্চিতকরণ এখনো বাকি",
+                        text = if (ord.farmerPaymentConfirmed) "✓ কৃষক টাকা বুঝে পেয়ে পেমেন্ট অনুমোদন দিয়েছেন (Confirmed)" else "⏳ কৃষকের টাকা প্রাপ্তি ও অনুমোদন অপেক্ষমান",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (ord.farmerPaymentConfirmed) PrimaryGreen else Color(0xFFB45309),
                         fontWeight = FontWeight.Bold
@@ -787,16 +804,6 @@ private fun AdminOrdersComplaintsTab(
                         OutlinedButton(onClick = { receiptUriPreview = ord.paymentReceiptUri }) {
                             Text("রসিদ দেখুন")
                         }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = { onVerifyOrderPayment(ord.id, true, "অ্যাডমিন পেমেন্ট যাচাই সম্পন্ন") },
-                            modifier = Modifier.weight(1f).testTag("admin_verify_order_pay_${ord.id}")
-                        ) { Text("✓ পেমেন্ট যাচাই করুন") }
-                        OutlinedButton(
-                            onClick = { onVerifyOrderPayment(ord.id, false, "পেমেন্ট তথ্য সঠিক নয়") },
-                            modifier = Modifier.weight(1f).testTag("admin_reject_order_pay_${ord.id}")
-                        ) { Text("প্রত্যাখ্যান") }
                     }
                 }
             }

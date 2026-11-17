@@ -1242,26 +1242,12 @@ class MarketplaceRepository(
             orderId = orderId,
             type = "ORDER_PAYMENT_SUBMITTED",
             titleBn = "ক্রেতা পেমেন্ট তথ্য জমা দিয়েছেন (${order.orderCode})",
-            messageBn = "ক্রেতা ${buyer.fullName} ${order.grandTotal.formatBdt()} (${paymentMethod.labelEn}, TxID: ${cleanTxId.ifBlank { "রসিদ" }}) পাঠিয়েছেন। টাকা বুঝে পেলে 'টাকা বুঝে পেয়েছি' নিশ্চিত করুন।",
-            isRead = false,
-            createdAt = now
-        )
-        val adminNotif = NotificationEntity(
-            id = "not_${UUID.randomUUID().toString().take(8)}",
-            userId = "ALL",
-            targetRole = UserRole.ADMIN.name,
-            senderRole = UserRole.BUYER.name,
-            orderId = orderId,
-            type = "ORDER_PAYMENT_VERIFY_REQ",
-            titleBn = "অর্ডার পেমেন্ট যাচাই প্রয়োজন (${order.orderCode})",
-            messageBn = "${buyer.fullName} -> ${order.farmerName}: ${order.grandTotal.formatBdt()} (${paymentMethod.labelEn}, TxID: ${cleanTxId.ifBlank { "রসিদ সংযুক্ত" }})।",
+            messageBn = "ক্রেতা ${buyer.fullName} ${order.grandTotal.formatBdt()} (${paymentMethod.labelEn}, TxID: ${cleanTxId.ifBlank { "রসিদ" }}) পাঠিয়েছেন। টাকা বুঝে পেলে 'টাকা বুঝে পেয়েছি' অনুমোদন দিলেই অর্ডার Confirmed হবে।",
             isRead = false,
             createdAt = now
         )
         db.notificationAuditDao().insertNotification(farmerNotif)
-        db.notificationAuditDao().insertNotification(adminNotif)
         rtdbSync.pushNotification(farmerNotif)
-        rtdbSync.pushNotification(adminNotif)
 
         val audit = AuditLogEntity(
             id = "aud_${UUID.randomUUID().toString().take(8)}",
@@ -1294,23 +1280,25 @@ class MarketplaceRepository(
         }
 
         val now = System.currentTimeMillis()
-        db.orderDao().updateFarmerPaymentConfirmed(
-            orderId = orderId,
-            confirmed = true,
-            confirmedAt = now,
-            now = now
-        )
-        // If Admin already verified the payment as well, transition accepted order to CONFIRMED & PAID
-        if (order.adminPaymentVerified && order.status in setOf(
-                OrderStatus.ACCEPTED.name,
-                OrderStatus.PROCESSING.name,
-                OrderStatus.READY_FOR_PICKUP.name,
-                OrderStatus.SHIPPED.name,
-                OrderStatus.DELIVERED.name
+        db.withTransaction {
+            db.orderDao().updateFarmerPaymentConfirmed(
+                orderId = orderId,
+                confirmed = true,
+                confirmedAt = now,
+                now = now
             )
-        ) {
-            db.orderDao().updateOrderStatus(orderId, OrderStatus.CONFIRMED.name, now)
-            db.orderDao().updatePaymentDetails(orderId, "PAID", order.transactionReference, now)
+            // Security Rule: Farmer confirming money received & approving payment directly confirms the order (no admin approval needed)
+            if (order.status in setOf(
+                    OrderStatus.ACCEPTED.name,
+                    OrderStatus.PROCESSING.name,
+                    OrderStatus.READY_FOR_PICKUP.name,
+                    OrderStatus.SHIPPED.name,
+                    OrderStatus.DELIVERED.name
+                )
+            ) {
+                db.orderDao().updateOrderStatus(orderId, OrderStatus.CONFIRMED.name, now)
+                db.orderDao().updatePaymentDetails(orderId, "PAID", order.transactionReference, now)
+            }
         }
 
         val updatedOrder = db.orderDao().getOrderById(orderId)!!
@@ -1325,11 +1313,7 @@ class MarketplaceRepository(
             orderId = orderId,
             type = "FARMER_PAYMENT_CONFIRMED",
             titleBn = "কৃষক টাকা বুঝে পেয়েছেন (${order.orderCode})",
-            messageBn = if (updatedOrder.adminPaymentVerified) {
-                "কৃষক টাকা প্রাপ্তি নিশ্চিত করেছেন এবং অ্যাডমিন যাচাই সম্পন্ন হওয়ায় অর্ডারটি নিশ্চিত (Confirmed) হয়েছে।"
-            } else {
-                "কৃষক ${farmer.fullName} টাকা পাওয়ার বিষয়টি নিশ্চিত করেছেন। অ্যাডমিন/গেটওয়ে যাচাইয়ের পর চূড়ান্ত কনফার্মেশন সম্পন্ন হবে।"
-            },
+            messageBn = "কৃষক ${farmer.fullName} টাকা প্রাপ্তি নিশ্চিত ও পেমেন্ট অনুমোদন করায় অর্ডারটি চূড়ান্তভাবে নিশ্চিত (Confirmed) হয়েছে।",
             isRead = false,
             createdAt = now
         )
@@ -1451,15 +1435,11 @@ class MarketplaceRepository(
         }
 
         // Strict Security Rule: Order CANNOT be Confirmed or Completed using buyer screenshot alone!
+        // Only Farmer's payment received confirmation is required (admin approval is NOT required).
         if (newStatus == OrderStatus.CONFIRMED || newStatus == OrderStatus.COMPLETED) {
             if (!order.farmerPaymentConfirmed) {
                 return Result.failure(
-                    IllegalStateException("কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ ('টাকা বুঝে পেয়েছি') দেওয়ার আগে অর্ডার কনফার্ম বা সম্পন্ন হবে না।")
-                )
-            }
-            if (!order.adminPaymentVerified) {
-                return Result.failure(
-                    IllegalStateException("শুধু ক্রেতার পেমেন্ট রসিদ বা স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না — অ্যাডমিন পেমেন্ট যাচাই সম্পন্ন হতে হবে।")
+                    IllegalStateException("শুধু ক্রেতার পেমেন্ট রসিদ বা স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না — কৃষক 'টাকা বুঝে পেয়েছি' অনুমোদন দিলে অর্ডার কনফার্ম বা সম্পন্ন হবে।")
                 )
             }
         }

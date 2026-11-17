@@ -142,9 +142,8 @@ data class MarketplaceUiState(
             val expiredAcc = nonAdmins.count { it.accountStatus == AccountStatus.EXPIRED.name }
             val suspendedAcc = nonAdmins.count { it.accountStatus == AccountStatus.SUSPENDED.name }
             val pendingOrderVerifs = orders.count {
-                it.status !in setOf(OrderStatus.CANCELLED.name, OrderStatus.REJECTED.name) &&
-                    !it.adminPaymentVerified &&
-                    (it.paymentStatus == "SUBMITTED" || it.paymentStatus == "AWAITING_GATEWAY" || it.transactionReference.isNotBlank() || it.paymentReceiptUri.isNotBlank() || it.farmerPaymentConfirmed)
+                it.status !in setOf(OrderStatus.PENDING.name, OrderStatus.CANCELLED.name, OrderStatus.REJECTED.name, OrderStatus.COMPLETED.name) &&
+                    !it.farmerPaymentConfirmed
             }
             return AdminDashboardStats(
                 totalFarmers = totalFarmers,
@@ -668,7 +667,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
                 receiptUri = receiptUri
             )
                 .onSuccess {
-                    showToast("পেমেন্ট তথ্য ও রসিদ জমা হয়েছে! কৃষক ও অ্যাডমিন যাচাইয়ের পর অর্ডার নিশ্চিত হবে।")
+                    showToast("পেমেন্ট তথ্য ও রসিদ জমা হয়েছে! কৃষক টাকা প্রাপ্তি অনুমোদন করলে অর্ডার Confirmed হবে ✓")
                     onSuccess()
                 }
                 .onFailure { showToast(it.message ?: "পেমেন্ট জমা দেওয়া যায়নি") }
@@ -679,11 +678,8 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         val farmer = uiState.value.activeUser ?: return
         viewModelScope.launch {
             repo.farmerConfirmPaymentReceived(orderId, farmer)
-                .onSuccess { updated ->
-                    showToast(
-                        if (updated.adminPaymentVerified) "টাকা প্রাপ্তি নিশ্চিত হয়েছে এবং অর্ডার Confirmed সম্পন্ন ✓"
-                        else "টাকা প্রাপ্তি নিশ্চিত হয়েছে! অ্যাডমিন যাচাই শেষে অর্ডার Confirmed হবে ✓"
-                    )
+                .onSuccess {
+                    showToast("টাকা প্রাপ্তি নিশ্চিত ও অনুমোদিত হয়েছে — অর্ডার চূড়ান্ত Confirmed সম্পন্ন ✓")
                 }
                 .onFailure { showToast(it.message ?: "নিশ্চিতকরণ করা যায়নি") }
         }

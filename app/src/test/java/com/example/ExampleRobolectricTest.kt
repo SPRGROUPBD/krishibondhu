@@ -963,7 +963,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun fiveStepOrderSecurityRequiresBothFarmerConfirmAndAdminVerifyBeforeConfirmedOrCompleted() = runBlocking {
+    fun fiveStepOrderSecurityConfirmsOnFarmerApprovalWithoutAdminApproval() = runBlocking {
         MasterCatalogSeeder.initialize(db)
         val admin = repo.loginUser("admin", "bondhu").getOrThrow()
         val cat = repo.categories.first().first()
@@ -1063,18 +1063,14 @@ class ExampleRobolectricTest {
         assertTrue(repo.updateOrderStatus(order.id, OrderStatus.CONFIRMED, farmer).isFailure)
         assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isFailure)
 
-        // Step 4a: Farmer confirms money received -> still awaits admin verify before CONFIRMED
+        // Step 4 & 5: Farmer confirms money received & approves payment -> immediately CONFIRMED & PAID without admin approval!
         val afterFarmer = repo.farmerConfirmPaymentReceived(order.id, farmer).getOrThrow()
         assertTrue(afterFarmer.farmerPaymentConfirmed)
-        assertNotEquals(OrderStatus.CONFIRMED.name, afterFarmer.status)
-        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isFailure)
+        assertFalse(afterFarmer.adminPaymentVerified)
+        assertEquals(OrderStatus.CONFIRMED.name, afterFarmer.status)
+        assertEquals("PAID", afterFarmer.paymentStatus)
 
-        // Step 4b & Step 5: Admin verifies order payment -> dual-confirmed -> CONFIRMED & PAID -> COMPLETED succeeds
-        val afterAdmin = repo.adminVerifyOrderPayment(order.id, admin, approved = true, notes = "TxID verified").getOrThrow()
-        assertTrue(afterAdmin.adminPaymentVerified)
-        assertEquals(OrderStatus.CONFIRMED.name, afterAdmin.status)
-        assertEquals("PAID", afterAdmin.paymentStatus)
-
+        // Buyer/Farmer can immediately mark COMPLETED without needing admin verification
         assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isSuccess)
         assertEquals(OrderStatus.COMPLETED.name, db.orderDao().getOrderById(order.id)!!.status)
     }
