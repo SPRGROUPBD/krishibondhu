@@ -34,6 +34,15 @@ interface UserDao {
     @Query("DELETE FROM users WHERE isDemoRecord = 1")
     suspend fun deleteDemoUsers()
 
+    @Query("DELETE FROM users WHERE id != 'admin_super'")
+    suspend fun clearNonAdminUsers()
+
+    @Query("DELETE FROM users WHERE id != 'admin_super' AND id NOT IN (:ids)")
+    suspend fun deleteNonAdminUsersNotIn(ids: List<String>)
+
+    @Query("DELETE FROM users WHERE id = :id AND id != 'admin_super'")
+    suspend fun deleteNonAdminUserById(id: String)
+
     @Upsert
     suspend fun insertAll(users: List<UserEntity>)
 
@@ -107,6 +116,12 @@ interface ProductDao {
 
     @Query("DELETE FROM products WHERE isDemoRecord = 1")
     suspend fun deleteDemoProducts()
+
+    @Query("DELETE FROM products")
+    suspend fun clearAllProducts()
+
+    @Query("DELETE FROM products WHERE id NOT IN (:ids)")
+    suspend fun deleteProductsNotIn(ids: List<String>)
 
     @Upsert
     suspend fun insertAll(products: List<ProductEntity>)
@@ -186,6 +201,18 @@ interface OrderDao {
     @Query("DELETE FROM orders WHERE isDemoRecord = 1")
     suspend fun deleteDemoOrders()
 
+    @Query("DELETE FROM order_items")
+    suspend fun clearAllOrderItems()
+
+    @Query("DELETE FROM orders")
+    suspend fun clearAllOrders()
+
+    @Query("DELETE FROM order_items WHERE orderId NOT IN (:orderIds)")
+    suspend fun deleteOrderItemsForMissingOrders(orderIds: List<String>)
+
+    @Query("DELETE FROM orders WHERE id NOT IN (:ids)")
+    suspend fun deleteOrdersNotIn(ids: List<String>)
+
     @Upsert
     suspend fun insertOrders(orders: List<OrderEntity>)
 
@@ -253,6 +280,18 @@ interface ReviewComplaintDao {
 
     @Query("UPDATE complaints SET status = :status WHERE id = :id")
     suspend fun updateComplaintStatus(id: String, status: String)
+
+    @Query("DELETE FROM reviews")
+    suspend fun clearAllReviews()
+
+    @Query("DELETE FROM reviews WHERE id NOT IN (:ids)")
+    suspend fun deleteReviewsNotIn(ids: List<String>)
+
+    @Query("DELETE FROM complaints")
+    suspend fun clearAllComplaints()
+
+    @Query("DELETE FROM complaints WHERE id NOT IN (:ids)")
+    suspend fun deleteComplaintsNotIn(ids: List<String>)
 }
 
 @Dao
@@ -292,6 +331,18 @@ interface NotificationAuditDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditLogs(logs: List<AuditLogEntity>)
+
+    @Query("DELETE FROM notifications")
+    suspend fun clearAllNotifications()
+
+    @Query("DELETE FROM notifications WHERE id NOT IN (:ids)")
+    suspend fun deleteNotificationsNotIn(ids: List<String>)
+
+    @Query("DELETE FROM audit_logs")
+    suspend fun clearAllAuditLogs()
+
+    @Query("DELETE FROM audit_logs WHERE id NOT IN (:ids)")
+    suspend fun deleteAuditLogsNotIn(ids: List<String>)
 }
 
 @Dao
@@ -316,6 +367,12 @@ interface ActivationPaymentDao {
 
     @Upsert
     suspend fun insertAll(payments: List<ActivationPaymentEntity>)
+
+    @Query("DELETE FROM activation_payments")
+    suspend fun clearAllPayments()
+
+    @Query("DELETE FROM activation_payments WHERE id NOT IN (:ids)")
+    suspend fun deletePaymentsNotIn(ids: List<String>)
 }
 
 @Dao
@@ -328,4 +385,7 @@ interface PaymentSettingsDao {
 
     @Upsert
     suspend fun upsertSettings(settings: PaymentSettingsEntity)
+
+    @Query("DELETE FROM payment_settings")
+    suspend fun clearSettings()
 }

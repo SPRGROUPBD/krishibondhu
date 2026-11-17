@@ -77,7 +77,7 @@ let rtdbApi = null;
 let lastAdScriptSignature = "";
 const alertedNotifIds = new Set();
 
-// ---------------------- Persistence (LocalStorage + RTDB) ----------------------
+// ---------------------- Session Preferences (Online-Only RTDB Architecture) ----------------------
 
 function loadLocalSnapshot() {
   try {
@@ -86,25 +86,11 @@ function loadLocalSnapshot() {
     const saved = JSON.parse(raw);
     state.lang = saved.lang === "en" ? "en" : "bn";
     state.activeUserId = saved.activeUserId || "";
-    if (Array.isArray(saved.users)) state.users = saved.users.filter((u) => !u.isDemoRecord);
-    if (Array.isArray(saved.categories) && saved.categories.length) state.categories = mergeById(MASTER_CATEGORIES, saved.categories);
-    if (Array.isArray(saved.locations) && saved.locations.length) state.locations = mergeById(buildInitialSeedLocations(), saved.locations);
-    if (Array.isArray(saved.products)) state.products = saved.products.filter((p) => !p.isDemoRecord);
-    if (Array.isArray(saved.orders)) state.orders = saved.orders.filter((o) => !o.isDemoRecord);
-    if (Array.isArray(saved.activationPayments)) state.activationPayments = saved.activationPayments;
-    if (saved.paymentSettings && typeof saved.paymentSettings === "object") {
-      state.paymentSettings = { ...DEFAULT_PAYMENT_SETTINGS, ...saved.paymentSettings };
-    }
-    if (Array.isArray(saved.notifications)) state.notifications = saved.notifications;
-    if (Array.isArray(saved.reviews)) state.reviews = saved.reviews;
-    if (Array.isArray(saved.complaints)) state.complaints = saved.complaints;
-    if (Array.isArray(saved.auditLogs)) state.auditLogs = saved.auditLogs;
     if (Array.isArray(saved.cart)) state.cart = saved.cart;
-    if (saved.adConfig && typeof saved.adConfig === "object") {
-      state.adConfig = { ...DEFAULT_AD_CONFIG, ...saved.adConfig };
-    }
+    // Strip any legacy cached entities so stale demo/offline records are never restored
+    saveLocalSnapshot();
   } catch (err) {
-    console.warn("Local cache restore skipped:", err);
+    console.warn("Local session restore skipped:", err);
   }
 }
 
@@ -115,23 +101,11 @@ function saveLocalSnapshot() {
       JSON.stringify({
         lang: state.lang,
         activeUserId: state.activeUserId,
-        users: state.users,
-        categories: state.categories,
-        locations: state.locations,
-        products: state.products,
-        orders: state.orders,
-        activationPayments: state.activationPayments,
-        paymentSettings: state.paymentSettings,
-        notifications: state.notifications,
-        reviews: state.reviews,
-        complaints: state.complaints,
-        auditLogs: state.auditLogs,
-        cart: state.cart,
-        adConfig: state.adConfig
+        cart: state.cart
       })
     );
   } catch (err) {
-    console.warn("Local cache save skipped:", err);
+    console.warn("Local session save skipped:", err);
   }
 }
 
@@ -173,25 +147,72 @@ async function initFirebaseRealtime() {
       updateHeaderChrome();
     });
 
+    function applyRemoteRoot(rootVal) {
+      const root = rootVal && typeof rootVal === "object" ? rootVal : {};
+      state.users = root.users && typeof root.users === "object"
+        ? Object.entries(root.users).map(([k, v]) => ({ id: k, ...v }))
+        : [];
+      if (state.activeUserId && state.activeUserId !== SUPERADMIN_CREDENTIALS.userId && !state.users.some((u) => u.id === state.activeUserId)) {
+        state.activeUserId = "";
+        saveLocalSnapshot();
+      }
+      state.products = root.products && typeof root.products === "object"
+        ? Object.entries(root.products).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        : [];
+      state.orders = root.orders && typeof root.orders === "object"
+        ? Object.entries(root.orders).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        : [];
+      state.notifications = root.notifications && typeof root.notifications === "object"
+        ? Object.entries(root.notifications).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        : [];
+      state.reviews = root.reviews && typeof root.reviews === "object"
+        ? Object.entries(root.reviews).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        : [];
+      state.complaints = root.complaints && typeof root.complaints === "object"
+        ? Object.entries(root.complaints).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        : [];
+      state.auditLogs = root.auditLogs && typeof root.auditLogs === "object"
+        ? Object.entries(root.auditLogs).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        : [];
+      state.activationPayments = root.activationPayments && typeof root.activationPayments === "object"
+        ? Object.entries(root.activationPayments).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.submittedAt || b.createdAt || 0) - (a.submittedAt || a.createdAt || 0))
+        : [];
+      state.adConfig = root.adConfig && typeof root.adConfig === "object"
+        ? { ...DEFAULT_AD_CONFIG, ...root.adConfig }
+        : { ...DEFAULT_AD_CONFIG };
+      state.paymentSettings = root.paymentSettings && typeof root.paymentSettings === "object"
+        ? { ...DEFAULT_PAYMENT_SETTINGS, ...root.paymentSettings }
+        : { ...DEFAULT_PAYMENT_SETTINGS };
+      evaluateAccountExpiries(Date.now(), false);
+      updateHeaderChrome();
+      renderCurrentView();
+    }
+
+    try {
+      const initialSnap = await dbMod.get(rtdbRef);
+      state.rtdbConnected = true;
+      applyRemoteRoot(initialSnap.val());
+    } catch (initGetErr) {
+      console.warn("Initial RTDB fetch skipped, relying on listeners:", initGetErr);
+    }
+
     onValue(child(rtdbRef, "users"), (snap) => {
       const val = snap.val();
       if (val && typeof val === "object") {
-        const list = Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
-        // Keep local admin_super if active offline
-        const localAdmin = state.users.find((u) => u.id === SUPERADMIN_CREDENTIALS.userId);
-        state.users = localAdmin && !list.some((u) => u.id === SUPERADMIN_CREDENTIALS.userId)
-          ? [localAdmin, ...list]
-          : list;
+        state.users = Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
+        if (state.activeUserId && state.activeUserId !== SUPERADMIN_CREDENTIALS.userId && !state.users.some((u) => u.id === state.activeUserId)) {
+          state.activeUserId = "";
+          saveLocalSnapshot();
+        }
         evaluateAccountExpiries(Date.now(), false);
-        saveLocalSnapshot();
+        updateHeaderChrome();
         renderCurrentView();
       } else if (val === null) {
-        const localAdmin = state.users.find((u) => u.id === SUPERADMIN_CREDENTIALS.userId);
-        state.users = localAdmin ? [localAdmin] : [];
-        if (state.currentUserId && state.currentUserId !== SUPERADMIN_CREDENTIALS.userId) {
-          state.currentUserId = "";
+        state.users = [];
+        if (state.activeUserId && state.activeUserId !== SUPERADMIN_CREDENTIALS.userId) {
+          state.activeUserId = "";
+          saveLocalSnapshot();
         }
-        saveLocalSnapshot();
         updateHeaderChrome();
         renderCurrentView();
       }
@@ -202,7 +223,6 @@ async function initFirebaseRealtime() {
       if (val && typeof val === "object") {
         const remoteCats = Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
         state.categories = mergeById(MASTER_CATEGORIES, remoteCats).sort((a, b) => (a.sortOrder || 99) - (b.sortOrder || 99));
-        saveLocalSnapshot();
         renderCurrentView();
       }
     });
@@ -212,7 +232,6 @@ async function initFirebaseRealtime() {
       if (val && typeof val === "object") {
         const remoteLocs = Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
         state.locations = mergeById(buildInitialSeedLocations(), remoteLocs);
-        saveLocalSnapshot();
         renderCurrentView();
       }
     });
@@ -226,7 +245,6 @@ async function initFirebaseRealtime() {
       } else if (val === null) {
         state.products = [];
       }
-      saveLocalSnapshot();
       renderCurrentView();
     });
 
@@ -239,7 +257,6 @@ async function initFirebaseRealtime() {
       } else if (val === null) {
         state.orders = [];
       }
-      saveLocalSnapshot();
       renderCurrentView();
     });
 
@@ -253,21 +270,10 @@ async function initFirebaseRealtime() {
       } else if (val === null) {
         state.notifications = [];
       }
-      saveLocalSnapshot();
       updateHeaderChrome();
       if (state.page === "notifications" || state.page === "farmer-dashboard") {
         renderCurrentView();
       }
-    });
-
-    onChildAdded(child(rtdbRef, "notifications"), (snap) => {
-      const n = snap.val();
-      if (!n) return;
-      const item = { id: snap.key, ...n };
-      upsertArrayItem(state.notifications, item);
-      state.notifications.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-      checkAndAlertIncomingNotifications();
-      updateHeaderChrome();
     });
 
     onValue(child(rtdbRef, "reviews"), (snap) => {
@@ -275,7 +281,6 @@ async function initFirebaseRealtime() {
       state.reviews = val && typeof val === "object"
         ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
-      saveLocalSnapshot();
     });
 
     onValue(child(rtdbRef, "complaints"), (snap) => {
@@ -283,7 +288,6 @@ async function initFirebaseRealtime() {
       state.complaints = val && typeof val === "object"
         ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
-      saveLocalSnapshot();
     });
 
     onValue(child(rtdbRef, "auditLogs"), (snap) => {
@@ -291,18 +295,15 @@ async function initFirebaseRealtime() {
       state.auditLogs = val && typeof val === "object"
         ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
-      saveLocalSnapshot();
     });
 
     onValue(child(rtdbRef, "adConfig"), (snap) => {
       const val = snap.val();
       if (val && typeof val === "object") {
         state.adConfig = { ...DEFAULT_AD_CONFIG, ...val };
-        saveLocalSnapshot();
         renderCurrentView();
       } else if (val === null) {
         state.adConfig = { ...DEFAULT_AD_CONFIG };
-        saveLocalSnapshot();
         renderCurrentView();
       }
     });
@@ -310,9 +311,8 @@ async function initFirebaseRealtime() {
     onValue(child(rtdbRef, "activationPayments"), (snap) => {
       const val = snap.val();
       state.activationPayments = val && typeof val === "object"
-        ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.submittedAt || 0) - (a.submittedAt || 0))
+        ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.submittedAt || b.createdAt || 0) - (a.submittedAt || a.createdAt || 0))
         : [];
-      saveLocalSnapshot();
       renderCurrentView();
     });
 
@@ -320,16 +320,14 @@ async function initFirebaseRealtime() {
       const val = snap.val();
       if (val && typeof val === "object") {
         state.paymentSettings = { ...DEFAULT_PAYMENT_SETTINGS, ...val };
-        saveLocalSnapshot();
         renderCurrentView();
       } else if (val === null) {
         state.paymentSettings = { ...DEFAULT_PAYMENT_SETTINGS };
-        saveLocalSnapshot();
         renderCurrentView();
       }
     });
   } catch (err) {
-    console.warn("Firebase RTDB running in local fallback mode:", err);
+    console.warn("Firebase RTDB connection failed:", err);
     state.rtdbConnected = false;
     updateHeaderChrome();
   }
@@ -346,36 +344,42 @@ async function rtdbPush(path, data) {
   }
 }
 
-async function rtdbFetchUserByPhone(phone) {
-  if (!rtdbRef || !rtdbApi) return null;
+async function rtdbFetchUserByPhoneStrict(phone) {
   const target = normalizePhone(phone);
+  if (!target) return { status: "NOT_FOUND", user: null };
+  if (!rtdbRef || !rtdbApi) return { status: "UNREACHABLE", user: null };
   try {
-    const q = rtdbApi.query(
-      rtdbApi.child(rtdbRef, "users"),
-      rtdbApi.orderByChild("phone"),
-      rtdbApi.equalTo(target)
-    );
-    const snap = await rtdbApi.get(q);
-    if (!snap.exists()) return null;
+    const snap = await rtdbApi.get(rtdbApi.child(rtdbRef, "users"));
+    if (!snap.exists()) return { status: "NOT_FOUND", user: null };
     const val = snap.val();
-    const [key, data] = Object.entries(val)[0];
-    return { id: key, ...data };
+    if (!val || typeof val !== "object") return { status: "NOT_FOUND", user: null };
+    const allUsers = Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
+    state.users = allUsers;
+    const match = allUsers.find((u) => normalizePhone(u.phone) === target || u.phone === phone);
+    return match ? { status: "FOUND", user: match } : { status: "NOT_FOUND", user: null };
   } catch (err) {
-    console.warn("RTDB phone lookup skipped:", err);
-    return null;
+    console.warn("RTDB strict user lookup failed:", err);
+    return { status: "UNREACHABLE", user: null };
   }
+}
+
+async function rtdbFetchUserByPhone(phone) {
+  const res = await rtdbFetchUserByPhoneStrict(phone);
+  return res.status === "FOUND" ? res.user : null;
 }
 
 async function rtdbFetchAllActivationPayments() {
   if (!rtdbRef || !rtdbApi) return state.activationPayments;
   try {
     const snap = await rtdbApi.get(rtdbApi.child(rtdbRef, "activationPayments"));
-    if (!snap.exists()) return state.activationPayments;
+    if (!snap.exists()) return [];
     const val = snap.val();
-    if (!val || typeof val !== "object") return state.activationPayments;
-    return Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
+    if (!val || typeof val !== "object") return [];
+    const list = Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
+    state.activationPayments = list;
+    return list;
   } catch (err) {
-    console.warn("RTDB activationPayments lookup skipped:", err);
+    console.warn("RTDB activationPayments lookup failed:", err);
     return state.activationPayments;
   }
 }
@@ -400,6 +404,31 @@ function addCalendarYears(startMs, years = FIXED_VALIDITY_YEARS) {
 
 function getActiveUser() {
   if (!state.activeUserId) return null;
+  if (state.activeUserId === SUPERADMIN_CREDENTIALS.userId) {
+    return (
+      state.users.find((u) => u.id === SUPERADMIN_CREDENTIALS.userId) || {
+        id: SUPERADMIN_CREDENTIALS.userId,
+        fullName: "সুপার অ্যাডমিন",
+        phone: SUPERADMIN_CREDENTIALS.id,
+        role: "ADMIN",
+        division: "ঢাকা",
+        district: "ঢাকা",
+        upazila: "সাভার",
+        unionName: "কেন্দ্রীয়",
+        village: "সারা বাংলাদেশ তদারকি",
+        farmBio: "প্ল্যাটফর্ম তদারকি ও যাচাইকরণ অ্যাডমিন",
+        nidMasked: "SUPERADMIN",
+        verificationStatus: "VERIFIED",
+        accountStatus: "ACTIVE",
+        validityYears: FIXED_VALIDITY_YEARS,
+        activationDate: Date.now(),
+        expiryDate: 0,
+        isMobileVerified: true,
+        rating: 5.0,
+        reviewCount: 0
+      }
+    );
+  }
   return state.users.find((u) => u.id === state.activeUserId) || null;
 }
 
@@ -801,14 +830,12 @@ async function login(identifier, rawPassword) {
 
   const normalizedPhone = normalizePhone(cleanId);
   const expectedHash = await hashPassword(rawPassword);
-  let user = state.users.find((u) => normalizePhone(u.phone) === normalizedPhone || u.phone === cleanId);
-  if (!user) {
-    const remote = await rtdbFetchUserByPhone(normalizedPhone);
-    if (remote) {
-      upsertArrayItem(state.users, remote);
-      user = remote;
-    }
+  const lookup = await rtdbFetchUserByPhoneStrict(normalizedPhone);
+  if (lookup.status === "UNREACHABLE") {
+    showToast("অনলাইন সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি। ইন্টারনেট সংযোগ চালু করে আবার চেষ্টা করুন।", "error");
+    return false;
   }
+  const user = lookup.status === "FOUND" ? lookup.user : null;
   if (!user) {
     showToast("এই মোবাইল নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।", "error");
     return false;
@@ -849,7 +876,12 @@ async function registerUser(form) {
     showToast("এই আইডি ব্যবহার করা যাবে না।", "error");
     return false;
   }
-  if (state.users.some((u) => normalizePhone(u.phone) === phone) || (await rtdbFetchUserByPhone(phone))) {
+  const regLookup = await rtdbFetchUserByPhoneStrict(phone);
+  if (regLookup.status === "UNREACHABLE") {
+    showToast("অনলাইন সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি। ইন্টারনেট সংযোগ চালু করে আবার চেষ্টা করুন।", "error");
+    return false;
+  }
+  if (regLookup.status === "FOUND") {
     showToast("এই মোবাইল নম্বরটি ইতোমধ্যে নিবন্ধিত। লগইন করুন।", "error");
     return false;
   }

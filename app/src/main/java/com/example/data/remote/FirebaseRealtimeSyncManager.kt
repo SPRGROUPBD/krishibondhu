@@ -72,10 +72,9 @@ class FirebaseRealtimeSyncManager(
         if (!enableRemoteSync || listenersAttached) return
         listenersAttached = true
 
-        // Always launch REST immediate pull + periodic live mirror loop + offline push flush
+        // Always launch REST immediate pull + periodic live mirror loop (online RTDB authoritative)
         scope.launch(Dispatchers.IO) {
             pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
-            pushMissingLocalRecordsToRest(localDb)
             while (isActive) {
                 delay(10_000L)
                 pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
@@ -84,13 +83,23 @@ class FirebaseRealtimeSyncManager(
 
         val root = rootRefOrNull() ?: return
 
-        // 1. Users listener
+        // 1. Users listener (reconciles remote additions, updates, and deletions)
         root.child("users").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val users = snapshot.children.mapNotNull { snap -> snapToUser(itOrSelf(snap)) }
-                if (users.isNotEmpty()) {
-                    scope.launch(Dispatchers.IO) {
+                scope.launch(Dispatchers.IO) {
+                    if (!snapshot.exists() || users.isEmpty()) {
+                        runCatching {
+                            localDb.productDao().clearAllProducts()
+                            localDb.cartDao().clearCart()
+                            localDb.userDao().clearNonAdminUsers()
+                        }
+                    } else {
                         users.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
+                        val ids = users.map { it.id }
+                        if (ids.size <= 900) {
+                            runCatching { localDb.userDao().deleteNonAdminUsersNotIn(ids) }
+                        }
                     }
                 }
             }
@@ -132,13 +141,22 @@ class FirebaseRealtimeSyncManager(
             }
         })
 
-        // 4. Products listener (ensures farmer user exists before inserting to satisfy FK cleanly)
+        // 4. Products listener (ensures farmer user exists & mirrors remote deletions)
         root.child("products").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val products = snapshot.children.mapNotNull { snap -> snapToProduct(snap) }
-                if (products.isNotEmpty()) {
-                    scope.launch(Dispatchers.IO) {
+                scope.launch(Dispatchers.IO) {
+                    if (!snapshot.exists() || products.isEmpty()) {
+                        runCatching {
+                            localDb.productDao().clearAllProducts()
+                            localDb.cartDao().clearCart()
+                        }
+                    } else {
                         upsertProductsEnsuringFarmers(localDb, products)
+                        val ids = products.map { it.id }
+                        if (ids.size <= 900) {
+                            runCatching { localDb.productDao().deleteProductsNotIn(ids) }
+                        }
                     }
                 }
             }
@@ -161,12 +179,20 @@ class FirebaseRealtimeSyncManager(
                         }.forEach { allItems.add(it) }
                     }
                 }
-                if (orders.isNotEmpty()) {
-                    scope.launch(Dispatchers.IO) {
-                        runCatching {
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || orders.isEmpty()) {
+                            localDb.orderDao().clearAllOrderItems()
+                            localDb.orderDao().clearAllOrders()
+                        } else {
                             localDb.orderDao().insertOrders(orders)
                             if (allItems.isNotEmpty()) {
                                 localDb.orderDao().insertOrderItems(allItems)
+                            }
+                            val ids = orders.map { it.id }
+                            if (ids.size <= 900) {
+                                localDb.orderDao().deleteOrderItemsForMissingOrders(ids)
+                                localDb.orderDao().deleteOrdersNotIn(ids)
                             }
                         }
                     }
@@ -178,27 +204,23 @@ class FirebaseRealtimeSyncManager(
             }
         })
 
-        // 6. Notifications real-time ChildEventListener
-        root.child("notifications").addChildEventListener(object : ChildEventListener {
-            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                val notif = snapToNotification(snapshot) ?: return
+        // 6. Notifications real-time ValueEventListener (reconciles remote deletions cleanly)
+        root.child("notifications").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val notifs = snapshot.children.mapNotNull { snapToNotification(it) }
                 scope.launch(Dispatchers.IO) {
-                    ingestRemoteNotification(localDb, notif, onIncomingNotification)
+                    if (!snapshot.exists() || notifs.isEmpty()) {
+                        runCatching { localDb.notificationAuditDao().clearAllNotifications() }
+                    } else {
+                        notifs.forEach { ingestRemoteNotification(localDb, it, onIncomingNotification) }
+                        val ids = notifs.map { it.id }
+                        if (ids.size <= 900) {
+                            runCatching { localDb.notificationAuditDao().deleteNotificationsNotIn(ids) }
+                        }
+                    }
                 }
             }
 
-            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                val notif = snapToNotification(snapshot) ?: return
-                scope.launch(Dispatchers.IO) {
-                    val dao = localDb.notificationAuditDao()
-                    val existing = runCatching { dao.getNotificationById(notif.id) }.getOrNull()
-                    val merged = if (existing != null && existing.isRead) notif.copy(isRead = true) else notif
-                    runCatching { dao.insertNotification(merged) }
-                }
-            }
-
-            override fun onChildRemoved(snapshot: DataSnapshot) {}
-            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
             override fun onCancelled(error: DatabaseError) {
                 Log.w(TAG, "notifications listener cancelled: ${error.message}")
             }
@@ -207,7 +229,9 @@ class FirebaseRealtimeSyncManager(
         // 6b. Ad Monetization Configuration listener
         root.child("adConfig").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                if (snapshot.exists()) {
+                if (!snapshot.exists()) {
+                    onAdConfigChanged(AdConfig())
+                } else {
                     snapToAdConfig(snapshot)?.let { onAdConfigChanged(it) }
                 }
             }
@@ -221,9 +245,15 @@ class FirebaseRealtimeSyncManager(
         root.child("reviews").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val reviews = snapshot.children.mapNotNull { snapToReview(it) }
-                if (reviews.isNotEmpty()) {
-                    scope.launch(Dispatchers.IO) {
-                        runCatching { localDb.reviewComplaintDao().insertReviews(reviews) }
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || reviews.isEmpty()) {
+                            localDb.reviewComplaintDao().clearAllReviews()
+                        } else {
+                            localDb.reviewComplaintDao().insertReviews(reviews)
+                            val ids = reviews.map { it.id }
+                            if (ids.size <= 900) localDb.reviewComplaintDao().deleteReviewsNotIn(ids)
+                        }
                     }
                 }
             }
@@ -234,9 +264,15 @@ class FirebaseRealtimeSyncManager(
         root.child("complaints").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val complaints = snapshot.children.mapNotNull { snapToComplaint(it) }
-                if (complaints.isNotEmpty()) {
-                    scope.launch(Dispatchers.IO) {
-                        runCatching { localDb.reviewComplaintDao().insertComplaints(complaints) }
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || complaints.isEmpty()) {
+                            localDb.reviewComplaintDao().clearAllComplaints()
+                        } else {
+                            localDb.reviewComplaintDao().insertComplaints(complaints)
+                            val ids = complaints.map { it.id }
+                            if (ids.size <= 900) localDb.reviewComplaintDao().deleteComplaintsNotIn(ids)
+                        }
                     }
                 }
             }
@@ -247,9 +283,15 @@ class FirebaseRealtimeSyncManager(
         root.child("auditLogs").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val logs = snapshot.children.mapNotNull { snapToAuditLog(it) }
-                if (logs.isNotEmpty()) {
-                    scope.launch(Dispatchers.IO) {
-                        runCatching { localDb.notificationAuditDao().insertAuditLogs(logs) }
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || logs.isEmpty()) {
+                            localDb.notificationAuditDao().clearAllAuditLogs()
+                        } else {
+                            localDb.notificationAuditDao().insertAuditLogs(logs)
+                            val ids = logs.map { it.id }
+                            if (ids.size <= 900) localDb.notificationAuditDao().deleteAuditLogsNotIn(ids)
+                        }
                     }
                 }
             }
@@ -261,9 +303,15 @@ class FirebaseRealtimeSyncManager(
         root.child("activationPayments").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val payments = snapshot.children.mapNotNull { snapToActivationPayment(it) }
-                if (payments.isNotEmpty()) {
-                    scope.launch(Dispatchers.IO) {
-                        runCatching { localDb.activationPaymentDao().insertAll(payments) }
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || payments.isEmpty()) {
+                            localDb.activationPaymentDao().clearAllPayments()
+                        } else {
+                            localDb.activationPaymentDao().insertAll(payments)
+                            val ids = payments.map { it.id }
+                            if (ids.size <= 900) localDb.activationPaymentDao().deletePaymentsNotIn(ids)
+                        }
                     }
                 }
             }
@@ -276,9 +324,11 @@ class FirebaseRealtimeSyncManager(
         // 9. Payment Settings listener
         root.child("paymentSettings").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                if (snapshot.exists()) {
-                    snapToPaymentSettings(snapshot)?.let { settings ->
-                        scope.launch(Dispatchers.IO) {
+                scope.launch(Dispatchers.IO) {
+                    if (!snapshot.exists()) {
+                        runCatching { localDb.paymentSettingsDao().clearSettings() }
+                    } else {
+                        snapToPaymentSettings(snapshot)?.let { settings ->
                             runCatching { localDb.paymentSettingsDao().upsertSettings(settings) }
                         }
                     }
@@ -324,8 +374,8 @@ class FirebaseRealtimeSyncManager(
     }
 
     /**
-     * Pulls the entire shared RTDB tree over HTTPS REST (`/.json`) and merges into Room in safe FK order.
-     * Guarantees Website <-> Android <-> Admin parity even if Firebase SDK WebSocket or `.indexOn` fails.
+     * Pulls the entire shared RTDB tree over HTTPS REST (`/.json`) and strictly reconciles Room
+     * (including deletions when RTDB nodes are cleared or individual records are removed).
      */
     suspend fun pullAllFromRest(
         localDb: KrishiBondhuDatabase,
@@ -333,8 +383,13 @@ class FirebaseRealtimeSyncManager(
         onIncomingNotification: (NotificationEntity) -> Unit = {}
     ) {
         if (!enableRemoteSync) return
-        val bodyStr = restGetJson(".json") ?: return
-        val rootObj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return
+        val rawBody = restGetJson(".json") ?: return
+        val trimmed = rawBody.trim()
+        val rootObj = if (trimmed == "null") {
+            JSONObject()
+        } else {
+            runCatching { JSONObject(trimmed) }.getOrNull() ?: return
+        }
 
         // 1. Categories first (FK target of products)
         rootObj.optJSONObject("categories")?.let { catsObj ->
@@ -352,24 +407,57 @@ class FirebaseRealtimeSyncManager(
             }
         }
 
-        // 3. Users (FK target of products)
-        rootObj.optJSONObject("users")?.let { usersObj ->
-            val users = parseJsonMap(usersObj) { id, obj -> jsonToUser(id, obj) }
-            users.forEach { u ->
-                runCatching { localDb.userDao().upsertUser(u) }
+        // 3. Users (FK parent of products - upsert before products, prune stale after child tables)
+        val remoteUsersObj = rootObj.optJSONObject("users")
+        val remoteUsers = if (remoteUsersObj != null) {
+            parseJsonMap(remoteUsersObj) { id, obj -> jsonToUser(id, obj) }
+        } else {
+            emptyList()
+        }
+        remoteUsers.forEach { u ->
+            runCatching { localDb.userDao().upsertUser(u) }
+        }
+
+        // 4. Products (upsert after users & categories, prune deleted)
+        val remoteProdsObj = rootObj.optJSONObject("products")
+        val remoteProds = if (remoteProdsObj != null) {
+            parseJsonMap(remoteProdsObj) { id, obj -> jsonToProduct(id, obj) }
+        } else {
+            emptyList()
+        }
+        if (remoteProds.isEmpty()) {
+            runCatching {
+                localDb.productDao().clearAllProducts()
+                localDb.cartDao().clearCart()
+            }
+        } else {
+            remoteProds.forEach { p ->
+                runCatching { localDb.productDao().upsertProduct(p) }
+            }
+            val prodIds = remoteProds.map { it.id }
+            if (prodIds.size <= 900) {
+                runCatching { localDb.productDao().deleteProductsNotIn(prodIds) }
             }
         }
 
-        // 4. Products (after users & categories)
-        rootObj.optJSONObject("products")?.let { prodsObj ->
-            val prods = parseJsonMap(prodsObj) { id, obj -> jsonToProduct(id, obj) }
-            prods.forEach { p ->
-                runCatching { localDb.productDao().upsertProduct(p) }
+        // Now safe to prune/clear users (children already reconciled)
+        if (remoteUsers.isEmpty()) {
+            runCatching { localDb.userDao().clearNonAdminUsers() }
+        } else {
+            val userIds = remoteUsers.map { it.id }
+            if (userIds.size <= 900) {
+                runCatching { localDb.userDao().deleteNonAdminUsersNotIn(userIds) }
             }
         }
 
         // 5. Orders + items
-        rootObj.optJSONObject("orders")?.let { ordersObj ->
+        val ordersObj = rootObj.optJSONObject("orders")
+        if (ordersObj == null) {
+            runCatching {
+                localDb.orderDao().clearAllOrderItems()
+                localDb.orderDao().clearAllOrders()
+            }
+        } else {
             val orders = mutableListOf<OrderEntity>()
             val items = mutableListOf<OrderItemEntity>()
             val keys = ordersObj.keys()
@@ -389,105 +477,172 @@ class FirebaseRealtimeSyncManager(
                     }
                 }
             }
-            if (orders.isNotEmpty()) {
-                runCatching {
+            runCatching {
+                if (orders.isEmpty()) {
+                    localDb.orderDao().clearAllOrderItems()
+                    localDb.orderDao().clearAllOrders()
+                } else {
                     localDb.orderDao().insertOrders(orders)
                     if (items.isNotEmpty()) localDb.orderDao().insertOrderItems(items)
+                    val orderIds = orders.map { it.id }
+                    if (orderIds.size <= 900) {
+                        localDb.orderDao().deleteOrderItemsForMissingOrders(orderIds)
+                        localDb.orderDao().deleteOrdersNotIn(orderIds)
+                    }
                 }
             }
         }
 
         // 6. Notifications
-        rootObj.optJSONObject("notifications")?.let { notifsObj ->
+        val notifsObj = rootObj.optJSONObject("notifications")
+        if (notifsObj == null) {
+            runCatching { localDb.notificationAuditDao().clearAllNotifications() }
+        } else {
             val notifs = parseJsonMap(notifsObj) { id, obj -> jsonToNotification(id, obj) }
-            notifs.forEach { n ->
-                ingestRemoteNotification(localDb, n, onIncomingNotification)
+            if (notifs.isEmpty()) {
+                runCatching { localDb.notificationAuditDao().clearAllNotifications() }
+            } else {
+                notifs.forEach { n ->
+                    ingestRemoteNotification(localDb, n, onIncomingNotification)
+                }
+                val ids = notifs.map { it.id }
+                if (ids.size <= 900) {
+                    runCatching { localDb.notificationAuditDao().deleteNotificationsNotIn(ids) }
+                }
             }
         }
 
         // 7. Reviews, Complaints, AuditLogs
-        rootObj.optJSONObject("reviews")?.let { revObj ->
+        val revObj = rootObj.optJSONObject("reviews")
+        if (revObj == null) {
+            runCatching { localDb.reviewComplaintDao().clearAllReviews() }
+        } else {
             val list = parseJsonMap(revObj) { id, obj -> jsonToReview(id, obj) }
-            if (list.isNotEmpty()) runCatching { localDb.reviewComplaintDao().insertReviews(list) }
+            runCatching {
+                if (list.isEmpty()) localDb.reviewComplaintDao().clearAllReviews()
+                else {
+                    localDb.reviewComplaintDao().insertReviews(list)
+                    val ids = list.map { it.id }
+                    if (ids.size <= 900) localDb.reviewComplaintDao().deleteReviewsNotIn(ids)
+                }
+            }
         }
-        rootObj.optJSONObject("complaints")?.let { cmpObj ->
+
+        val cmpObj = rootObj.optJSONObject("complaints")
+        if (cmpObj == null) {
+            runCatching { localDb.reviewComplaintDao().clearAllComplaints() }
+        } else {
             val list = parseJsonMap(cmpObj) { id, obj -> jsonToComplaint(id, obj) }
-            if (list.isNotEmpty()) runCatching { localDb.reviewComplaintDao().insertComplaints(list) }
+            runCatching {
+                if (list.isEmpty()) localDb.reviewComplaintDao().clearAllComplaints()
+                else {
+                    localDb.reviewComplaintDao().insertComplaints(list)
+                    val ids = list.map { it.id }
+                    if (ids.size <= 900) localDb.reviewComplaintDao().deleteComplaintsNotIn(ids)
+                }
+            }
         }
-        rootObj.optJSONObject("auditLogs")?.let { audObj ->
+
+        val audObj = rootObj.optJSONObject("auditLogs")
+        if (audObj == null) {
+            runCatching { localDb.notificationAuditDao().clearAllAuditLogs() }
+        } else {
             val list = parseJsonMap(audObj) { id, obj -> jsonToAuditLog(id, obj) }
-            if (list.isNotEmpty()) runCatching { localDb.notificationAuditDao().insertAuditLogs(list) }
+            runCatching {
+                if (list.isEmpty()) localDb.notificationAuditDao().clearAllAuditLogs()
+                else {
+                    localDb.notificationAuditDao().insertAuditLogs(list)
+                    val ids = list.map { it.id }
+                    if (ids.size <= 900) localDb.notificationAuditDao().deleteAuditLogsNotIn(ids)
+                }
+            }
         }
 
         // 8. AdConfig
-        rootObj.optJSONObject("adConfig")?.let { adObj ->
+        val adObj = rootObj.optJSONObject("adConfig")
+        if (adObj == null) {
+            onAdConfigChanged(AdConfig())
+        } else {
             jsonToAdConfig(adObj)?.let { onAdConfigChanged(it) }
         }
 
         // 9. Activation Payments
-        rootObj.optJSONObject("activationPayments")?.let { payObj ->
+        val payObj = rootObj.optJSONObject("activationPayments")
+        if (payObj == null) {
+            runCatching { localDb.activationPaymentDao().clearAllPayments() }
+        } else {
             val list = parseJsonMap(payObj) { id, obj -> jsonToActivationPayment(id, obj) }
-            if (list.isNotEmpty()) {
-                runCatching { localDb.activationPaymentDao().insertAll(list) }
+            runCatching {
+                if (list.isEmpty()) localDb.activationPaymentDao().clearAllPayments()
+                else {
+                    localDb.activationPaymentDao().insertAll(list)
+                    val ids = list.map { it.id }
+                    if (ids.size <= 900) localDb.activationPaymentDao().deletePaymentsNotIn(ids)
+                }
             }
         }
 
         // 10. Payment Settings
-        rootObj.optJSONObject("paymentSettings")?.let { psObj ->
+        val psObj = rootObj.optJSONObject("paymentSettings")
+        if (psObj == null) {
+            runCatching { localDb.paymentSettingsDao().clearSettings() }
+        } else {
             jsonToPaymentSettings(psObj)?.let { settings ->
                 runCatching { localDb.paymentSettingsDao().upsertSettings(settings) }
             }
         }
     }
 
-    /**
-     * Pushes any locally created non-demo users (excluding offline-only superadmin) or products
-     * that aren't yet on Firebase RTDB (e.g. created while offline or before REST fallback).
-     */
-    private suspend fun pushMissingLocalRecordsToRest(localDb: KrishiBondhuDatabase) {
-        if (!enableRemoteSync) return
-        val remoteUsersStr = restGetJson("users.json") ?: return
-        val remoteUsersObj = if (remoteUsersStr == "null") JSONObject() else runCatching { JSONObject(remoteUsersStr) }.getOrNull() ?: return
-        val localUsers = runCatching { localDb.userDao().getAllUsersOnce() }.getOrDefault(emptyList())
-        localUsers.filter { !it.isDemoRecord && it.role != UserRole.ADMIN.name }.forEach { u ->
-            if (!remoteUsersObj.has(u.id)) {
-                pushUser(u)
-            }
-        }
-        val remotePayStr = restGetJson("activationPayments.json")
-        if (remotePayStr != null) {
-            val remotePayObj = if (remotePayStr == "null") JSONObject() else runCatching { JSONObject(remotePayStr) }.getOrNull()
-            if (remotePayObj != null) {
-                val localPayments = runCatching { localDb.activationPaymentDao().getAllPaymentsOnce() }.getOrDefault(emptyList())
-                localPayments.forEach { pay ->
-                    if (!remotePayObj.has(pay.id)) {
-                        pushActivationPayment(pay)
-                    }
-                }
-            }
-        }
-    }
-
     private suspend fun pullUsersFromRestIntoDb(localDb: KrishiBondhuDatabase): List<UserEntity> {
         val bodyStr = restGetJson("users.json") ?: return emptyList()
-        if (bodyStr == "null" || bodyStr.isBlank()) return emptyList()
+        if (bodyStr.trim() == "null" || bodyStr.isBlank()) {
+            runCatching { localDb.userDao().clearNonAdminUsers() }
+            return emptyList()
+        }
         val obj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return emptyList()
         val users = parseJsonMap(obj) { id, uObj -> jsonToUser(id, uObj) }
         users.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
         return users
     }
 
-    /**
-     * Looks up a user by normalized phone across BOTH Firebase SDK and RTDB REST `/users.json`,
-     * never relying solely on `.orderByChild("phone")` which requires `.indexOn` in server rules.
-     */
-    suspend fun fetchUserByPhone(phone: String, localDb: KrishiBondhuDatabase? = null): UserEntity? {
-        if (!enableRemoteSync) return null
-        val targetPhone = SecurityHashUtil.normalizePhone(phone)
-        if (targetPhone.isBlank()) return null
+    sealed class RemoteUserLookup {
+        data object Disabled : RemoteUserLookup()
+        data object Unreachable : RemoteUserLookup()
+        data object NotFound : RemoteUserLookup()
+        data class Found(val user: UserEntity) : RemoteUserLookup()
+    }
 
-        // 1. Try scanning SDK users snapshot directly (works even without .indexOn)
-        val sdkUser = runCatching {
+    /**
+     * Authoritative online lookup by normalized phone.
+     * Distinguishes "Disabled" (unit tests), "Unreachable" (no internet), "NotFound" (deleted/unregistered on RTDB),
+     * and "Found(user)" so deleted accounts cannot log in using stale local Room cache.
+     */
+    suspend fun fetchUserByPhoneStrict(phone: String, localDb: KrishiBondhuDatabase? = null): RemoteUserLookup {
+        if (!enableRemoteSync) return RemoteUserLookup.Disabled
+        val targetPhone = SecurityHashUtil.normalizePhone(phone)
+        if (targetPhone.isBlank()) return RemoteUserLookup.NotFound
+
+        val bodyStr = restGetJson("users.json")
+        if (bodyStr != null) {
+            val trimmed = bodyStr.trim()
+            if (trimmed == "null" || trimmed.isBlank()) {
+                if (localDb != null) {
+                    runCatching { localDb.userDao().clearNonAdminUsers() }
+                }
+                return RemoteUserLookup.NotFound
+            }
+            val usersObj = runCatching { JSONObject(trimmed) }.getOrNull()
+            if (usersObj != null) {
+                val allRestUsers = parseJsonMap(usersObj) { id, obj -> jsonToUser(id, obj) }
+                if (localDb != null) {
+                    allRestUsers.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
+                }
+                val match = allRestUsers.firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == targetPhone }
+                return if (match != null) RemoteUserLookup.Found(match) else RemoteUserLookup.NotFound
+            }
+        }
+
+        val sdkResult = runCatching {
             withTimeoutOrNull(3000L) {
                 val root = rootRefOrNull() ?: return@withTimeoutOrNull null
                 val snap = root.child("users").get().await()
@@ -495,20 +650,23 @@ class FirebaseRealtimeSyncManager(
                 if (localDb != null && allUsers.isNotEmpty()) {
                     allUsers.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
                 }
-                allUsers.firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == targetPhone }
+                val match = allUsers.firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == targetPhone }
+                if (match != null) RemoteUserLookup.Found(match) else RemoteUserLookup.NotFound
             }
         }.getOrNull()
-        if (sdkUser != null) return sdkUser
 
-        // 2. Fallback to OkHttp REST `/users.json`
-        val bodyStr = restGetJson("users.json") ?: return null
-        if (bodyStr == "null" || bodyStr.isBlank()) return null
-        val usersObj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return null
-        val allRestUsers = parseJsonMap(usersObj) { id, obj -> jsonToUser(id, obj) }
-        if (localDb != null && allRestUsers.isNotEmpty()) {
-            allRestUsers.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
+        return sdkResult ?: RemoteUserLookup.Unreachable
+    }
+
+    /**
+     * Looks up a user by normalized phone across BOTH Firebase SDK and RTDB REST `/users.json`,
+     * never relying solely on `.orderByChild("phone")` which requires `.indexOn` in server rules.
+     */
+    suspend fun fetchUserByPhone(phone: String, localDb: KrishiBondhuDatabase? = null): UserEntity? {
+        return when (val res = fetchUserByPhoneStrict(phone, localDb)) {
+            is RemoteUserLookup.Found -> res.user
+            else -> null
         }
-        return allRestUsers.firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == targetPhone }
     }
 
     suspend fun pushUser(user: UserEntity) {

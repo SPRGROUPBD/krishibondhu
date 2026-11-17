@@ -62,11 +62,7 @@ class MarketplaceRepository(
     }
 
     suspend fun getEffectivePaymentSettings(): PaymentSettingsEntity {
-        val local = db.paymentSettingsDao().getSettingsOnce()
-        if (local != null) return local
-        val defaultSettings = PaymentSettingsEntity()
-        db.paymentSettingsDao().upsertSettings(defaultSettings)
-        return defaultSettings
+        return db.paymentSettingsDao().getSettingsOnce() ?: PaymentSettingsEntity()
     }
 
     suspend fun requireActiveMarketplaceUser(
@@ -113,9 +109,6 @@ class MarketplaceRepository(
         onIncomingNotification: (NotificationEntity) -> Unit = {}
     ) {
         MasterCatalogSeeder.initialize(db)
-        if (db.paymentSettingsDao().getSettingsOnce() == null) {
-            db.paymentSettingsDao().upsertSettings(PaymentSettingsEntity())
-        }
         if (scope != null) {
             rtdbSync.startRealtimeListeners(
                 localDb = db,
@@ -251,13 +244,23 @@ class MarketplaceRepository(
         }
 
         val expectedHash = SecurityHashUtil.hashPassword(rawPassword)
-        var user = db.userDao().getAllUsersOnce()
-            .firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == cleanId }
-        if (user == null || user.passwordHash != expectedHash) {
-            val remoteUser = rtdbSync.fetchUserByPhone(cleanId, db)
-            if (remoteUser != null) {
-                db.userDao().upsertUser(remoteUser)
-                user = remoteUser
+        val user = when (val lookup = rtdbSync.fetchUserByPhoneStrict(cleanId, db)) {
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.Found -> {
+                db.userDao().upsertUser(lookup.user)
+                lookup.user
+            }
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.NotFound -> {
+                db.userDao().getAllUsersOnce()
+                    .filter { it.id != SUPERADMIN_USER_ID && SecurityHashUtil.normalizePhone(it.phone) == cleanId }
+                    .forEach { db.userDao().deleteNonAdminUserById(it.id) }
+                null
+            }
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.Unreachable -> {
+                return Result.failure(IllegalStateException("অনলাইন সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি। ইন্টারনেট সংযোগ চালু করে আবার চেষ্টা করুন।"))
+            }
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.Disabled -> {
+                db.userDao().getAllUsersOnce()
+                    .firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == cleanId }
             }
         }
         if (user == null) {
@@ -299,10 +302,25 @@ class MarketplaceRepository(
         if (role == UserRole.ADMIN) {
             return Result.failure(IllegalArgumentException("অ্যাডমিন হিসেবে সরাসরি নিবন্ধন করা যাবে না।"))
         }
-        val existsLocally = db.userDao().getAllUsersOnce()
-            .any { SecurityHashUtil.normalizePhone(it.phone) == cleanPhone }
-        if (existsLocally || rtdbSync.fetchUserByPhone(cleanPhone, db) != null) {
-            return Result.failure(IllegalArgumentException("এই মোবাইল নম্বরটি ইতোমধ্যে নিবন্ধিত।"))
+        when (rtdbSync.fetchUserByPhoneStrict(cleanPhone, db)) {
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.Found -> {
+                return Result.failure(IllegalArgumentException("এই মোবাইল নম্বরটি ইতোমধ্যে নিবন্ধিত।"))
+            }
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.Unreachable -> {
+                return Result.failure(IllegalStateException("অনলাইন সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি। ইন্টারনেট সংযোগ চালু করে আবার চেষ্টা করুন।"))
+            }
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.NotFound -> {
+                db.userDao().getAllUsersOnce()
+                    .filter { it.id != SUPERADMIN_USER_ID && SecurityHashUtil.normalizePhone(it.phone) == cleanPhone }
+                    .forEach { db.userDao().deleteNonAdminUserById(it.id) }
+            }
+            is FirebaseRealtimeSyncManager.RemoteUserLookup.Disabled -> {
+                val existsLocally = db.userDao().getAllUsersOnce()
+                    .any { SecurityHashUtil.normalizePhone(it.phone) == cleanPhone }
+                if (existsLocally) {
+                    return Result.failure(IllegalArgumentException("এই মোবাইল নম্বরটি ইতোমধ্যে নিবন্ধিত।"))
+                }
+            }
         }
 
         val resolvedDistrict = district.ifBlank { "ঢাকা" }
