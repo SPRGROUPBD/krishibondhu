@@ -10,11 +10,21 @@ import com.google.android.gms.ads.LoadAdError
 import com.google.android.gms.ads.MobileAds
 import com.google.android.gms.ads.interstitial.InterstitialAd
 import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 object AdMonetizationManager {
     private const val INTERSTITIAL_COOLDOWN_MS = 180_000L
+    private val initScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    @Volatile
     private var initialized = false
+    @Volatile
+    private var initializing = false
     private var isLoadingInterstitial = false
     private var interstitialAd: InterstitialAd? = null
     private var loadedUnitId: String = ""
@@ -23,11 +33,22 @@ object AdMonetizationManager {
     fun isTestEnvironment(): Boolean =
         Build.FINGERPRINT.contains("robolectric", ignoreCase = true) || Build.FINGERPRINT.isBlank()
 
-    fun initialize(context: Context) {
-        if (isTestEnvironment() || initialized) return
+    fun isPlayServicesAvailable(context: Context): Boolean =
         runCatching {
-            MobileAds.initialize(context.applicationContext) {}
-            initialized = true
+            GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context) == ConnectionResult.SUCCESS
+        }.getOrDefault(false)
+
+    fun initialize(context: Context) {
+        if (isTestEnvironment() || initialized || initializing) return
+        val appContext = context.applicationContext
+        if (!isPlayServicesAvailable(appContext)) return
+        initializing = true
+        initScope.launch {
+            runCatching {
+                MobileAds.initialize(appContext) {}
+                initialized = true
+            }
+            initializing = false
         }
     }
 
@@ -38,7 +59,7 @@ object AdMonetizationManager {
         overrideId.trim().ifBlank { context.getString(R.string.admob_interstitial_unit_id) }
 
     fun preloadInterstitial(context: Context, overrideUnitId: String, enabled: Boolean) {
-        if (isTestEnvironment() || !enabled) return
+        if (isTestEnvironment() || !enabled || !isPlayServicesAvailable(context)) return
         val unitId = resolveInterstitialUnitId(context, overrideUnitId)
         if (unitId.isBlank()) return
         if ((interstitialAd != null && loadedUnitId == unitId) || isLoadingInterstitial) return

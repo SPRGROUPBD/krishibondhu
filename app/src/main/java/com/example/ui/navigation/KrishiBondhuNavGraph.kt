@@ -11,8 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import android.app.Activity
-import androidx.compose.ui.platform.LocalContext
+import androidx.activity.compose.LocalActivity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -70,7 +69,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val navController = rememberNavController()
     val snackbarHostState = remember { SnackbarHostState() }
-    val activity = LocalContext.current as? Activity
+    val activity = LocalActivity.current
 
     LaunchedEffect(uiState.toastMessage) {
         val msg = uiState.toastMessage
