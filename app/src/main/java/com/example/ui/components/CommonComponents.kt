@@ -43,6 +43,7 @@ fun KrishiTopBar(
     unreadNotifs: Int,
     activeRole: UserRole? = null,
     verificationStatus: String = "",
+    accountStatus: String = "",
     onCartClick: () -> Unit,
     onNotificationsClick: () -> Unit,
     onLanguageToggle: () -> Unit
@@ -114,21 +115,25 @@ fun KrishiTopBar(
                                 }
                             }
                         }
+                        val effectiveStatusLabel = when {
+                            accountStatus == AccountStatus.ACTIVE.name -> if (language == AppLanguage.BENGALI) "✓ সক্রিয়" else "✓ Active"
+                            accountStatus == AccountStatus.EXPIRED.name -> if (language == AppLanguage.BENGALI) "মেয়াদোত্তীর্ণ" else "Expired"
+                            accountStatus == AccountStatus.SUSPENDED.name -> if (language == AppLanguage.BENGALI) "স্থগিত" else "Suspended"
+                            accountStatus == AccountStatus.PAYMENT_UNDER_REVIEW.name -> if (language == AppLanguage.BENGALI) "পেমেন্ট যাচাইাধীন" else "Under Review"
+                            accountStatus == AccountStatus.PAYMENT_REJECTED.name -> if (language == AppLanguage.BENGALI) "পেমেন্ট প্রত্যাখ্যাত" else "Rejected"
+                            accountStatus == AccountStatus.PAYMENT_PENDING.name -> if (language == AppLanguage.BENGALI) "পেমেন্ট অপেক্ষমান" else "Payment Pending"
+                            verificationStatus == "VERIFIED" -> if (language == AppLanguage.BENGALI) "✓ যাচাইকৃত" else "Verified"
+                            else -> if (language == AppLanguage.BENGALI) "যাচাই অপেক্ষমাণ" else "Pending"
+                        }
                         val subtitleText = when (activeRole) {
-                            UserRole.FARMER -> {
-                                val verText = if (verificationStatus == "VERIFIED") "✓ যাচাইকৃত" else "যাচাই অপেক্ষমাণ"
-                                if (language == AppLanguage.BENGALI)
-                                    "কৃষক ওয়ার্কস্পেস • $verText"
-                                else
-                                    "Farmer Workspace • ${if (verificationStatus == "VERIFIED") "Verified" else "Pending"}"
-                            }
-                            UserRole.BUYER -> {
-                                val verText = if (verificationStatus == "VERIFIED") "✓ যাচাইকৃত" else "যাচাই অপেক্ষমাণ"
-                                if (language == AppLanguage.BENGALI)
-                                    "ক্রেতা মার্কেটপ্লেস • $verText"
-                                else
-                                    "Buyer Marketplace • ${if (verificationStatus == "VERIFIED") "Verified" else "Pending"}"
-                            }
+                            UserRole.FARMER -> if (language == AppLanguage.BENGALI)
+                                "কৃষক ওয়ার্কস্পেস • $effectiveStatusLabel"
+                            else
+                                "Farmer Workspace • $effectiveStatusLabel"
+                            UserRole.BUYER -> if (language == AppLanguage.BENGALI)
+                                "ক্রেতা মার্কেটপ্লেস • $effectiveStatusLabel"
+                            else
+                                "Buyer Marketplace • $effectiveStatusLabel"
                             UserRole.ADMIN -> if (language == AppLanguage.BENGALI) "সুপার অ্যাডমিন প্যানেল" else "Super Admin Mode"
                             null -> if (language == AppLanguage.BENGALI)
                                 if (isOnline) "অনলাইন • ০% দালাল • সারা বাংলাদেশ" else "অফলাইন • লোকাল ক্যাশ সক্রিয়"
@@ -428,6 +433,76 @@ fun ProductCard(
 }
 
 @Composable
+fun UserAvatar(
+    imageUri: String,
+    role: String,
+    size: androidx.compose.ui.unit.Dp = 54.dp,
+    modifier: Modifier = Modifier
+) {
+    val imageModel = MediaCaptureHelper.imageModelFromUri(imageUri)
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primaryContainer),
+        contentAlignment = Alignment.Center
+    ) {
+        if (imageModel != null) {
+            AsyncImage(
+                model = imageModel,
+                contentDescription = "প্রোফাইল ছবি",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            val emoji = when (role) {
+                UserRole.FARMER.name -> "🧑‍🌾"
+                UserRole.ADMIN.name -> "🛡️"
+                UserRole.BUYER.name -> "🛍️"
+                else -> "👤"
+            }
+            Text(text = emoji, fontSize = (size.value * 0.5f).sp)
+        }
+    }
+}
+
+fun formatDateBn(millis: Long): String {
+    if (millis <= 0L) return "—"
+    return runCatching {
+        java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.ENGLISH).format(java.util.Date(millis))
+    }.getOrDefault("—")
+}
+
+@Composable
+fun AccountStatusBadge(
+    accountStatus: String,
+    expiryDate: Long = 0L,
+    language: AppLanguage = AppLanguage.BENGALI
+) {
+    val parsed = AccountStatus.fromName(accountStatus)
+    val effective = if (parsed == AccountStatus.ACTIVE && expiryDate > 0L && expiryDate <= System.currentTimeMillis()) {
+        AccountStatus.EXPIRED
+    } else {
+        parsed
+    }
+    val (bg, fg) = when (effective) {
+        AccountStatus.ACTIVE -> LightGreen to DarkGreen
+        AccountStatus.PAYMENT_UNDER_REVIEW -> InfoBlueLight to InfoBlue
+        AccountStatus.PAYMENT_REJECTED, AccountStatus.EXPIRED, AccountStatus.SUSPENDED -> AlertRedLight to AlertRed
+        AccountStatus.PAYMENT_PENDING, AccountStatus.PENDING_REGISTRATION -> HarvestGoldLight to Color(0xFF92400E)
+    }
+    Surface(color = bg, shape = RoundedCornerShape(8.dp)) {
+        Text(
+            text = effective.display(language),
+            style = MaterialTheme.typography.labelSmall,
+            color = fg,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+        )
+    }
+}
+
+@Composable
 fun FarmerCard(
     farmer: UserEntity,
     productCount: Int,
@@ -448,15 +523,11 @@ fun FarmerCard(
             modifier = Modifier.padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(54.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = "🧑‍🌾", fontSize = 28.sp)
-            }
+            UserAvatar(
+                imageUri = farmer.profileImageUri,
+                role = farmer.role,
+                size = 54.dp
+            )
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -478,8 +549,11 @@ fun FarmerCard(
                         )
                     }
                 }
+                val locLine = listOf(farmer.unionName, farmer.upazila, farmer.district)
+                    .filter { it.isNotBlank() }
+                    .joinToString(", ")
                 Text(
-                    text = "${farmer.upazila}, ${farmer.district} • ${farmer.unionName}",
+                    text = locLine,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -554,7 +628,7 @@ fun CategoryPill(
 fun OrderStatusChip(statusName: String, language: AppLanguage) {
     val status = runCatching { OrderStatus.valueOf(statusName) }.getOrDefault(OrderStatus.PENDING)
     val (bg, fg) = when (status) {
-        OrderStatus.COMPLETED, OrderStatus.DELIVERED -> LightGreen to DarkGreen
+        OrderStatus.COMPLETED, OrderStatus.CONFIRMED, OrderStatus.DELIVERED -> LightGreen to DarkGreen
         OrderStatus.ACCEPTED, OrderStatus.PROCESSING, OrderStatus.READY_FOR_PICKUP, OrderStatus.SHIPPED ->
             InfoBlueLight to InfoBlue
         OrderStatus.REJECTED, OrderStatus.CANCELLED, OrderStatus.DISPUTED ->

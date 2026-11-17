@@ -28,8 +28,25 @@ data class UserEntity(
     val rating: Double = 4.8,
     val reviewCount: Int = 0,
     val createdAt: Long = System.currentTimeMillis(),
-    val isDemoRecord: Boolean = false
-)
+    val isDemoRecord: Boolean = false,
+    val accountStatus: String = "PAYMENT_PENDING", // PENDING_REGISTRATION, PAYMENT_PENDING, PAYMENT_UNDER_REVIEW, ACTIVE, PAYMENT_REJECTED, EXPIRED, SUSPENDED
+    val activationDate: Long = 0L,
+    val expiryDate: Long = 0L,
+    val validityYears: Int = 2,
+    val lastPaymentId: String = ""
+) {
+    fun isMarketplaceActive(now: Long = System.currentTimeMillis()): Boolean {
+        if (role == "ADMIN") return true
+        if (accountStatus != "ACTIVE") return false
+        return expiryDate <= 0L || expiryDate > now
+    }
+
+    fun daysUntilExpiry(now: Long = System.currentTimeMillis()): Int? {
+        if (expiryDate <= 0L) return null
+        val diff = expiryDate - now
+        return if (diff <= 0L) 0 else kotlin.math.ceil(diff / 86_400_000.0).toInt()
+    }
+}
 
 @Entity(tableName = "categories")
 data class CategoryEntity(
@@ -83,7 +100,7 @@ data class ProductEntity(
     val descriptionBn: String,
     val imageUri: String = "", // Content URI from Photo Picker or empty for curated artwork
     val availableQuantity: Double,
-    val unit: String, // কেজি, মণ, বস্তা, টন, পিস, লিটার
+    val unit: String = "মণ", // শুধুমাত্র মণ (১ মণ = ৪০ কেজি)
     val pricePerUnit: Double,
     val harvestDate: String,
     val availabilityDate: String,
@@ -147,11 +164,18 @@ data class OrderEntity(
     val grandTotal: Double,
     val paymentMethod: String, // PaymentMethod.name
     val transactionReference: String = "",
-    val paymentStatus: String = "PENDING", // PENDING, AWAITING_GATEWAY, PAID, FAILED
+    val paymentStatus: String = "PENDING", // PENDING, AWAITING_GATEWAY, SUBMITTED, VERIFIED, PAID, FAILED, REJECTED
     val itemsSummary: String,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
-    val isDemoRecord: Boolean = false
+    val isDemoRecord: Boolean = false,
+    val paymentSenderNumber: String = "",
+    val paymentReceiptUri: String = "",
+    val farmerPaymentConfirmed: Boolean = false,
+    val farmerPaymentConfirmedAt: Long = 0L,
+    val adminPaymentVerified: Boolean = false,
+    val adminPaymentVerifiedBy: String = "",
+    val adminPaymentVerifiedAt: Long = 0L
 )
 
 @Entity(
@@ -226,4 +250,48 @@ data class AuditLogEntity(
     val targetId: String,
     val detailsBn: String,
     val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "activation_payments",
+    indices = [Index("userId"), Index("status"), Index("transactionId")]
+)
+data class ActivationPaymentEntity(
+    @PrimaryKey val id: String,
+    val userId: String,
+    val userName: String,
+    val userPhone: String,
+    val accountRole: String, // FARMER or BUYER
+    val paymentType: String = "ACTIVATION", // ACTIVATION or RENEWAL
+    val paymentMethod: String, // BKASH or NAGAD
+    val receiverNumber: String = "01756144900",
+    val receiverAccountType: String = "PERSONAL", // PERSONAL or MERCHANT
+    val senderMobile: String,
+    val transactionId: String,
+    val amount: Double = 300.0,
+    val receiptUri: String = "",
+    val status: String = "PENDING", // PENDING, APPROVED, REJECTED, RESUBMISSION_REQUESTED
+    val adminNotes: String = "",
+    val reviewedBy: String = "",
+    val reviewedAt: Long = 0L,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "payment_settings")
+data class PaymentSettingsEntity(
+    @PrimaryKey val id: String = "default",
+    val bKashNumber: String = "01756144900",
+    val bKashAccountType: String = "PERSONAL", // PERSONAL or MERCHANT
+    val nagadNumber: String = "01756144900",
+    val nagadAccountType: String = "PERSONAL", // PERSONAL or MERCHANT
+    val farmerFee: Double = 300.0,
+    val buyerFee: Double = 300.0,
+    val renewalFee: Double = 300.0,
+    val validityYears: Int = 2,
+    val paymentInstructions: String = "বিকাশ বা নগদ নম্বরে ৩০০ টাকা পরিশোধ করে প্রেরকের মোবাইল নম্বর, ট্রানজেকশন আইডি (TxID) ও রসিদের ছবি জমা দিন। অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।",
+    val notify30Days: Boolean = true,
+    val notify7Days: Boolean = true,
+    val notifyOnExpiry: Boolean = true,
+    val updatedAt: Long = 0L
 )

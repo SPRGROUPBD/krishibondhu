@@ -39,7 +39,8 @@ fun FarmerProfileScreen(
     uiState: MarketplaceUiState,
     onBack: () -> Unit,
     onProductClick: (String) -> Unit,
-    onQuickAddToCart: (String) -> Unit
+    onQuickAddToCart: (String) -> Unit,
+    onRequireActiveAccount: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val farmer = uiState.farmers.firstOrNull { it.id == farmerId }
@@ -80,15 +81,11 @@ fun FarmerProfileScreen(
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(64.dp)
-                                    .clip(CircleShape)
-                                    .background(LightGreen),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text("🧑‍🌾", fontSize = 32.sp)
-                            }
+                            com.example.ui.components.UserAvatar(
+                                imageUri = farmer.profileImageUri,
+                                role = farmer.role,
+                                size = 64.dp
+                            )
                             Spacer(modifier = Modifier.width(14.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -115,26 +112,31 @@ fun FarmerProfileScreen(
                                         modifier = Modifier.size(15.dp)
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
+                                    val locText = listOf(farmer.village, farmer.unionName, farmer.upazila, farmer.district)
+                                        .filter { it.isNotBlank() }
+                                        .joinToString(", ")
                                     Text(
-                                        text = "${farmer.village}, ${farmer.unionName}, ${farmer.upazila}, ${farmer.district}",
+                                        text = locText,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Surface(
-                                    color = if (farmer.verificationStatus == "VERIFIED") LightGreen else Color(0xFFFEF3C7),
-                                    shape = RoundedCornerShape(6.dp)
-                                ) {
-                                    Text(
-                                        text = if (farmer.verificationStatus == "VERIFIED")
-                                            "যাচাইকৃত কৃষক • ★ ${farmer.rating} (${farmer.reviewCount} রিভিউ)"
-                                        else
-                                            "পরিচয় যাচাই প্রক্রিয়াধীন",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = DarkGreen,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                    )
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Surface(
+                                        color = if (farmer.verificationStatus == "VERIFIED") LightGreen else Color(0xFFFEF3C7),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = if (farmer.verificationStatus == "VERIFIED")
+                                                "যাচাইকৃত কৃষক • ★ ${farmer.rating} (${farmer.reviewCount} রিভিউ)"
+                                            else
+                                                "পরিচয় যাচাই প্রক্রিয়াধীন",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = DarkGreen,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -148,11 +150,16 @@ fun FarmerProfileScreen(
                         }
 
                         Spacer(modifier = Modifier.height(14.dp))
+                        val callerActive = uiState.activeUser?.isMarketplaceActive() == true
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             Button(
                                 onClick = {
-                                    runCatching {
-                                        context.startActivity(Intent(Intent.ACTION_DIAL, "tel:${farmer.phone}".toUri()))
+                                    if (!callerActive) {
+                                        onRequireActiveAccount()
+                                    } else {
+                                        runCatching {
+                                            context.startActivity(Intent(Intent.ACTION_DIAL, "tel:${farmer.phone}".toUri()))
+                                        }
                                     }
                                 },
                                 modifier = Modifier.weight(1f)
@@ -163,8 +170,12 @@ fun FarmerProfileScreen(
                             }
                             OutlinedButton(
                                 onClick = {
-                                    runCatching {
-                                        context.startActivity(Intent(Intent.ACTION_SENDTO, "smsto:${farmer.phone}".toUri()))
+                                    if (!callerActive) {
+                                        onRequireActiveAccount()
+                                    } else {
+                                        runCatching {
+                                            context.startActivity(Intent(Intent.ACTION_SENDTO, "smsto:${farmer.phone}".toUri()))
+                                        }
                                     }
                                 },
                                 modifier = Modifier.weight(1f)
@@ -177,7 +188,10 @@ fun FarmerProfileScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "নিরাপত্তা নীতি: কৃষকের এনআইডি ও ব্যক্তিগত গোপনীয় তথ্য প্রকাশ্যে প্রদর্শিত হয় না।",
+                            text = if (callerActive)
+                                "নিরাপত্তা নীতি: কৃষকের এনআইডি ও ব্যক্তিগত গোপনীয় তথ্য প্রকাশ্যে প্রদর্শিত হয় না।"
+                            else
+                                "সরাসরি কল বা অর্ডার করতে সক্রিয় (Active) অ্যাকাউন্ট প্রয়োজন।",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

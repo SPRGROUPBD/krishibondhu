@@ -277,6 +277,35 @@ fun OrdersScreen(
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Surface(
+                                    color = if (order.farmerPaymentConfirmed) LightGreen else HarvestGoldLight,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = if (order.farmerPaymentConfirmed) "✓ কৃষক টাকা নিশ্চিত" else "কৃষক টাকা নিশ্চিত বাকি",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (order.farmerPaymentConfirmed) DarkGreen else androidx.compose.ui.graphics.Color(0xFF92400E),
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Surface(
+                                    color = if (order.adminPaymentVerified) LightGreen else MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = if (order.adminPaymentVerified) "✓ অ্যাডমিন যাচাইকৃত" else "অ্যাডমিন যাচাই বাকি",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (order.adminPaymentVerified) DarkGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }

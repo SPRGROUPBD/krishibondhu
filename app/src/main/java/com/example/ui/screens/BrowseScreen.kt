@@ -52,10 +52,12 @@ fun BrowseScreen(
     onDivisionSelect: (String?) -> Unit,
     onDistrictSelect: (String?) -> Unit,
     onUpazilaSelect: (String?) -> Unit,
+    onUnionSelect: (String?) -> Unit = {},
     onLocationAutoSelect: (String?, String?, String?) -> Unit = { d, dist, _ ->
         onDivisionSelect(d)
         onDistrictSelect(dist)
     },
+    onUseMyLocation: (() -> Unit)? = null,
     onWholesaleSelect: (Boolean?) -> Unit,
     onSortSelect: (PriceSort) -> Unit,
     onResetFilters: () -> Unit,
@@ -108,11 +110,41 @@ fun BrowseScreen(
             emptyList()
         }
     }
+    val unions = remember(
+        uiState.selectedDivision,
+        uiState.selectedDistrict,
+        uiState.selectedUpazila,
+        uiState.locations,
+        uiState.farmers,
+        uiState.products
+    ) {
+        val fromLocations = uiState.locations.filter { loc ->
+            (uiState.selectedDivision == null || loc.divisionBn == uiState.selectedDivision) &&
+                (uiState.selectedDistrict == null || loc.districtBn == uiState.selectedDistrict) &&
+                (uiState.selectedUpazila == null || loc.upazilaBn == uiState.selectedUpazila)
+        }.map { it.unionBn }
+        val fromFarmers = uiState.farmers.filter { f ->
+            (uiState.selectedDivision == null || f.division == uiState.selectedDivision) &&
+                (uiState.selectedDistrict == null || f.district == uiState.selectedDistrict) &&
+                (uiState.selectedUpazila == null || f.upazila == uiState.selectedUpazila)
+        }.map { it.unionName }
+        val fromProducts = uiState.products.filter { p ->
+            (uiState.selectedDivision == null || p.division == uiState.selectedDivision) &&
+                (uiState.selectedDistrict == null || p.district == uiState.selectedDistrict) &&
+                (uiState.selectedUpazila == null || p.upazila == uiState.selectedUpazila)
+        }.map { it.unionName }
+        (fromLocations + fromFarmers + fromProducts)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .sorted()
+    }
 
     val hasActiveFilter = uiState.searchQuery.isNotBlank() ||
         uiState.selectedDivision != null ||
         uiState.selectedDistrict != null ||
         uiState.selectedUpazila != null ||
+        uiState.selectedUnion != null ||
         uiState.selectedCategoryId != null ||
         uiState.wholesaleOnly != null ||
         uiState.priceSort != PriceSort.NEWEST
@@ -191,9 +223,9 @@ fun BrowseScreen(
             placeholder = {
                 Text(
                     if (lang == AppLanguage.BENGALI)
-                        "ফসল, জেলা, উপজেলা বা কৃষকের নাম লিখুন..."
+                        "ফসল, জেলা, উপজেলা, ইউনিয়ন বা কৃষকের নাম লিখুন..."
                     else
-                        "Search crops, district, upazila or farmer..."
+                        "Search crops, district, upazila, union or farmer..."
                 )
             },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
@@ -214,7 +246,7 @@ fun BrowseScreen(
 
         Spacer(modifier = Modifier.height(6.dp))
 
-        // Auto GPS / Map Quick Location + Reset Bar
+        // Auto GPS / My Area / Map Quick Location + Reset Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -237,12 +269,20 @@ fun BrowseScreen(
                     .testTag("browse_auto_gps_button")
             ) {
                 Icon(Icons.Filled.MyLocation, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    if (lang == AppLanguage.BENGALI) "আমার এলাকার ফসল (GPS)" else "Nearby (Auto GPS)",
+                    if (lang == AppLanguage.BENGALI) "GPS এলাকা" else "Auto GPS",
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+            if (uiState.activeUser != null && onUseMyLocation != null) {
+                OutlinedButton(
+                    onClick = onUseMyLocation,
+                    modifier = Modifier.testTag("browse_my_location_button")
+                ) {
+                    Text(if (lang == AppLanguage.BENGALI) "আমার এলাকা" else "My Area", maxLines = 1)
+                }
             }
             OutlinedButton(
                 onClick = { showMapPicker = true },
@@ -268,7 +308,7 @@ fun BrowseScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // All Filters as Structured Dropdowns (বিভাগ, জেলা, উপজেলা, সব ক্যাটাগরি, পাইকারি, সাজানো)
+        // All Filters as Structured Dropdowns (বিভাগ, জেলা, উপজেলা, ইউনিয়ন, সব ক্যাটাগরি, পাইকারি, সাজানো)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -303,7 +343,7 @@ fun BrowseScreen(
                 )
             }
 
-            // Row 2: উপজেলা & সব ক্যাটাগরি Dropdowns
+            // Row 2: উপজেলা & ইউনিয়ন Dropdowns
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -320,7 +360,25 @@ fun BrowseScreen(
                     testTag = "filter_upazila_dropdown"
                 )
 
-                if (!showFarmersTab) {
+                val allUnionLabel = if (lang == AppLanguage.BENGALI) "সব ইউনিয়ন" else "All Unions"
+                FilterDropdownField(
+                    label = if (lang == AppLanguage.BENGALI) "ইউনিয়ন" else "Union",
+                    selectedText = uiState.selectedUnion ?: allUnionLabel,
+                    isActive = uiState.selectedUnion != null,
+                    enabled = unions.isNotEmpty(),
+                    options = listOf(allUnionLabel to null) + unions.map { it to it },
+                    onSelect = onUnionSelect,
+                    modifier = Modifier.weight(1f),
+                    testTag = "filter_union_dropdown"
+                )
+            }
+
+            // Row 3 (Crops Tab): ক্যাটাগরি, পাইকারি/খুচরা & দাম অনুযায়ী সাজান Dropdowns
+            if (!showFarmersTab) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     val allCatLabel = if (lang == AppLanguage.BENGALI) "সব ক্যাটাগরি" else "All Categories"
                     val selectedCat = activeCategories.firstOrNull { it.id == uiState.selectedCategoryId }
                     val selectedCatText = if (selectedCat != null) {
@@ -330,7 +388,7 @@ fun BrowseScreen(
                         allCatLabel
                     }
                     FilterDropdownField(
-                        label = if (lang == AppLanguage.BENGALI) "সব ক্যাটাগরি" else "Category",
+                        label = if (lang == AppLanguage.BENGALI) "ক্যাটাগরি" else "Category",
                         selectedText = selectedCatText,
                         isActive = uiState.selectedCategoryId != null,
                         options = listOf(allCatLabel to null) + activeCategories.map { cat ->
@@ -341,16 +399,8 @@ fun BrowseScreen(
                         modifier = Modifier.weight(1f),
                         testTag = "filter_category_dropdown"
                     )
-                }
-            }
 
-            // Row 3 (Crops Tab): পাইকারি/খুচরা & দাম অনুযায়ী সাজান Dropdowns
-            if (!showFarmersTab) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val allTypeLabel = if (lang == AppLanguage.BENGALI) "সব ধরন (পাইকারি/খুচরা)" else "All Types"
+                    val allTypeLabel = if (lang == AppLanguage.BENGALI) "সব ধরন" else "All Types"
                     val wholesaleLabel = if (lang == AppLanguage.BENGALI) "পাইকারি" else "Wholesale"
                     val retailLabel = if (lang == AppLanguage.BENGALI) "খুচরা" else "Retail"
                     val selectedTypeText = when (uiState.wholesaleOnly) {
@@ -359,7 +409,7 @@ fun BrowseScreen(
                         null -> allTypeLabel
                     }
                     FilterDropdownField(
-                        label = if (lang == AppLanguage.BENGALI) "বিক্রয়ের ধরন" else "Sale Type",
+                        label = if (lang == AppLanguage.BENGALI) "ধরন" else "Sale Type",
                         selectedText = selectedTypeText,
                         isActive = uiState.wholesaleOnly != null,
                         options = listOf(
@@ -368,20 +418,20 @@ fun BrowseScreen(
                             retailLabel to false
                         ),
                         onSelect = onWholesaleSelect,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(0.85f),
                         testTag = "filter_wholesale_dropdown"
                     )
 
-                    val sortNewest = if (lang == AppLanguage.BENGALI) "নতুন আগে" else "Newest First"
-                    val sortLow = if (lang == AppLanguage.BENGALI) "দাম: কম → বেশি" else "Price: Low → High"
-                    val sortHigh = if (lang == AppLanguage.BENGALI) "দাম: বেশি → কম" else "Price: High → Low"
+                    val sortNewest = if (lang == AppLanguage.BENGALI) "নতুন" else "Newest"
+                    val sortLow = if (lang == AppLanguage.BENGALI) "কম দাম" else "Low→High"
+                    val sortHigh = if (lang == AppLanguage.BENGALI) "বেশি দাম" else "High→Low"
                     val selectedSortText = when (uiState.priceSort) {
                         PriceSort.NEWEST -> sortNewest
                         PriceSort.PRICE_LOW_HIGH -> sortLow
                         PriceSort.PRICE_HIGH_LOW -> sortHigh
                     }
                     FilterDropdownField(
-                        label = if (lang == AppLanguage.BENGALI) "সাজান" else "Sort By",
+                        label = if (lang == AppLanguage.BENGALI) "সাজান" else "Sort",
                         selectedText = selectedSortText,
                         isActive = uiState.priceSort != PriceSort.NEWEST,
                         options = listOf(
@@ -390,7 +440,7 @@ fun BrowseScreen(
                             sortHigh to PriceSort.PRICE_HIGH_LOW
                         ),
                         onSelect = onSortSelect,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(0.85f),
                         testTag = "filter_sort_dropdown"
                     )
                 }

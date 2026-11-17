@@ -9,28 +9,36 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.example.data.model.AdConfig
-import com.example.data.model.formatBdt
+import coil.compose.AsyncImage
+import com.example.data.local.ActivationPaymentEntity
+import com.example.data.local.PaymentSettingsEntity
+import com.example.data.model.*
+import com.example.ui.components.AccountStatusBadge
 import com.example.ui.components.OrderStatusChip
+import com.example.ui.components.UserAvatar
+import com.example.ui.components.formatDateBn
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.MarketplaceUiState
+import com.example.util.MediaCaptureHelper
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -38,6 +46,11 @@ fun AdminDashboardScreen(
     uiState: MarketplaceUiState,
     onBack: () -> Unit,
     onVerifyUser: (userId: String, approved: Boolean) -> Unit,
+    onApproveActivationPayment: (paymentId: String, notes: String) -> Unit = { _, _ -> },
+    onRejectActivationPayment: (paymentId: String, reason: String, requestResubmission: Boolean) -> Unit = { _, _, _ -> },
+    onSetAccountStatus: (userId: String, status: AccountStatus, reason: String) -> Unit = { _, _, _ -> },
+    onVerifyOrderPayment: (orderId: String, approved: Boolean, notes: String) -> Unit = { _, _, _ -> },
+    onSavePaymentSettings: (PaymentSettingsEntity) -> Unit = {},
     onSendNotification: (targetUserId: String, targetRole: String, titleBn: String, messageBn: String) -> Unit,
     onAddCategory: (nameBn: String, nameEn: String, emoji: String) -> Unit,
     onAddLocation: (division: String, district: String, upazila: String, union: String, village: String) -> Unit,
@@ -50,11 +63,13 @@ fun AdminDashboardScreen(
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf(
         "সারসংক্ষেপ",
+        "পেমেন্ট যাচাই (${stats.pendingActivationPayments})",
         "কৃষক ও ক্রেতা",
+        "অর্ডার ও পেমেন্ট (${stats.pendingOrderPaymentVerifications})",
+        "পেমেন্ট সেটিংস",
         "নোটিফিকেশন পাঠান",
         "ক্যাটাগরি",
         "এলাকা",
-        "অর্ডার ও অভিযোগ",
         "অডিট লগ",
         "বিজ্ঞাপন ও সব নেটওয়ার্ক"
     )
@@ -92,7 +107,6 @@ fun AdminDashboardScreen(
                 .padding(padding)
                 .background(MaterialTheme.colorScheme.background)
         ) {
-            // Admin Price-Protection Policy Banner
             Surface(
                 color = LightGreen,
                 modifier = Modifier
@@ -105,7 +119,7 @@ fun AdminDashboardScreen(
                     Icon(Icons.Filled.Security, contentDescription = null, tint = DarkGreen, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "নীতিমালা: অ্যাডমিন প্ল্যাটফর্ম যাচাই ও তদারকি করেন — কোনো কৃষকের পণ্যের দাম পরিবর্তন করতে পারেন না।",
+                        text = "নীতিমালা: অ্যাডমিন পেমেন্ট ও অ্যাকাউন্ট যাচাই করেন — কোনো কৃষকের পণ্যের দাম পরিবর্তন করতে পারেন না।",
                         style = MaterialTheme.typography.labelSmall,
                         color = DarkGreen
                     )
@@ -128,40 +142,63 @@ fun AdminDashboardScreen(
 
             when (selectedTab) {
                 0 -> AdminOverviewTab(stats = stats)
-                1 -> AdminVerificationTab(uiState = uiState, onVerifyUser = onVerifyUser)
-                2 -> AdminNotificationsTab(uiState = uiState, onSendNotification = onSendNotification)
-                3 -> AdminCategoriesTab(uiState = uiState, onAddCategory = onAddCategory)
-                4 -> AdminLocationsTab(uiState = uiState, onAddLocation = onAddLocation)
-                5 -> AdminOrdersComplaintsTab(uiState = uiState, onResolveComplaint = onResolveComplaint)
-                6 -> AdminAuditLogTab(uiState = uiState)
-                7 -> AdminAdMonetizationTab(adConfig = uiState.adConfig, onSaveAdConfig = onSaveAdConfig)
+                1 -> AdminActivationPaymentsTab(
+                    uiState = uiState,
+                    onApprove = onApproveActivationPayment,
+                    onReject = onRejectActivationPayment
+                )
+                2 -> AdminVerificationTab(
+                    uiState = uiState,
+                    onVerifyUser = onVerifyUser,
+                    onSetAccountStatus = onSetAccountStatus
+                )
+                3 -> AdminOrdersComplaintsTab(
+                    uiState = uiState,
+                    onVerifyOrderPayment = onVerifyOrderPayment,
+                    onResolveComplaint = onResolveComplaint
+                )
+                4 -> AdminPaymentSettingsTab(
+                    settings = uiState.paymentSettings,
+                    onSave = onSavePaymentSettings
+                )
+                5 -> AdminNotificationsTab(uiState = uiState, onSendNotification = onSendNotification)
+                6 -> AdminCategoriesTab(uiState = uiState, onAddCategory = onAddCategory)
+                7 -> AdminLocationsTab(uiState = uiState, onAddLocation = onAddLocation)
+                8 -> AdminAuditLogTab(uiState = uiState)
+                9 -> AdminAdMonetizationTab(adConfig = uiState.adConfig, onSaveAdConfig = onSaveAdConfig)
             }
         }
     }
 }
 
 @Composable
-private fun AdminOverviewTab(stats: com.example.data.model.AdminDashboardStats) {
+private fun AdminOverviewTab(stats: AdminDashboardStats) {
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AdminKpiCard("মোট কৃষক", "${stats.totalFarmers}", PrimaryGreen, Modifier.weight(1f))
-                AdminKpiCard("যাচাইকৃত কৃষক", "${stats.verifiedFarmers}", DarkGreen, Modifier.weight(1f))
+                AdminKpiCard("অপেক্ষমান অ্যাক্টিভেশন", "${stats.pendingActivationPayments}", Color(0xFFB45309), Modifier.weight(1f))
+                AdminKpiCard("অনুমোদিত পেমেন্ট", "${stats.approvedActivationPayments}", PrimaryGreen, Modifier.weight(1f))
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AdminKpiCard("সক্রিয় অ্যাকাউন্ট", "${stats.activeAccounts}", DarkGreen, Modifier.weight(1f))
+                AdminKpiCard("মেয়াদোত্তীর্ণ / স্থগিত", "${stats.expiredAccounts} / ${stats.suspendedAccounts}", AlertRed, Modifier.weight(1f))
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                AdminKpiCard("মোট কৃষক", "${stats.totalFarmers}", PrimaryGreen, Modifier.weight(1f))
                 AdminKpiCard("মোট ক্রেতা", "${stats.totalBuyers}", InfoBlue, Modifier.weight(1f))
-                AdminKpiCard("যাচাইকৃত ক্রেতা", "${stats.verifiedBuyers}", DarkGreen, Modifier.weight(1f))
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 AdminKpiCard("সক্রিয় ফসল", "${stats.activeProducts}", Color(0xFFB45309), Modifier.weight(1f))
-                AdminKpiCard("আজকের অর্ডার", "${stats.todaysOrders}", PrimaryGreen, Modifier.weight(1f))
+                AdminKpiCard("অর্ডার পেমেন্ট যাচাই বাকি", "${stats.pendingOrderPaymentVerifications}", InfoBlue, Modifier.weight(1f))
             }
         }
         item {
@@ -171,7 +208,6 @@ private fun AdminOverviewTab(stats: com.example.data.model.AdminDashboardStats) 
             }
         }
 
-        // Upazila-wise Sales Bar Chart using Compose Canvas
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -211,12 +247,12 @@ private fun AdminOverviewTab(stats: com.example.data.model.AdminDashboardStats) 
                             }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
-                        entries.forEach { (upazila, total) ->
+                        entries.forEach { (district, total) ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                Text(upazila, style = MaterialTheme.typography.bodySmall)
+                                Text(district, style = MaterialTheme.typography.bodySmall)
                                 Text(total.formatBdt(), style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
                             }
                         }
@@ -244,29 +280,37 @@ private fun AdminKpiCard(title: String, value: String, accent: Color, modifier: 
 }
 
 @Composable
-private fun AdminVerificationTab(
+private fun AdminActivationPaymentsTab(
     uiState: MarketplaceUiState,
-    onVerifyUser: (String, Boolean) -> Unit
+    onApprove: (paymentId: String, notes: String) -> Unit,
+    onReject: (paymentId: String, reason: String, requestResubmission: Boolean) -> Unit
 ) {
-    var roleFilter by remember { mutableStateOf("ALL") } // ALL, FARMER, BUYER
-    val pendingFarmers = uiState.farmers.count { it.verificationStatus == "PENDING" }
-    val pendingBuyers = uiState.buyers.count { it.verificationStatus == "PENDING" }
+    var statusFilter by remember { mutableStateOf("PENDING") }
+    var search by remember { mutableStateOf("") }
+    var receiptPreviewUri by remember { mutableStateOf<String?>(null) }
+    var actionTarget by remember { mutableStateOf<Pair<ActivationPaymentEntity, String>?>(null) } // entity + "REJECT"/"RESUBMIT"/"APPROVE"
 
-    val visibleUsers = remember(uiState.farmers, uiState.buyers, roleFilter) {
-        val pool = when (roleFilter) {
-            "FARMER" -> uiState.farmers
-            "BUYER" -> uiState.buyers
-            else -> uiState.farmers + uiState.buyers
-        }
-        pool.sortedWith(
-            compareBy<com.example.data.local.UserEntity> {
-                when (it.verificationStatus) {
-                    "PENDING" -> 0
-                    "REJECTED" -> 1
-                    else -> 2
-                }
-            }.thenByDescending { it.createdAt }
-        )
+    val txCounts = remember(uiState.activationPayments) {
+        uiState.activationPayments
+            .groupBy { it.transactionId.trim().uppercase() }
+            .mapValues { it.value.size }
+    }
+
+    val filteredPayments = remember(uiState.activationPayments, statusFilter, search) {
+        uiState.activationPayments.filter { p ->
+            val matchesStatus = when (statusFilter) {
+                "PENDING" -> p.status == ActivationPaymentStatus.PENDING.name
+                "APPROVED" -> p.status == ActivationPaymentStatus.APPROVED.name
+                "REJECTED" -> p.status == ActivationPaymentStatus.REJECTED.name || p.status == ActivationPaymentStatus.RESUBMISSION_REQUESTED.name
+                else -> true
+            }
+            val matchesSearch = search.isBlank() ||
+                p.userName.contains(search, ignoreCase = true) ||
+                p.userPhone.contains(search, ignoreCase = true) ||
+                p.transactionId.contains(search, ignoreCase = true) ||
+                p.senderMobile.contains(search, ignoreCase = true)
+            matchesStatus && matchesSearch
+        }.sortedByDescending { it.createdAt }
     }
 
     LazyColumn(
@@ -276,7 +320,260 @@ private fun AdminVerificationTab(
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "কৃষক ও ক্রেতা যাচাইকরণ এবং তালিকা",
+                    text = "অ্যাকাউন্ট অ্যাক্টিভেশন ও রিনিউ পেমেন্ট যাচাই",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = DarkGreen
+                )
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    label = { Text("নাম, মোবাইল বা TxID দিয়ে খুঁজুন") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("admin_payments_search")
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item {
+                        FilterChip(
+                            selected = statusFilter == "PENDING",
+                            onClick = { statusFilter = "PENDING" },
+                            label = { Text("অপেক্ষমান (${uiState.activationPayments.count { it.status == "PENDING" }})") },
+                            modifier = Modifier.testTag("admin_pay_filter_pending")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = statusFilter == "APPROVED",
+                            onClick = { statusFilter = "APPROVED" },
+                            label = { Text("অনুমোদিত (${uiState.activationPayments.count { it.status == "APPROVED" }})") },
+                            modifier = Modifier.testTag("admin_pay_filter_approved")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = statusFilter == "REJECTED",
+                            onClick = { statusFilter = "REJECTED" },
+                            label = { Text("প্রত্যাখ্যাত") },
+                            modifier = Modifier.testTag("admin_pay_filter_rejected")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = statusFilter == "ALL",
+                            onClick = { statusFilter = "ALL" },
+                            label = { Text("সব (${uiState.activationPayments.size})") },
+                            modifier = Modifier.testTag("admin_pay_filter_all")
+                        )
+                    }
+                }
+            }
+        }
+
+        if (filteredPayments.isEmpty()) {
+            item {
+                Card(shape = RoundedCornerShape(16.dp)) {
+                    Text(
+                        text = "এই তালিকায় কোনো অ্যাক্টিভেশন পেমেন্ট পাওয়া যায়নি।",
+                        modifier = Modifier.padding(18.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+
+        items(filteredPayments, key = { it.id }) { pay ->
+            val duplicateCount = txCounts[pay.transactionId.trim().uppercase()] ?: 1
+            val payStatus = ActivationPaymentStatus.fromName(pay.status)
+            val (bg, fg) = when (payStatus) {
+                ActivationPaymentStatus.APPROVED -> LightGreen to DarkGreen
+                ActivationPaymentStatus.REJECTED, ActivationPaymentStatus.RESUBMISSION_REQUESTED -> AlertRedLight to AlertRed
+                ActivationPaymentStatus.PENDING -> HarvestGoldLight to Color(0xFF92400E)
+            }
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.testTag("admin_activation_card_${pay.id}")
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${pay.userName} (${if (pay.accountRole == "FARMER") "কৃষক" else "ক্রেতা"})",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text("${pay.userPhone} • ${pay.paymentType}", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Surface(color = bg, shape = RoundedCornerShape(8.dp)) {
+                            Text(
+                                text = payStatus.display(uiState.language),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = fg,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    if (duplicateCount > 1) {
+                        Surface(color = AlertRedLight, shape = RoundedCornerShape(6.dp)) {
+                            Text(
+                                text = "⚠ সতর্কতা: ডুপ্লিকেট TxID পাওয়া গেছে (${pay.transactionId})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AlertRed,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "${pay.paymentMethod} -> ${pay.receiverNumber} (${pay.receiverAccountType}) • ${pay.amount.formatBdt()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = PrimaryGreen
+                    )
+                    Text("প্রেরক: ${pay.senderMobile} • TxID: ${pay.transactionId}", style = MaterialTheme.typography.bodySmall)
+                    Text("তারিখ: ${formatDateBn(pay.createdAt)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                    if (pay.receiptUri.isNotBlank()) {
+                        OutlinedButton(onClick = { receiptPreviewUri = pay.receiptUri }) {
+                            Icon(Icons.Filled.Image, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("পেমেন্ট রসিদ দেখুন")
+                        }
+                    }
+
+                    if (pay.adminNotes.isNotBlank()) {
+                        Text("মন্তব্য: ${pay.adminNotes}", style = MaterialTheme.typography.labelSmall, color = fg)
+                    }
+
+                    if (pay.status == ActivationPaymentStatus.PENDING.name) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { actionTarget = pay to "APPROVE" },
+                                modifier = Modifier.weight(1f).testTag("admin_approve_pay_${pay.id}")
+                            ) { Text("✓ অনুমোদন (২ বছর)") }
+                            OutlinedButton(
+                                onClick = { actionTarget = pay to "RESUBMIT" },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("পুনরায় জমা") }
+                            OutlinedButton(
+                                onClick = { actionTarget = pay to "REJECT" },
+                                modifier = Modifier.weight(0.9f).testTag("admin_reject_pay_${pay.id}")
+                            ) { Text("প্রত্যাখ্যান") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    receiptPreviewUri?.let { uri ->
+        val model = MediaCaptureHelper.imageModelFromUri(uri)
+        AlertDialog(
+            onDismissRequest = { receiptPreviewUri = null },
+            title = { Text("পেমেন্ট রসিদ") },
+            text = {
+                if (model != null) {
+                    AsyncImage(
+                        model = model,
+                        contentDescription = "রসিদ",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().height(260.dp).clip(RoundedCornerShape(12.dp))
+                    )
+                } else {
+                    Text("রসিদের ছবি পাওয়া যায়নি")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { receiptPreviewUri = null }) { Text("বন্ধ করুন") }
+            }
+        )
+    }
+
+    actionTarget?.let { (pay, action) ->
+        var notes by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { actionTarget = null },
+            title = {
+                Text(
+                    when (action) {
+                        "APPROVE" -> "পেমেন্ট অনুমোদন ও ২ বছর সক্রিয় (${pay.userName})"
+                        "RESUBMIT" -> "পুনরায় পেমেন্ট জমার অনুরোধ"
+                        else -> "পেমেন্ট প্রত্যাখ্যান"
+                    }
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("TxID: ${pay.transactionId} • পরিমাণ: ${pay.amount.formatBdt()}", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = notes,
+                        onValueChange = { notes = it },
+                        label = { Text(if (action == "APPROVE") "অ্যাডমিন নোট (ঐচ্ছিক)" else "কারণ লিখুন *") },
+                        modifier = Modifier.fillMaxWidth().testTag("admin_pay_notes_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        when (action) {
+                            "APPROVE" -> onApprove(pay.id, notes)
+                            "RESUBMIT" -> onReject(pay.id, notes, true)
+                            else -> onReject(pay.id, notes, false)
+                        }
+                        actionTarget = null
+                    },
+                    modifier = Modifier.testTag("admin_pay_confirm_action")
+                ) {
+                    Text("নিশ্চিত করুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { actionTarget = null }) { Text("বাতিল") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun AdminVerificationTab(
+    uiState: MarketplaceUiState,
+    onVerifyUser: (String, Boolean) -> Unit,
+    onSetAccountStatus: (String, AccountStatus, String) -> Unit
+) {
+    var filterMode by remember { mutableStateOf("ALL") } // ALL, FARMER, BUYER, ACTIVE, EXPIRED, SUSPENDED
+    val pendingFarmers = uiState.farmers.count { it.verificationStatus == "PENDING" }
+    val pendingBuyers = uiState.buyers.count { it.verificationStatus == "PENDING" }
+
+    val allNonAdmins = remember(uiState.farmers, uiState.buyers) { uiState.farmers + uiState.buyers }
+    val visibleUsers = remember(allNonAdmins, filterMode) {
+        val pool = when (filterMode) {
+            "FARMER" -> allNonAdmins.filter { it.role == "FARMER" }
+            "BUYER" -> allNonAdmins.filter { it.role == "BUYER" }
+            "ACTIVE" -> allNonAdmins.filter { it.isMarketplaceActive() }
+            "EXPIRED" -> allNonAdmins.filter { it.accountStatus == AccountStatus.EXPIRED.name }
+            "SUSPENDED" -> allNonAdmins.filter { it.accountStatus == AccountStatus.SUSPENDED.name }
+            else -> allNonAdmins
+        }
+        pool.sortedByDescending { it.createdAt }
+    }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "কৃষক ও ক্রেতা অ্যাকাউন্ট লাইফসাইকেল",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = DarkGreen
@@ -289,26 +586,47 @@ private fun AdminVerificationTab(
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item {
                         FilterChip(
-                            selected = roleFilter == "ALL",
-                            onClick = { roleFilter = "ALL" },
-                            label = { Text("সবাই (${uiState.farmers.size + uiState.buyers.size})") },
+                            selected = filterMode == "ALL",
+                            onClick = { filterMode = "ALL" },
+                            label = { Text("সবাই (${allNonAdmins.size})") },
                             modifier = Modifier.testTag("admin_users_filter_all")
                         )
                     }
                     item {
                         FilterChip(
-                            selected = roleFilter == "FARMER",
-                            onClick = { roleFilter = "FARMER" },
+                            selected = filterMode == "FARMER",
+                            onClick = { filterMode = "FARMER" },
                             label = { Text("কৃষক (${uiState.farmers.size})") },
                             modifier = Modifier.testTag("admin_users_filter_farmers")
                         )
                     }
                     item {
                         FilterChip(
-                            selected = roleFilter == "BUYER",
-                            onClick = { roleFilter = "BUYER" },
+                            selected = filterMode == "BUYER",
+                            onClick = { filterMode = "BUYER" },
                             label = { Text("ক্রেতা (${uiState.buyers.size})") },
                             modifier = Modifier.testTag("admin_users_filter_buyers")
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = filterMode == "ACTIVE",
+                            onClick = { filterMode = "ACTIVE" },
+                            label = { Text("সক্রিয়") }
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = filterMode == "EXPIRED",
+                            onClick = { filterMode = "EXPIRED" },
+                            label = { Text("মেয়াদোত্তীর্ণ") }
+                        )
+                    }
+                    item {
+                        FilterChip(
+                            selected = filterMode == "SUSPENDED",
+                            onClick = { filterMode = "SUSPENDED" },
+                            label = { Text("স্থগিত") }
                         )
                     }
                 }
@@ -322,7 +640,7 @@ private fun AdminVerificationTab(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                 ) {
                     Text(
-                        text = "এখনো এই তালিকায় কোনো নিবন্ধিত কৃষক বা ক্রেতা নেই।",
+                        text = "এই তালিকায় কোনো ব্যবহারকারী নেই।",
                         modifier = Modifier.padding(18.dp),
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -332,16 +650,6 @@ private fun AdminVerificationTab(
 
         items(visibleUsers, key = { it.id }) { person ->
             val isFarmer = person.role == "FARMER"
-            val statusColor = when (person.verificationStatus) {
-                "VERIFIED" -> LightGreen
-                "REJECTED" -> Color(0xFFFEE2E2)
-                else -> HarvestGoldLight
-            }
-            val statusTextColor = when (person.verificationStatus) {
-                "VERIFIED" -> DarkGreen
-                "REJECTED" -> AlertRed
-                else -> Color(0xFF92400E)
-            }
             Card(
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -354,49 +662,362 @@ private fun AdminVerificationTab(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "${if (isFarmer) "🧑‍🌾" else "🛍️"} ${person.fullName}",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = if (isFarmer) "ভূমিকা: কৃষক (Farmer)" else "ভূমিকা: ক্রেতা (Buyer)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (isFarmer) PrimaryGreen else InfoBlue,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            UserAvatar(imageUri = person.profileImageUri, role = person.role, size = 42.dp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = person.fullName,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (isFarmer) "কৃষক (Farmer)" else "ক্রেতা (Buyer)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isFarmer) PrimaryGreen else InfoBlue,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
-                        Surface(color = statusColor, shape = RoundedCornerShape(6.dp)) {
-                            Text(
-                                text = person.verificationStatus,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = statusTextColor,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                            )
-                        }
+                        AccountStatusBadge(person.accountStatus, person.expiryDate, uiState.language)
                     }
-                    Text("${person.upazila}, ${person.district}, ${person.division} • ${person.phone}", style = MaterialTheme.typography.bodySmall)
+                    val locLine = listOf(person.unionName, person.upazila, person.district, person.division)
+                        .filter { it.isNotBlank() }
+                        .joinToString(", ")
+                    Text("$locLine • ${person.phone}", style = MaterialTheme.typography.bodySmall)
+                    if (person.activationDate > 0L) {
+                        Text(
+                            text = "সক্রিয়: ${formatDateBn(person.activationDate)} • মেয়াদ শেষ: ${formatDateBn(person.expiryDate)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = PrimaryGreen
+                        )
+                    }
                     if (person.nidMasked.isNotBlank()) {
                         Text("মাস্কড এনআইডি: ${person.nidMasked}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (isFarmer && person.farmBio.isNotBlank()) {
-                        Text("খামার পরিচিতি: ${person.farmBio}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (person.verificationStatus != "VERIFIED") {
                             Button(
                                 onClick = { onVerifyUser(person.id, true) },
                                 modifier = Modifier.weight(1f).testTag("verify_approve_${person.id}")
-                            ) { Text("✓ অনুমোদন দিন") }
+                            ) { Text("✓ পরিচয় যাচাই") }
                         }
-                        if (person.verificationStatus != "REJECTED") {
+                        if (person.accountStatus != AccountStatus.SUSPENDED.name) {
                             OutlinedButton(
-                                onClick = { onVerifyUser(person.id, false) },
-                                modifier = Modifier.weight(1f).testTag("verify_reject_${person.id}")
-                            ) { Text("প্রত্যাখ্যান") }
+                                onClick = { onSetAccountStatus(person.id, AccountStatus.SUSPENDED, "অ্যাডমিন কর্তৃক স্থগিত") },
+                                modifier = Modifier.weight(1f).testTag("suspend_user_${person.id}")
+                            ) { Text("স্থগিত করুন") }
+                        } else {
+                            Button(
+                                onClick = { onSetAccountStatus(person.id, AccountStatus.ACTIVE, "অ্যাডমিন কর্তৃক পুনঃসক্রিয়") },
+                                modifier = Modifier.weight(1f).testTag("reactivate_user_${person.id}")
+                            ) { Text("পুনঃসক্রিয় করুন") }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdminOrdersComplaintsTab(
+    uiState: MarketplaceUiState,
+    onVerifyOrderPayment: (orderId: String, approved: Boolean, notes: String) -> Unit,
+    onResolveComplaint: (String) -> Unit
+) {
+    var receiptUriPreview by remember { mutableStateOf<String?>(null) }
+    val pendingOrderPayments = remember(uiState.orders) {
+        uiState.orders.filter {
+            it.status !in setOf(OrderStatus.CANCELLED.name, OrderStatus.REJECTED.name) &&
+                !it.adminPaymentVerified &&
+                (it.paymentStatus == "SUBMITTED" || it.paymentStatus == "AWAITING_GATEWAY" ||
+                    it.transactionReference.isNotBlank() || it.paymentReceiptUri.isNotBlank() || it.farmerPaymentConfirmed)
+        }
+    }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            Text(
+                text = "অর্ডার পেমেন্ট যাচাই তালিকা (${pendingOrderPayments.size})",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = DarkGreen
+            )
+        }
+
+        if (pendingOrderPayments.isEmpty()) {
+            item {
+                Card(shape = RoundedCornerShape(14.dp)) {
+                    Text(
+                        text = "যাচাইয়ের জন্য কোনো অপেক্ষমান অর্ডার পেমেন্ট নেই।",
+                        modifier = Modifier.padding(14.dp),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+
+        items(pendingOrderPayments, key = { "opay_${it.id}" }) { ord ->
+            Card(
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, InfoBlue.copy(alpha = 0.45f)),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("${ord.orderCode} • ${ord.grandTotal.formatBdt()}", fontWeight = FontWeight.Bold)
+                        OrderStatusChip(ord.status, uiState.language)
+                    }
+                    Text("ক্রেতা: ${ord.buyerName} -> কৃষক: ${ord.farmerName}", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        text = "পদ্ধতি: ${ord.paymentMethod} • TxID: ${ord.transactionReference.ifBlank { "—" }} • প্রেরক: ${ord.paymentSenderNumber.ifBlank { "—" }}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = if (ord.farmerPaymentConfirmed) "✓ কৃষক টাকা বুঝে পাওয়া নিশ্চিত করেছেন" else "⏳ কৃষকের টাকা পাওয়ার নিশ্চিতকরণ এখনো বাকি",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (ord.farmerPaymentConfirmed) PrimaryGreen else Color(0xFFB45309),
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (ord.paymentReceiptUri.isNotBlank()) {
+                        OutlinedButton(onClick = { receiptUriPreview = ord.paymentReceiptUri }) {
+                            Text("রসিদ দেখুন")
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { onVerifyOrderPayment(ord.id, true, "অ্যাডমিন পেমেন্ট যাচাই সম্পন্ন") },
+                            modifier = Modifier.weight(1f).testTag("admin_verify_order_pay_${ord.id}")
+                        ) { Text("✓ পেমেন্ট যাচাই করুন") }
+                        OutlinedButton(
+                            onClick = { onVerifyOrderPayment(ord.id, false, "পেমেন্ট তথ্য সঠিক নয়") },
+                            modifier = Modifier.weight(1f).testTag("admin_reject_order_pay_${ord.id}")
+                        ) { Text("প্রত্যাখ্যান") }
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text("অভিযোগসমূহ (${uiState.complaints.size})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+        items(uiState.complaints, key = { it.id }) { cmp ->
+            Card(shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(cmp.subjectBn, fontWeight = FontWeight.Bold)
+                        Text(cmp.status, color = if (cmp.status == "RESOLVED") PrimaryGreen else AlertRed, fontWeight = FontWeight.Bold)
+                    }
+                    Text("${cmp.reporterName}: ${cmp.descriptionBn}", style = MaterialTheme.typography.bodySmall)
+                    if (cmp.status != "RESOLVED") {
+                        OutlinedButton(onClick = { onResolveComplaint(cmp.id) }) {
+                            Text("সমাধান হিসেবে চিহ্নিত করুন")
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text("সকল অর্ডারসমূহ (${uiState.orders.size})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        }
+        items(uiState.orders, key = { it.id }) { ord ->
+            Card(shape = RoundedCornerShape(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("${ord.orderCode} • ${ord.farmerName}", fontWeight = FontWeight.Bold)
+                        Text("${ord.buyerName} • ${ord.grandTotal.formatBdt()}", style = MaterialTheme.typography.bodySmall)
+                    }
+                    OrderStatusChip(ord.status, uiState.language)
+                }
+            }
+        }
+    }
+
+    receiptUriPreview?.let { uri ->
+        val model = MediaCaptureHelper.imageModelFromUri(uri)
+        AlertDialog(
+            onDismissRequest = { receiptUriPreview = null },
+            title = { Text("অর্ডার পেমেন্ট রসিদ") },
+            text = {
+                if (model != null) {
+                    AsyncImage(
+                        model = model,
+                        contentDescription = "রসিদ",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().height(240.dp).clip(RoundedCornerShape(12.dp))
+                    )
+                } else {
+                    Text("রসিদ পাওয়া যায়নি")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { receiptUriPreview = null }) { Text("বন্ধ করুন") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun AdminPaymentSettingsTab(
+    settings: PaymentSettingsEntity,
+    onSave: (PaymentSettingsEntity) -> Unit
+) {
+    var bKashNumber by remember(settings) { mutableStateOf(settings.bKashNumber) }
+    var bKashType by remember(settings) { mutableStateOf(settings.bKashAccountType) }
+    var nagadNumber by remember(settings) { mutableStateOf(settings.nagadNumber) }
+    var nagadType by remember(settings) { mutableStateOf(settings.nagadAccountType) }
+    var farmerFee by remember(settings) { mutableStateOf(settings.farmerFee.toInt().toString()) }
+    var buyerFee by remember(settings) { mutableStateOf(settings.buyerFee.toInt().toString()) }
+    var renewalFee by remember(settings) { mutableStateOf(settings.renewalFee.toInt().toString()) }
+    var validityYears by remember(settings) { mutableStateOf(settings.validityYears.toString()) }
+    var instructions by remember(settings) { mutableStateOf(settings.paymentInstructions) }
+    var notify30Days by remember(settings) { mutableStateOf(settings.notify30Days) }
+    var notify7Days by remember(settings) { mutableStateOf(settings.notify7Days) }
+    var notifyOnExpiry by remember(settings) { mutableStateOf(settings.notifyOnExpiry) }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট গেটওয়ে ও নম্বর", fontWeight = FontWeight.Bold, color = DarkGreen)
+
+                    OutlinedTextField(
+                        value = bKashNumber,
+                        onValueChange = { bKashNumber = it },
+                        label = { Text("বিকাশ (bKash) নম্বর *") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_bkash_number_input")
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PaymentAccountType.entries.forEach { t ->
+                            FilterChip(
+                                selected = bKashType.equals(t.name, ignoreCase = true),
+                                onClick = { bKashType = t.name },
+                                label = { Text("bKash ${t.labelEn}") }
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = nagadNumber,
+                        onValueChange = { nagadNumber = it },
+                        label = { Text("নগদ (Nagad) নম্বর *") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_nagad_number_input")
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PaymentAccountType.entries.forEach { t ->
+                            FilterChip(
+                                selected = nagadType.equals(t.name, ignoreCase = true),
+                                onClick = { nagadType = t.name },
+                                label = { Text("Nagad ${t.labelEn}") }
+                            )
+                        }
+                    }
+
+                    HorizontalDivider()
+                    Text("ফি ও ২ বছরের মেয়াদ নীতি", fontWeight = FontWeight.Bold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = farmerFee,
+                            onValueChange = { farmerFee = it },
+                            label = { Text("কৃষক ফি (৳)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = buyerFee,
+                            onValueChange = { buyerFee = it },
+                            label = { Text("ক্রেতা ফি (৳)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = renewalFee,
+                            onValueChange = { renewalFee = it },
+                            label = { Text("রিনিউ ফি (৳)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = validityYears,
+                            onValueChange = { validityYears = it },
+                            label = { Text("মেয়াদ (বছর)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = instructions,
+                        onValueChange = { instructions = it },
+                        label = { Text("ব্যবহারকারীদের জন্য পেমেন্ট নির্দেশনা") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    HorizontalDivider()
+                    Text("মেয়াদ শেষের রিমাইন্ডার নোটিফিকেশন", fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("৩০ দিন আগে রিমাইন্ডার", modifier = Modifier.weight(1f))
+                        Switch(checked = notify30Days, onCheckedChange = { notify30Days = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("৭ দিন আগে রিমাইন্ডার", modifier = Modifier.weight(1f))
+                        Switch(checked = notify7Days, onCheckedChange = { notify7Days = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("মেয়াদ শেষ হওয়ার দিনে নোটিফিকেশন", modifier = Modifier.weight(1f))
+                        Switch(checked = notifyOnExpiry, onCheckedChange = { notifyOnExpiry = it })
+                    }
+
+                    Button(
+                        onClick = {
+                            onSave(
+                                settings.copy(
+                                    bKashNumber = bKashNumber.trim(),
+                                    bKashAccountType = bKashType,
+                                    nagadNumber = nagadNumber.trim(),
+                                    nagadAccountType = nagadType,
+                                    farmerFee = farmerFee.toDoubleOrNull() ?: 300.0,
+                                    buyerFee = buyerFee.toDoubleOrNull() ?: 300.0,
+                                    renewalFee = renewalFee.toDoubleOrNull() ?: 300.0,
+                                    validityYears = validityYears.toIntOrNull() ?: 2,
+                                    paymentInstructions = instructions.trim(),
+                                    notify30Days = notify30Days,
+                                    notify7Days = notify7Days,
+                                    notifyOnExpiry = notifyOnExpiry
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().height(50.dp).testTag("admin_save_payment_settings_button")
+                    ) {
+                        Text("পেমেন্ট সেটিংস সংরক্ষণ করুন", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -409,7 +1030,7 @@ private fun AdminNotificationsTab(
     uiState: MarketplaceUiState,
     onSendNotification: (targetUserId: String, targetRole: String, titleBn: String, messageBn: String) -> Unit
 ) {
-    var targetMode by remember { mutableStateOf("ALL") } // ALL, FARMER, BUYER, SPECIFIC
+    var targetMode by remember { mutableStateOf("ALL") }
     val allTargets = remember(uiState.farmers, uiState.buyers) { uiState.farmers + uiState.buyers }
     var selectedUserId by remember(allTargets) { mutableStateOf(allTargets.firstOrNull()?.id ?: "") }
     var titleBn by remember { mutableStateOf("") }
@@ -431,41 +1052,19 @@ private fun AdminNotificationsTab(
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
-                    Text(
-                        text = "অ্যাডমিনের পাঠানো বার্তা তাৎক্ষণিকভাবে Firebase Realtime Database-এর মাধ্যমে মোবাইল অ্যাপ ও ওয়েবসাইটে পৌঁছে যাবে।",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         item {
-                            FilterChip(
-                                selected = targetMode == "ALL",
-                                onClick = { targetMode = "ALL" },
-                                label = { Text("সবাই (All)") }
-                            )
+                            FilterChip(selected = targetMode == "ALL", onClick = { targetMode = "ALL" }, label = { Text("সবাই (All)") })
                         }
                         item {
-                            FilterChip(
-                                selected = targetMode == "FARMER",
-                                onClick = { targetMode = "FARMER" },
-                                label = { Text("সকল কৃষক") }
-                            )
+                            FilterChip(selected = targetMode == "FARMER", onClick = { targetMode = "FARMER" }, label = { Text("সকল কৃষক") })
                         }
                         item {
-                            FilterChip(
-                                selected = targetMode == "BUYER",
-                                onClick = { targetMode = "BUYER" },
-                                label = { Text("সকল ক্রেতা") }
-                            )
+                            FilterChip(selected = targetMode == "BUYER", onClick = { targetMode = "BUYER" }, label = { Text("সকল ক্রেতা") })
                         }
                         if (allTargets.isNotEmpty()) {
                             item {
-                                FilterChip(
-                                    selected = targetMode == "SPECIFIC",
-                                    onClick = { targetMode = "SPECIFIC" },
-                                    label = { Text("নির্দিষ্ট ব্যবহারকারী") }
-                                )
+                                FilterChip(selected = targetMode == "SPECIFIC", onClick = { targetMode = "SPECIFIC" }, label = { Text("নির্দিষ্ট ব্যবহারকারী") })
                             }
                         }
                     }
@@ -566,25 +1165,10 @@ private fun AdminCategoriesTab(
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("নতুন কৃষি ক্যাটাগরি যোগ করুন", fontWeight = FontWeight.Bold)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = emoji,
-                            onValueChange = { emoji = it },
-                            label = { Text("ইমোজি") },
-                            modifier = Modifier.width(80.dp)
-                        )
-                        OutlinedTextField(
-                            value = nameBn,
-                            onValueChange = { nameBn = it },
-                            label = { Text("বাংলা নাম *") },
-                            modifier = Modifier.weight(1f)
-                        )
+                        OutlinedTextField(value = emoji, onValueChange = { emoji = it }, label = { Text("ইমোজি") }, modifier = Modifier.width(80.dp))
+                        OutlinedTextField(value = nameBn, onValueChange = { nameBn = it }, label = { Text("বাংলা নাম *") }, modifier = Modifier.weight(1f))
                     }
-                    OutlinedTextField(
-                        value = nameEn,
-                        onValueChange = { nameEn = it },
-                        label = { Text("English Name") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    OutlinedTextField(value = nameEn, onValueChange = { nameEn = it }, label = { Text("English Name") }, modifier = Modifier.fillMaxWidth())
                     Button(
                         onClick = {
                             if (nameBn.isNotBlank()) {
@@ -605,10 +1189,7 @@ private fun AdminCategoriesTab(
         }
         items(uiState.categories, key = { it.id }) { cat ->
             Card(shape = RoundedCornerShape(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("${cat.emoji} ${cat.nameBn} (${cat.nameEn})", fontWeight = FontWeight.SemiBold)
                     Text(if (cat.isActive) "সক্রিয়" else "নিষ্ক্রিয়", color = PrimaryGreen)
                 }
@@ -622,8 +1203,8 @@ private fun AdminLocationsTab(
     uiState: MarketplaceUiState,
     onAddLocation: (String, String, String, String, String) -> Unit
 ) {
-    var division by remember { mutableStateOf("ঢাকা") }
-    var district by remember { mutableStateOf("ঢাকা") }
+    var division by remember { mutableStateOf("খুলনা") }
+    var district by remember { mutableStateOf("কুষ্টিয়া") }
     var upazila by remember { mutableStateOf("") }
     var union by remember { mutableStateOf("") }
     var village by remember { mutableStateOf("") }
@@ -635,7 +1216,7 @@ private fun AdminLocationsTab(
         item {
             Card(shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("নতুন জেলা/উপজেলা যুক্ত করুন (সারা বাংলাদেশ সম্প্রসারণ)", fontWeight = FontWeight.Bold)
+                    Text("নতুন জেলা/উপজেলা/ইউনিয়ন যুক্ত করুন", fontWeight = FontWeight.Bold)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(value = division, onValueChange = { division = it }, label = { Text("বিভাগ") }, modifier = Modifier.weight(1f))
                         OutlinedTextField(value = district, onValueChange = { district = it }, label = { Text("জেলা *") }, modifier = Modifier.weight(1f))
@@ -665,56 +1246,6 @@ private fun AdminLocationsTab(
                 Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
                     Text("${loc.divisionBn} > ${loc.districtBn} > ${loc.upazilaBn}", fontWeight = FontWeight.Bold)
                     Text("ইউনিয়ন: ${loc.unionBn} • গ্রাম: ${loc.villageBn}", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AdminOrdersComplaintsTab(
-    uiState: MarketplaceUiState,
-    onResolveComplaint: (String) -> Unit
-) {
-    LazyColumn(
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        item {
-            Text("অভিযোগসমূহ (${uiState.complaints.size})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        }
-        items(uiState.complaints, key = { it.id }) { cmp ->
-            Card(shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(cmp.subjectBn, fontWeight = FontWeight.Bold)
-                        Text(cmp.status, color = if (cmp.status == "RESOLVED") PrimaryGreen else AlertRed, fontWeight = FontWeight.Bold)
-                    }
-                    Text("${cmp.reporterName}: ${cmp.descriptionBn}", style = MaterialTheme.typography.bodySmall)
-                    if (cmp.status != "RESOLVED") {
-                        OutlinedButton(onClick = { onResolveComplaint(cmp.id) }) {
-                            Text("সমাধান হিসেবে চিহ্নিত করুন")
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            Spacer(modifier = Modifier.height(6.dp))
-            Text("সর্বশেষ অর্ডারসমূহ (${uiState.orders.size})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        }
-        items(uiState.orders, key = { it.id }) { ord ->
-            Card(shape = RoundedCornerShape(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("${ord.orderCode} • ${ord.farmerName}", fontWeight = FontWeight.Bold)
-                        Text("${ord.buyerName} • ${ord.grandTotal.formatBdt()}", style = MaterialTheme.typography.bodySmall)
-                    }
-                    OrderStatusChip(ord.status, uiState.language)
                 }
             }
         }
@@ -801,11 +1332,6 @@ private fun AdminAdMonetizationTab(
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("মোবাইল অ্যাপ — সব অ্যাড নেটওয়ার্ক মনিটাইজেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
-                    Text(
-                        "সাপোর্টেড নেটওয়ার্ক: Google AdMob (ও Mediation: Meta, Unity Ads, AppLovin, Start.io), Adsterra, Monetag / PropellerAds, Google AdSense, Custom HTML5 এবং ডাইরেক্ট স্পন্সর।",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text("সব বিজ্ঞাপন সক্রিয় রাখুন", modifier = Modifier.weight(1f))
                         Switch(checked = adsEnabled, onCheckedChange = { adsEnabled = it })
@@ -819,7 +1345,7 @@ private fun AdminAdMonetizationTab(
                         Switch(checked = androidAdsEnabled, onCheckedChange = { androidAdsEnabled = it })
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text("মোবাইলে Multi-Network Web Ads (Adsterra/Monetag/AdSense/Custom)", modifier = Modifier.weight(1f))
+                        Text("মোবাইলে Multi-Network Web Ads", modifier = Modifier.weight(1f))
                         Switch(checked = mobileWebAdsEnabled, onCheckedChange = { mobileWebAdsEnabled = it })
                     }
                     Text("মোবাইল অগ্রাধিকার নেটওয়ার্ক:", style = MaterialTheme.typography.labelLarge)
@@ -835,31 +1361,28 @@ private fun AdminAdMonetizationTab(
                     OutlinedTextField(
                         value = androidBannerId,
                         onValueChange = { androidBannerId = it },
-                        label = { Text("AdMob Banner / Mediation Unit ID (ফাঁকা রাখলে Google Test ID)") },
-                        placeholder = { Text("ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx") },
+                        label = { Text("AdMob Banner Unit ID") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("admin_admob_banner_input")
                     )
                     OutlinedTextField(
                         value = androidInterstitialId,
                         onValueChange = { androidInterstitialId = it },
-                        label = { Text("AdMob Interstitial Unit ID (ফাঁকা রাখলে Google Test ID)") },
-                        placeholder = { Text("ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx") },
+                        label = { Text("AdMob Interstitial Unit ID") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("admin_admob_interstitial_input")
                     )
                     OutlinedTextField(
                         value = mobileDirectLinkUrl,
                         onValueChange = { mobileDirectLinkUrl = it },
-                        label = { Text("মোবাইল Direct Link / SmartLink URL (Adsterra/Monetag)") },
-                        placeholder = { Text("https://...") },
+                        label = { Text("Mobile Direct Link / Smartlink URL") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
                         value = mobileCustomAdHtml,
                         onValueChange = { mobileCustomAdHtml = it },
-                        label = { Text("মোবাইল কাস্টম HTML5 / Unity / AppLovin / Start.io অ্যাড ট্যাগ") },
+                        label = { Text("Mobile Custom Ad HTML / JS Tag") },
                         minLines = 2,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -875,12 +1398,12 @@ private fun AdminAdMonetizationTab(
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("সরাসরি স্পন্সর ব্যানার (অ্যাপ + ওয়েবসাইট)", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text("ডাইরেক্ট স্পন্সর ব্যানার", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                         Switch(checked = sponsorEnabled, onCheckedChange = { sponsorEnabled = it })
                     }
                     OutlinedTextField(value = sponsorTitle, onValueChange = { sponsorTitle = it }, label = { Text("স্পন্সর শিরোনাম") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = sponsorSubtitle, onValueChange = { sponsorSubtitle = it }, label = { Text("বিবরণ") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = sponsorImageUrl, onValueChange = { sponsorImageUrl = it }, label = { Text("ব্যানার ছবির URL (ঐচ্ছিক)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = sponsorImageUrl, onValueChange = { sponsorImageUrl = it }, label = { Text("ব্যানার ছবির URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(value = sponsorTargetUrl, onValueChange = { sponsorTargetUrl = it }, label = { Text("লিঙ্ক URL") }, singleLine = true, modifier = Modifier.weight(1f))
                         OutlinedTextField(value = sponsorCtaText, onValueChange = { sponsorCtaText = it }, label = { Text("বাটন টেক্সট") }, singleLine = true, modifier = Modifier.weight(1f))
@@ -896,47 +1419,43 @@ private fun AdminAdMonetizationTab(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("ক্রস-প্ল্যাটফর্ম অ্যাড নেটওয়ার্কসমূহ (অ্যাপ + ওয়েবসাইট)", fontWeight = FontWeight.Bold, color = DarkGreen)
-
+                    Text("ক্রস-প্ল্যাটফর্ম অ্যাড নেটওয়ার্কসমূহ", fontWeight = FontWeight.Bold, color = DarkGreen)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Google AdSense চালু", modifier = Modifier.weight(1f))
                         Switch(checked = adsenseEnabled, onCheckedChange = { adsenseEnabled = it })
                     }
-                    OutlinedTextField(value = adsenseClient, onValueChange = { adsenseClient = it }, label = { Text("AdSense Publisher ID (ca-pub-...)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = adsenseClient, onValueChange = { adsenseClient = it }, label = { Text("AdSense Publisher ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(value = adsenseTopSlot, onValueChange = { adsenseTopSlot = it }, label = { Text("Top Slot ID") }, singleLine = true, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = adsenseFeedSlot, onValueChange = { adsenseFeedSlot = it }, label = { Text("Feed Slot ID") }, singleLine = true, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = adsenseFooterSlot, onValueChange = { adsenseFooterSlot = it }, label = { Text("Footer Slot ID") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = adsenseTopSlot, onValueChange = { adsenseTopSlot = it }, label = { Text("Top Slot") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = adsenseFeedSlot, onValueChange = { adsenseFeedSlot = it }, label = { Text("Feed Slot") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = adsenseFooterSlot, onValueChange = { adsenseFooterSlot = it }, label = { Text("Footer Slot") }, singleLine = true, modifier = Modifier.weight(1f))
                     }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    HorizontalDivider()
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Adsterra Ad Network চালু", modifier = Modifier.weight(1f))
+                        Text("Adsterra চালু", modifier = Modifier.weight(1f))
                         Switch(checked = adsterraEnabled, onCheckedChange = { adsterraEnabled = it })
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(value = adsterraBannerKey, onValueChange = { adsterraBannerKey = it }, label = { Text("Adsterra Banner Key") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = adsterraBannerKey, onValueChange = { adsterraBannerKey = it }, label = { Text("Banner Key") }, singleLine = true, modifier = Modifier.weight(1f))
                         OutlinedTextField(value = adsterraScriptUrl, onValueChange = { adsterraScriptUrl = it }, label = { Text("invoke.js URL") }, singleLine = true, modifier = Modifier.weight(1f))
                     }
-                    OutlinedTextField(value = adsterraSocialBarUrl, onValueChange = { adsterraSocialBarUrl = it }, label = { Text("Adsterra Social Bar / Pop Script URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    OutlinedTextField(value = adsterraSocialBarUrl, onValueChange = { adsterraSocialBarUrl = it }, label = { Text("Social Bar URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    HorizontalDivider()
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Monetag / PropellerAds চালু", modifier = Modifier.weight(1f))
+                        Text("Monetag চালু", modifier = Modifier.weight(1f))
                         Switch(checked = monetagEnabled, onCheckedChange = { monetagEnabled = it })
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(value = monetagZoneId, onValueChange = { monetagZoneId = it }, label = { Text("Monetag Zone ID") }, singleLine = true, modifier = Modifier.weight(1f))
-                        OutlinedTextField(value = monetagScriptUrl, onValueChange = { monetagScriptUrl = it }, label = { Text("Monetag Script URL") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = monetagZoneId, onValueChange = { monetagZoneId = it }, label = { Text("Zone ID") }, singleLine = true, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = monetagScriptUrl, onValueChange = { monetagScriptUrl = it }, label = { Text("Script URL") }, singleLine = true, modifier = Modifier.weight(1f))
                     }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                    HorizontalDivider()
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Ezoic / Media.net / Custom HTML বিজ্ঞাপন", modifier = Modifier.weight(1f))
+                        Text("Custom HTML বিজ্ঞাপন", modifier = Modifier.weight(1f))
                         Switch(checked = customAdEnabled, onCheckedChange = { customAdEnabled = it })
                     }
-                    OutlinedTextField(value = customAdName, onValueChange = { customAdName = it }, label = { Text("কাস্টম নেটওয়ার্ক নাম") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = customTopHtml, onValueChange = { customTopHtml = it }, label = { Text("Custom Top Banner HTML / Tag") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = customAdName, onValueChange = { customAdName = it }, label = { Text("নেটওয়ার্ক নাম") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = customTopHtml, onValueChange = { customTopHtml = it }, label = { Text("Custom HTML / Tag") }, minLines = 2, modifier = Modifier.fillMaxWidth())
                 }
             }
         }

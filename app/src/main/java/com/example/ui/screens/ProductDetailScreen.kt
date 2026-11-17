@@ -38,7 +38,9 @@ fun ProductDetailScreen(
     onBack: () -> Unit,
     onFarmerClick: (String) -> Unit,
     onAddToCart: (Double) -> Unit,
-    onGoToCart: () -> Unit
+    onGoToCart: () -> Unit,
+    onOpenActivation: () -> Unit = {},
+    onRequireActiveAccount: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lang = uiState.language
@@ -46,6 +48,8 @@ fun ProductDetailScreen(
     val farmer = uiState.users.firstOrNull { it.id == product?.farmerId }
     val category = uiState.categories.firstOrNull { it.id == product?.categoryId }
     val reviews = uiState.reviews.filter { it.productId == productId || it.farmerId == product?.farmerId }
+    val activeUser = uiState.activeUser
+    val isUserInactive = activeUser != null && !activeUser.isMarketplaceActive()
 
     var qty by remember(productId, product?.availableQuantity) {
         val avail = product?.availableQuantity ?: 1.0
@@ -139,7 +143,7 @@ fun ProductDetailScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "/ ${product.unit}",
+                            text = "/ মণ (১ মণ = ${com.example.data.model.ProductUnit.MON_TO_KG} কেজি)",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(bottom = 4.dp)
@@ -152,7 +156,7 @@ fun ProductDetailScreen(
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Text(
-                            text = "০% দালাল কমিশন — এই দাম সরাসরি কৃষক নিজেই নির্ধারণ করেছেন।",
+                            text = "০% দালাল কমিশন — এই দাম সরাসরি কৃষক নিজেই নির্ধারণ করেছেন। (বাংলাদেশ মানদণ্ড: ১ মণ = ৪০ কেজি)",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF78350F),
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
@@ -175,10 +179,18 @@ fun ProductDetailScreen(
                             modifier = Modifier.padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            DetailRow("মজুত পরিমাণ", "${product.availableQuantity.formatQty()} ${product.unit}")
+                            DetailRow(
+                                "মজুত পরিমাণ",
+                                "${product.availableQuantity.formatQty()} মণ (~${(product.availableQuantity * com.example.data.model.ProductUnit.MON_TO_KG).formatQty()} কেজি)"
+                            )
                             DetailRow("সংগ্রহের তারিখ", product.harvestDate)
                             DetailRow("প্রাপ্যতার তারিখ", product.availabilityDate)
-                            DetailRow("এলাকা", "${product.village}, ${product.unionName}, ${product.upazila}, ${product.district}")
+                            DetailRow(
+                                "এলাকা",
+                                listOf(product.village, product.unionName, product.upazila, product.district)
+                                    .filter { it.isNotBlank() }
+                                    .joinToString(", ")
+                            )
                             DetailRow("পিকআপ ঠিকানা", product.pickupAddress)
                             DetailRow(
                                 "ডেলিভারি সুবিধা",
@@ -192,7 +204,7 @@ fun ProductDetailScreen(
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
-                    // Farmer card with direct call/SMS
+                    // Farmer card with direct call/SMS gated on active status
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -229,12 +241,17 @@ fun ProductDetailScreen(
                             )
                             if (farmer != null) {
                                 Spacer(modifier = Modifier.height(10.dp))
+                                val callerActive = activeUser?.isMarketplaceActive() == true
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     OutlinedButton(
                                         onClick = {
-                                            runCatching {
-                                                val intent = Intent(Intent.ACTION_DIAL, "tel:${farmer.phone}".toUri())
-                                                context.startActivity(intent)
+                                            if (!callerActive) {
+                                                onRequireActiveAccount()
+                                            } else {
+                                                runCatching {
+                                                    val intent = Intent(Intent.ACTION_DIAL, "tel:${farmer.phone}".toUri())
+                                                    context.startActivity(intent)
+                                                }
                                             }
                                         },
                                         modifier = Modifier.weight(1f)
@@ -245,9 +262,13 @@ fun ProductDetailScreen(
                                     }
                                     OutlinedButton(
                                         onClick = {
-                                            runCatching {
-                                                val intent = Intent(Intent.ACTION_SENDTO, "smsto:${farmer.phone}".toUri())
-                                                context.startActivity(intent)
+                                            if (!callerActive) {
+                                                onRequireActiveAccount()
+                                            } else {
+                                                runCatching {
+                                                    val intent = Intent(Intent.ACTION_SENDTO, "smsto:${farmer.phone}".toUri())
+                                                    context.startActivity(intent)
+                                                }
                                             }
                                         },
                                         modifier = Modifier.weight(1f)
@@ -292,8 +313,27 @@ fun ProductDetailScreen(
                                 modifier = Modifier.padding(14.dp)
                             )
                         }
+                    } else if (isUserInactive) {
+                        Card(
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = HarvestGoldLight),
+                            border = BorderStroke(1.dp, HarvestGold),
+                            modifier = Modifier.fillMaxWidth().testTag("detail_activation_gate")
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = "অর্ডার ও কার্টে যোগ করতে অ্যাকাউন্ট সক্রিয় করুন (৩০০৳ / ২ বছর)",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF78350F)
+                                )
+                                Button(onClick = onOpenActivation, modifier = Modifier.fillMaxWidth()) {
+                                    Text("অ্যাকাউন্ট সক্রিয় / রিনিউ করুন")
+                                }
+                            }
+                        }
                     } else {
-                        // Quantity Picker + Add to Cart for Buyers & Guests
+                        // Quantity Picker (মণ) + Add to Cart for Active Buyers & Guests
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -312,7 +352,7 @@ fun ProductDetailScreen(
                                         Icon(Icons.Filled.Remove, contentDescription = "কমান")
                                     }
                                     Text(
-                                        text = "${qty.formatQty()} ${product.unit}",
+                                        text = "${qty.formatQty()} মণ",
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                         modifier = Modifier.padding(horizontal = 8.dp)

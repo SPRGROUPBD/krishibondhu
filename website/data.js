@@ -172,18 +172,93 @@ export const BD_DISTRICTS = [
   { divisionBn: "ময়মনসিংহ", districtBn: "শেরপুর", upazilas: ["শেরপুর সদর", "ঝিনাইগাতী", "নকলা", "নালিতাবাড়ী", "শ্রীবরদী"] }
 ];
 
+export const MON_TO_KG = 40;
+export const FIXED_ACTIVATION_FEE_BDT = 300;
+export const FIXED_VALIDITY_YEARS = 2;
+
+export const DEFAULT_PAYMENT_SETTINGS = {
+  id: "default",
+  bKashNumber: "01756144900",
+  bKashAccountType: "PERSONAL",
+  nagadNumber: "01756144900",
+  nagadAccountType: "PERSONAL",
+  farmerFee: 300,
+  buyerFee: 300,
+  renewalFee: 300,
+  validityYears: 2,
+  paymentInstructions:
+    "নিচের বিকাশ বা নগদ নম্বরে ৩০০ টাকা Send Money / Payment করে আপনার প্রেরক মোবাইল নম্বর, ট্রানজেকশন আইডি (TxID) এবং পেমেন্ট রসিদ/স্ক্রিনশট জমা দিন। অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।",
+  notify30Days: true,
+  notify7Days: true,
+  notifyOnExpiry: true,
+  updatedAt: 0
+};
+
+export const ACCOUNT_STATUS_META = {
+  PENDING_REGISTRATION: { labelBn: "নিবন্ধন অসম্পূর্ণ", labelEn: "Pending Registration", color: "bg-gray-100 text-gray-700" },
+  PAYMENT_PENDING: { labelBn: "পেমেন্ট অপেক্ষমান", labelEn: "Payment Pending", color: "bg-amber-100 text-amber-800" },
+  PAYMENT_UNDER_REVIEW: { labelBn: "পেমেন্ট যাচাইাধীন", labelEn: "Under Review", color: "bg-sky-100 text-sky-800" },
+  ACTIVE: { labelBn: "সক্রিয় (Active)", labelEn: "Active", color: "bg-emerald-100 text-emerald-800" },
+  PAYMENT_REJECTED: { labelBn: "পেমেন্ট প্রত্যাখ্যাত", labelEn: "Payment Rejected", color: "bg-red-100 text-red-700" },
+  EXPIRED: { labelBn: "মেয়াদোত্তীর্ণ (Expired)", labelEn: "Expired", color: "bg-orange-100 text-orange-800" },
+  SUSPENDED: { labelBn: "স্থগিত (Suspended)", labelEn: "Suspended", color: "bg-red-200 text-red-900" }
+};
+
+export const ACTIVATION_PAYMENT_STATUS_META = {
+  PENDING: { labelBn: "যাচাই অপেক্ষমান (Pending)", labelEn: "Pending", color: "bg-amber-100 text-amber-800" },
+  APPROVED: { labelBn: "অনুমোদিত (Approved)", labelEn: "Approved", color: "bg-emerald-100 text-emerald-800" },
+  REJECTED: { labelBn: "প্রত্যাখ্যাত (Rejected)", labelEn: "Rejected", color: "bg-red-100 text-red-700" },
+  RESUBMISSION_REQUESTED: { labelBn: "পুনঃজমা প্রয়োজন", labelEn: "Resubmission Requested", color: "bg-purple-100 text-purple-800" }
+};
+
 export const ORDER_STATUS_META = {
   PENDING: { labelBn: "অপেক্ষমান", labelEn: "Pending", color: "bg-amber-100 text-amber-800" },
   ACCEPTED: { labelBn: "গৃহীত", labelEn: "Accepted", color: "bg-emerald-100 text-emerald-800" },
   REJECTED: { labelBn: "প্রত্যাখ্যাত", labelEn: "Rejected", color: "bg-red-100 text-red-700" },
   PROCESSING: { labelBn: "প্রস্তুত হচ্ছে", labelEn: "Processing", color: "bg-sky-100 text-sky-800" },
+  READY_FOR_PICKUP: { labelBn: "সংগ্রহের জন্য প্রস্তুত", labelEn: "Ready for Pickup", color: "bg-teal-100 text-teal-800" },
   READY: { labelBn: "সংগ্রহের জন্য প্রস্তুত", labelEn: "Ready", color: "bg-teal-100 text-teal-800" },
   SHIPPED: { labelBn: "পথে রয়েছে", labelEn: "Shipped", color: "bg-indigo-100 text-indigo-800" },
+  DELIVERED: { labelBn: "পৌঁছেছে", labelEn: "Delivered", color: "bg-cyan-100 text-cyan-800" },
+  CONFIRMED: { labelBn: "চূড়ান্ত নিশ্চিত", labelEn: "Confirmed", color: "bg-emerald-600 text-white" },
   COMPLETED: { labelBn: "সম্পন্ন", labelEn: "Completed", color: "bg-green-100 text-green-800" },
-  CANCELLED: { labelBn: "বাতিল", labelEn: "Cancelled", color: "bg-gray-200 text-gray-700" }
+  CANCELLED: { labelBn: "বাতিল", labelEn: "Cancelled", color: "bg-gray-200 text-gray-700" },
+  DISPUTED: { labelBn: "বিরোধপূর্ণ", labelEn: "Disputed", color: "bg-rose-100 text-rose-800" }
 };
 
-export const UNITS = ["কেজি", "মণ (৪০ কেজি)", "লিটার", "ডজন", "পিস", "হালি", "বস্তা"];
+// Mon-only selling unit (1 মণ = 40 কেজি); KG option is removed platform-wide
+export const UNITS = ["মণ"];
+
+export function isAllowedUnit(unit) {
+  const clean = String(unit || "").trim();
+  return clean === "মণ" || clean === "মন" || clean.toUpperCase() === "MON" || clean.toLowerCase() === "maund";
+}
+
+export function formatDateBn(ts) {
+  if (!ts || Number(ts) <= 0) return "—";
+  try {
+    return new Date(Number(ts)).toLocaleDateString("bn-BD", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric"
+    });
+  } catch (_) {
+    return new Date(Number(ts)).toLocaleDateString();
+  }
+}
+
+export function daysUntilExpiry(user, now = Date.now()) {
+  if (!user || !user.expiryDate || Number(user.expiryDate) <= 0) return null;
+  const diff = Number(user.expiryDate) - now;
+  return diff <= 0 ? 0 : Math.ceil(diff / (24 * 60 * 60 * 1000));
+}
+
+export function isMarketplaceActive(user, now = Date.now()) {
+  if (!user) return false;
+  if (user.role === "ADMIN") return true;
+  if ((user.accountStatus || "PAYMENT_PENDING") !== "ACTIVE") return false;
+  return !user.expiryDate || Number(user.expiryDate) > now;
+}
 
 export function buildInitialSeedLocations() {
   const list = [];

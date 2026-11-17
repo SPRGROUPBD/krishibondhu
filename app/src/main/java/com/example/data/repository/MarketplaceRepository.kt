@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import java.util.Calendar
 import java.util.UUID
 
 class MarketplaceRepository(
@@ -20,6 +22,8 @@ class MarketplaceRepository(
         const val SUPERADMIN_LOGIN_ID = "admin"
         const val SUPERADMIN_PASSWORD = "bondhu"
         const val SUPERADMIN_USER_ID = "admin_super"
+        const val FIXED_ACTIVATION_FEE_BDT = 300.0
+        const val FIXED_VALIDITY_YEARS = 2
     }
 
     val sessionPrefs: Flow<UserSessionPrefs> = prefs.sessionPrefs
@@ -35,6 +39,10 @@ class MarketplaceRepository(
     val complaints: Flow<List<ComplaintEntity>> = db.reviewComplaintDao().observeComplaints()
     val notifications: Flow<List<NotificationEntity>> = db.notificationAuditDao().observeNotifications()
     val auditLogs: Flow<List<AuditLogEntity>> = db.notificationAuditDao().observeAuditLogs()
+    val activationPayments: Flow<List<ActivationPaymentEntity>> = db.activationPaymentDao().observeAllPayments()
+    val paymentSettings: Flow<PaymentSettingsEntity> = db.paymentSettingsDao().observeSettings().map {
+        it ?: PaymentSettingsEntity()
+    }
 
     private val _adConfig = MutableStateFlow(AdConfig())
     val adConfig: StateFlow<AdConfig> = _adConfig.asStateFlow()
@@ -42,11 +50,72 @@ class MarketplaceRepository(
     fun observeOrderItems(orderId: String): Flow<List<OrderItemEntity>> =
         db.orderDao().observeOrderItems(orderId)
 
+    private fun normalizeTransactionId(txId: String): String =
+        txId.trim().replace(Regex("\\s+"), "").uppercase()
+
+    private fun addCalendarYears(baseMillis: Long, years: Int): Long {
+        val cal = Calendar.getInstance().apply {
+            timeInMillis = baseMillis
+            add(Calendar.YEAR, years.coerceAtLeast(1))
+        }
+        return cal.timeInMillis
+    }
+
+    suspend fun getEffectivePaymentSettings(): PaymentSettingsEntity {
+        val local = db.paymentSettingsDao().getSettingsOnce()
+        if (local != null) return local
+        val defaultSettings = PaymentSettingsEntity()
+        db.paymentSettingsDao().upsertSettings(defaultSettings)
+        return defaultSettings
+    }
+
+    suspend fun requireActiveMarketplaceUser(
+        user: UserEntity?,
+        actionBn: String = "এই কাজটি করার",
+        now: Long = System.currentTimeMillis()
+    ): Result<UserEntity> {
+        if (user == null) {
+            return Result.failure(IllegalStateException("$actionBn জন্য অনুগ্রহ করে লগইন বা নিবন্ধন করুন।"))
+        }
+        if (user.role == UserRole.ADMIN.name) {
+            return Result.success(user)
+        }
+        // Refresh from DB if available to ensure latest status
+        val latest = db.userDao().getUserById(user.id) ?: user
+        if (latest.accountStatus == AccountStatus.ACTIVE.name && latest.expiryDate > 0L && latest.expiryDate <= now) {
+            evaluateAccountExpiries(now)
+            return Result.failure(
+                IllegalStateException("আপনার ২ বছরের অ্যাকাউন্টের মেয়াদ শেষ হয়েছে। পুনরায় সক্রিয় করতে ৩০০ টাকা দিয়ে রিনিউ করুন।")
+            )
+        }
+        return when (latest.accountStatus) {
+            AccountStatus.ACTIVE.name -> Result.success(latest)
+            AccountStatus.PAYMENT_UNDER_REVIEW.name -> Result.failure(
+                IllegalStateException("আপনার অ্যাক্টিভেশন পেমেন্টটি অ্যাডমিন যাচাইয়ের অপেক্ষায় রয়েছে। অনুমোদনের পর $actionBn অনুমতি পাবেন।")
+            )
+            AccountStatus.PAYMENT_REJECTED.name -> Result.failure(
+                IllegalStateException("আপনার পেমেন্ট যাচাই প্রত্যাখ্যাত হয়েছে। অনুগ্রহ করে সঠিক তথ্য দিয়ে পুনরায় পেমেন্ট জমা দিন।")
+            )
+            AccountStatus.EXPIRED.name -> Result.failure(
+                IllegalStateException("আপনার অ্যাকাউন্টের ২ বছরের মেয়াদ শেষ হয়েছে। অনুগ্রহ করে ৩০০ টাকা দিয়ে রিনিউ করুন।")
+            )
+            AccountStatus.SUSPENDED.name -> Result.failure(
+                IllegalStateException("আপনার অ্যাকাউন্টটি অ্যাডমিন কর্তৃক স্থগিত (Suspended) রয়েছে।")
+            )
+            else -> Result.failure(
+                IllegalStateException("$actionBn জন্য আপনার অ্যাকাউন্টটি সক্রিয় নয়। অনুগ্রহ করে ৩০০ টাকা (২ বছরের মেয়াদ) অ্যাক্টিভেশন ফি জমা দিন।")
+            )
+        }
+    }
+
     suspend fun initializeCatalogsAndSync(
         scope: CoroutineScope? = null,
         onIncomingNotification: (NotificationEntity) -> Unit = {}
     ) {
         MasterCatalogSeeder.initialize(db)
+        if (db.paymentSettingsDao().getSettingsOnce() == null) {
+            db.paymentSettingsDao().upsertSettings(PaymentSettingsEntity())
+        }
         if (scope != null) {
             rtdbSync.startRealtimeListeners(
                 localDb = db,
@@ -55,6 +124,7 @@ class MarketplaceRepository(
                 onIncomingNotification = onIncomingNotification
             )
         }
+        evaluateAccountExpiries()
     }
 
     suspend fun setLanguage(language: AppLanguage) = prefs.setLanguage(language)
@@ -66,6 +136,77 @@ class MarketplaceRepository(
 
     suspend fun syncNow() {
         rtdbSync.pullAllFromRest(db, onAdConfigChanged = { _adConfig.value = it })
+        evaluateAccountExpiries()
+    }
+
+    suspend fun evaluateAccountExpiries(now: Long = System.currentTimeMillis()) {
+        val settings = getEffectivePaymentSettings()
+        val users = db.userDao().getAllUsersOnce()
+        users.filter { it.role != UserRole.ADMIN.name && !it.isDemoRecord }.forEach { user ->
+            if (user.accountStatus == AccountStatus.ACTIVE.name && user.expiryDate > 0L) {
+                val cycleKey = user.expiryDate
+                if (user.expiryDate <= now) {
+                    val expiredUser = user.copy(accountStatus = AccountStatus.EXPIRED.name)
+                    db.userDao().upsertUser(expiredUser)
+                    rtdbSync.pushUser(expiredUser)
+                    if (settings.notifyOnExpiry) {
+                        val notifId = "exp_${user.id}_${cycleKey}_0d"
+                        if (db.notificationAuditDao().getNotificationById(notifId) == null) {
+                            val notif = NotificationEntity(
+                                id = notifId,
+                                userId = user.id,
+                                targetRole = user.role,
+                                senderRole = "SYSTEM",
+                                type = "ACCOUNT_EXPIRED",
+                                titleBn = "অ্যাকাউন্টের ২ বছরের মেয়াদ শেষ হয়েছে",
+                                messageBn = "আপনার কৃষি বন্ধু অ্যাকাউন্টের মেয়াদ শেষ হওয়ায় কেনাবেচা সাময়িকভাবে বন্ধ রয়েছে। পুনরায় ২ বছরের জন্য সক্রিয় করতে ৩০০ টাকা রিনিউয়াল পেমেন্ট জমা দিন।",
+                                isRead = false,
+                                createdAt = now
+                            )
+                            db.notificationAuditDao().insertNotification(notif)
+                            rtdbSync.pushNotification(notif)
+                        }
+                    }
+                } else {
+                    val daysLeft = user.daysUntilExpiry(now) ?: Int.MAX_VALUE
+                    if (settings.notify7Days && daysLeft <= 7) {
+                        val notifId = "exp_${user.id}_${cycleKey}_7d"
+                        if (db.notificationAuditDao().getNotificationById(notifId) == null) {
+                            val notif = NotificationEntity(
+                                id = notifId,
+                                userId = user.id,
+                                targetRole = user.role,
+                                senderRole = "SYSTEM",
+                                type = "EXPIRY_REMINDER_7D",
+                                titleBn = "মেয়াদ শেষ হতে আর মাত্র $daysLeft দিন বাকি",
+                                messageBn = "নিরবচ্ছিন্নভাবে ফসল বিক্রি ও অর্ডার করতে আগামী $daysLeft দিনের মধ্যে ৩০০ টাকা দিয়ে ২ বছরের রিনিউ সম্পন্ন করুন।",
+                                isRead = false,
+                                createdAt = now
+                            )
+                            db.notificationAuditDao().insertNotification(notif)
+                            rtdbSync.pushNotification(notif)
+                        }
+                    } else if (settings.notify30Days && daysLeft <= 30) {
+                        val notifId = "exp_${user.id}_${cycleKey}_30d"
+                        if (db.notificationAuditDao().getNotificationById(notifId) == null) {
+                            val notif = NotificationEntity(
+                                id = notifId,
+                                userId = user.id,
+                                targetRole = user.role,
+                                senderRole = "SYSTEM",
+                                type = "EXPIRY_REMINDER_30D",
+                                titleBn = "অ্যাকাউন্টের মেয়াদ ৩০ দিনের মধ্যে শেষ হবে",
+                                messageBn = "আপনার ২ বছরের অ্যাকাউন্টের মেয়াদ আর $daysLeft দিন পর শেষ হবে। সময়মতো ৩০০ টাকা দিয়ে রিনিউ করে নিন।",
+                                isRead = false,
+                                createdAt = now
+                            )
+                            db.notificationAuditDao().insertNotification(notif)
+                            rtdbSync.pushNotification(notif)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -97,7 +238,12 @@ class MarketplaceRepository(
                 isMobileVerified = true,
                 rating = 5.0,
                 reviewCount = 0,
-                isDemoRecord = false
+                isDemoRecord = false,
+                accountStatus = AccountStatus.ACTIVE.name,
+                activationDate = System.currentTimeMillis(),
+                expiryDate = 0L,
+                validityYears = FIXED_VALIDITY_YEARS,
+                lastPaymentId = ""
             )
             db.userDao().upsertUser(adminUser)
             prefs.setActiveUserId(adminUser.id)
@@ -121,7 +267,9 @@ class MarketplaceRepository(
             return Result.failure(IllegalArgumentException("পাসওয়ার্ড সঠিক নয়।"))
         }
         prefs.setActiveUserId(user.id)
-        return Result.success(user)
+        evaluateAccountExpiries()
+        val refreshed = db.userDao().getUserById(user.id) ?: user
+        return Result.success(refreshed)
     }
 
     suspend fun registerUser(
@@ -135,11 +283,15 @@ class MarketplaceRepository(
         unionName: String,
         village: String,
         nidLastFour: String,
-        farmBio: String
+        farmBio: String,
+        confirmPassword: String = rawPassword
     ): Result<UserEntity> {
         val cleanPhone = SecurityHashUtil.normalizePhone(phone)
         if (fullName.isBlank() || cleanPhone.length < 10 || rawPassword.length < 6) {
             return Result.failure(IllegalArgumentException("নাম, সঠিক মোবাইল নম্বর ও কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড দিন।"))
+        }
+        if (rawPassword != confirmPassword) {
+            return Result.failure(IllegalArgumentException("পাসওয়ার্ড এবং কনফার্ম পাসওয়ার্ড মেলেনি।"))
         }
         if (cleanPhone.equals(SUPERADMIN_LOGIN_ID, ignoreCase = true)) {
             return Result.failure(IllegalArgumentException("এই আইডি ব্যবহার করা যাবে না।"))
@@ -179,7 +331,12 @@ class MarketplaceRepository(
             isMobileVerified = true,
             rating = 5.0,
             reviewCount = 0,
-            isDemoRecord = false
+            isDemoRecord = false,
+            accountStatus = AccountStatus.PAYMENT_PENDING.name,
+            activationDate = 0L,
+            expiryDate = 0L,
+            validityYears = FIXED_VALIDITY_YEARS,
+            lastPaymentId = ""
         )
         db.userDao().upsertUser(user)
         rtdbSync.pushUser(user)
@@ -188,7 +345,7 @@ class MarketplaceRepository(
             id = "aud_${UUID.randomUUID().toString().take(8)}",
             actorId = uid,
             actorRole = role.name,
-            actionBn = "নতুন অ্যাকাউন্ট নিবন্ধন",
+            actionBn = "নতুন অ্যাকাউন্ট নিবন্ধন (পেমেন্ট অপেক্ষমান)",
             targetEntity = "User",
             targetId = uid,
             detailsBn = "${user.fullName} (${role.titleBn}) — ${user.upazila}, ${user.district}, ${user.division}"
@@ -197,6 +354,410 @@ class MarketplaceRepository(
         rtdbSync.pushAuditLog(audit)
         prefs.setActiveUserId(uid)
         return Result.success(user)
+    }
+
+    suspend fun submitActivationPayment(
+        user: UserEntity,
+        paymentMethod: PaymentMethod,
+        senderMobile: String,
+        transactionId: String,
+        amount: Double,
+        receiptUri: String,
+        isRenewal: Boolean = false
+    ): Result<ActivationPaymentEntity> {
+        if (user.role == UserRole.ADMIN.name) {
+            return Result.failure(IllegalArgumentException("অ্যাডমিন অ্যাকাউন্টের জন্য অ্যাক্টিভেশন ফি প্রযোজ্য নয়।"))
+        }
+        if (paymentMethod != PaymentMethod.BKASH && paymentMethod != PaymentMethod.NAGAD) {
+            return Result.failure(IllegalArgumentException("অ্যাক্টিভেশনের জন্য শুধুমাত্র বিকাশ (bKash) বা নগদ (Nagad) নির্বাচন করুন।"))
+        }
+        val cleanSender = SecurityHashUtil.normalizePhone(senderMobile)
+        if (cleanSender.length < 10) {
+            return Result.failure(IllegalArgumentException("প্রেরকের সঠিক মোবাইল নম্বর (১১ ডিজিট) লিখুন।"))
+        }
+        val cleanTxId = normalizeTransactionId(transactionId)
+        if (cleanTxId.length < 4) {
+            return Result.failure(IllegalArgumentException("সঠিক ট্রানজেকশন আইডি (Transaction ID) লিখুন।"))
+        }
+
+        val settings = getEffectivePaymentSettings()
+        val expectedFee = when {
+            isRenewal -> settings.renewalFee
+            user.role == UserRole.FARMER.name -> settings.farmerFee
+            else -> settings.buyerFee
+        }
+        if (kotlin.math.abs(amount - expectedFee) > 0.01) {
+            return Result.failure(
+                IllegalArgumentException("নির্ধারিত ফি ${expectedFee.formatBdt()} (২ বছরের মেয়াদ) — পরিমাণ পরিবর্তন করা যাবে না।")
+            )
+        }
+
+        // Pull latest remote activation payments before duplicate checking when online
+        rtdbSync.fetchAllActivationPayments(db)
+        val allPayments = db.activationPaymentDao().getAllPaymentsOnce()
+
+        // Block duplicate pending submission for the same user
+        if (allPayments.any { it.userId == user.id && it.status == ActivationPaymentStatus.PENDING.name }) {
+            return Result.failure(
+                IllegalStateException("আপনার একটি পেমেন্ট আবেদন ইতোমধ্যে যাচাইাধীন (Pending) রয়েছে। অ্যাডমিন অনুমোদন পর্যন্ত অপেক্ষা করুন।")
+            )
+        }
+
+        // Strictly reject duplicate Transaction ID across ALL payment records
+        val duplicateTx = allPayments.firstOrNull {
+            normalizeTransactionId(it.transactionId) == cleanTxId
+        }
+        if (duplicateTx != null) {
+            return Result.failure(
+                IllegalArgumentException("এই ট্রানজেকশন আইডি ($cleanTxId) পূর্বেই ব্যবহার করা হয়েছে! অনুগ্রহ করে আপনার সঠিক ও নতুন Transaction ID দিন।")
+            )
+        }
+
+        val receiverNumber = if (paymentMethod == PaymentMethod.BKASH) settings.bKashNumber else settings.nagadNumber
+        val receiverType = if (paymentMethod == PaymentMethod.BKASH) settings.bKashAccountType else settings.nagadAccountType
+        val now = System.currentTimeMillis()
+        val paymentType = if (isRenewal || user.activationDate > 0L) "RENEWAL" else "ACTIVATION"
+        val payment = ActivationPaymentEntity(
+            id = "act_${UUID.randomUUID().toString().take(8)}",
+            userId = user.id,
+            userName = user.fullName,
+            userPhone = user.phone,
+            accountRole = user.role,
+            paymentType = paymentType,
+            paymentMethod = paymentMethod.name,
+            receiverNumber = receiverNumber,
+            receiverAccountType = receiverType,
+            senderMobile = cleanSender,
+            transactionId = cleanTxId,
+            amount = expectedFee,
+            receiptUri = receiptUri.trim(),
+            status = ActivationPaymentStatus.PENDING.name,
+            adminNotes = "",
+            reviewedBy = "",
+            reviewedAt = 0L,
+            createdAt = now,
+            updatedAt = now
+        )
+
+        val updatedUser = user.copy(
+            accountStatus = if (user.accountStatus == AccountStatus.ACTIVE.name && isRenewal) {
+                AccountStatus.ACTIVE.name // early renewal keeps current active window until approved
+            } else {
+                AccountStatus.PAYMENT_UNDER_REVIEW.name
+            },
+            lastPaymentId = payment.id
+        )
+
+        db.withTransaction {
+            db.activationPaymentDao().upsertPayment(payment)
+            db.userDao().upsertUser(updatedUser)
+        }
+        rtdbSync.pushActivationPayment(payment)
+        rtdbSync.pushUser(updatedUser)
+
+        val adminNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = "ALL",
+            targetRole = UserRole.ADMIN.name,
+            senderRole = user.role,
+            type = "ACTIVATION_PAYMENT_NEW",
+            titleBn = "নতুন অ্যাকাউন্ট ${if (paymentType == "RENEWAL") "রিনিউ" else "অ্যাক্টিভেশন"} পেমেন্ট (${expectedFee.formatBdt()})",
+            messageBn = "${user.fullName} (${if (user.role == "FARMER") "কৃষক" else "ক্রেতা"}) — ${paymentMethod.labelEn} TxID: $cleanTxId, প্রেরক: $cleanSender।",
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(adminNotif)
+        rtdbSync.pushNotification(adminNotif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = user.id,
+            actorRole = user.role,
+            actionBn = "অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট জমা",
+            targetEntity = "ActivationPayment",
+            targetId = payment.id,
+            detailsBn = "${user.fullName} — ${paymentMethod.labelEn} ${expectedFee.formatBdt()} | TxID: $cleanTxId"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(payment)
+    }
+
+    suspend fun adminApproveActivationPayment(
+        admin: UserEntity,
+        paymentId: String,
+        notes: String = "",
+        now: Long = System.currentTimeMillis()
+    ): Result<UserEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন পেমেন্ট অনুমোদন করতে পারেন।"))
+        }
+        val payment = db.activationPaymentDao().getPaymentById(paymentId)
+            ?: return Result.failure(IllegalArgumentException("পেমেন্ট রেকর্ড পাওয়া যায়নি।"))
+        if (payment.status == ActivationPaymentStatus.APPROVED.name) {
+            return Result.failure(IllegalStateException("এই পেমেন্টটি ইতোমধ্যে অনুমোদিত।"))
+        }
+        val targetUser = db.userDao().getUserById(payment.userId)
+            ?: return Result.failure(IllegalArgumentException("সংশ্লিষ্ট ব্যবহারকারীকে পাওয়া যায়নি।"))
+
+        val settings = getEffectivePaymentSettings()
+        val years = settings.validityYears.coerceAtLeast(FIXED_VALIDITY_YEARS)
+        val hasExistingUnexpiredWindow = targetUser.accountStatus == AccountStatus.ACTIVE.name &&
+            targetUser.expiryDate > now
+        val newActivationDate = if (hasExistingUnexpiredWindow && targetUser.activationDate > 0L) {
+            targetUser.activationDate
+        } else {
+            now
+        }
+        val newExpiryDate = if (hasExistingUnexpiredWindow) {
+            addCalendarYears(targetUser.expiryDate, years)
+        } else {
+            addCalendarYears(now, years)
+        }
+
+        val approvedPayment = payment.copy(
+            status = ActivationPaymentStatus.APPROVED.name,
+            adminNotes = notes.trim(),
+            reviewedBy = admin.id,
+            reviewedAt = now,
+            updatedAt = now
+        )
+        val activatedUser = targetUser.copy(
+            accountStatus = AccountStatus.ACTIVE.name,
+            verificationStatus = "VERIFIED",
+            activationDate = newActivationDate,
+            expiryDate = newExpiryDate,
+            validityYears = years,
+            lastPaymentId = payment.id
+        )
+
+        db.withTransaction {
+            db.activationPaymentDao().upsertPayment(approvedPayment)
+            db.userDao().upsertUser(activatedUser)
+            if (targetUser.role == UserRole.FARMER.name) {
+                db.productDao().updateFarmerVerifiedOnProducts(targetUser.id, true)
+            }
+        }
+
+        rtdbSync.pushActivationPayment(approvedPayment)
+        rtdbSync.pushUser(activatedUser)
+        if (targetUser.role == UserRole.FARMER.name) {
+            db.productDao().getProductsForFarmer(targetUser.id).forEach { rtdbSync.pushProduct(it) }
+        }
+
+        val notif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = targetUser.id,
+            targetRole = targetUser.role,
+            senderRole = UserRole.ADMIN.name,
+            type = "ACTIVATION_APPROVED",
+            titleBn = "অভিনন্দন! আপনার অ্যাকাউন্ট ২ বছরের জন্য সক্রিয় হয়েছে ✓",
+            messageBn = "আপনার ${payment.amount.formatBdt()} (${payment.transactionId}) পেমেন্ট অনুমোদিত হয়েছে। এখন আপনি কৃষি বন্ধুর সব সুবিধা ব্যবহার করতে পারবেন।",
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(notif)
+        rtdbSync.pushNotification(notif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "পেমেন্ট অনুমোদন ও ২ বছরের অ্যাকাউন্ট সক্রিয়",
+            targetEntity = "ActivationPayment",
+            targetId = payment.id,
+            detailsBn = "${targetUser.fullName} (${targetUser.phone}) — TxID: ${payment.transactionId} অনুমোদিত"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(activatedUser)
+    }
+
+    suspend fun adminRejectActivationPayment(
+        admin: UserEntity,
+        paymentId: String,
+        reason: String,
+        requestResubmission: Boolean = false,
+        now: Long = System.currentTimeMillis()
+    ): Result<Unit> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন পেমেন্ট প্রত্যাখ্যান করতে পারেন।"))
+        }
+        val payment = db.activationPaymentDao().getPaymentById(paymentId)
+            ?: return Result.failure(IllegalArgumentException("পেমেন্ট রেকর্ড পাওয়া যায়নি।"))
+        val targetUser = db.userDao().getUserById(payment.userId)
+            ?: return Result.failure(IllegalArgumentException("সংশ্লিষ্ট ব্যবহারকারীকে পাওয়া যায়নি।"))
+
+        val newPaymentStatus = if (requestResubmission) {
+            ActivationPaymentStatus.RESUBMISSION_REQUESTED.name
+        } else {
+            ActivationPaymentStatus.REJECTED.name
+        }
+        val cleanReason = reason.trim().ifBlank {
+            if (requestResubmission) "সঠিক ট্রানজেকশন আইডি ও স্পষ্ট রসিদসহ পুনরায় জমা দিন।"
+            else "পেমেন্ট তথ্য যাচাইয়ে অমিল পাওয়া গেছে।"
+        }
+        val updatedPayment = payment.copy(
+            status = newPaymentStatus,
+            adminNotes = cleanReason,
+            reviewedBy = admin.id,
+            reviewedAt = now,
+            updatedAt = now
+        )
+        // Only change accountStatus to PAYMENT_REJECTED if user is not currently on an active unexpired renewal
+        val keepCurrentlyActive = targetUser.accountStatus == AccountStatus.ACTIVE.name &&
+            (targetUser.expiryDate <= 0L || targetUser.expiryDate > now)
+        val updatedUser = if (keepCurrentlyActive) {
+            targetUser
+        } else {
+            targetUser.copy(
+                accountStatus = AccountStatus.PAYMENT_REJECTED.name,
+                verificationStatus = if (requestResubmission) "PENDING" else "REJECTED"
+            )
+        }
+
+        db.withTransaction {
+            db.activationPaymentDao().upsertPayment(updatedPayment)
+            db.userDao().upsertUser(updatedUser)
+        }
+        rtdbSync.pushActivationPayment(updatedPayment)
+        rtdbSync.pushUser(updatedUser)
+
+        val notif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = targetUser.id,
+            targetRole = targetUser.role,
+            senderRole = UserRole.ADMIN.name,
+            type = "ACTIVATION_REJECTED",
+            titleBn = if (requestResubmission) "অ্যাক্টিভেশন পেমেন্ট পুনরায় জমা দিন" else "অ্যাক্টিভেশন পেমেন্ট প্রত্যাখ্যাত হয়েছে",
+            messageBn = "কারণ: $cleanReason অনুগ্রহ করে সঠিক TxID ও রসিদসহ পুনরায় জমা দিন।",
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(notif)
+        rtdbSync.pushNotification(notif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = if (requestResubmission) "পেমেন্ট পুনঃজমা অনুরোধ" else "পেমেন্ট প্রত্যাখ্যান",
+            targetEntity = "ActivationPayment",
+            targetId = payment.id,
+            detailsBn = "${targetUser.fullName} — TxID: ${payment.transactionId} | $cleanReason"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(Unit)
+    }
+
+    suspend fun adminSetAccountStatus(
+        admin: UserEntity,
+        userId: String,
+        newStatus: AccountStatus,
+        reason: String = "",
+        now: Long = System.currentTimeMillis()
+    ): Result<UserEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন অ্যাকাউন্টের অবস্থা পরিবর্তন করতে পারেন।"))
+        }
+        val target = db.userDao().getUserById(userId)
+            ?: return Result.failure(IllegalArgumentException("ব্যবহারকারী পাওয়া যায়নি।"))
+        if (target.role == UserRole.ADMIN.name) {
+            return Result.failure(IllegalArgumentException("সুপার অ্যাডমিন অ্যাকাউন্ট পরিবর্তন করা যাবে না।"))
+        }
+        val settings = getEffectivePaymentSettings()
+        val updated = when (newStatus) {
+            AccountStatus.ACTIVE -> {
+                val act = if (target.activationDate > 0L) target.activationDate else now
+                val exp = if (target.expiryDate > now) target.expiryDate else addCalendarYears(now, settings.validityYears)
+                target.copy(
+                    accountStatus = AccountStatus.ACTIVE.name,
+                    verificationStatus = "VERIFIED",
+                    activationDate = act,
+                    expiryDate = exp,
+                    validityYears = settings.validityYears
+                )
+            }
+            AccountStatus.SUSPENDED -> target.copy(accountStatus = AccountStatus.SUSPENDED.name)
+            AccountStatus.EXPIRED -> target.copy(accountStatus = AccountStatus.EXPIRED.name)
+            else -> target.copy(accountStatus = newStatus.name)
+        }
+
+        db.userDao().upsertUser(updated)
+        if (updated.role == UserRole.FARMER.name) {
+            db.productDao().updateFarmerVerifiedOnProducts(updated.id, updated.accountStatus == AccountStatus.ACTIVE.name)
+            db.productDao().getProductsForFarmer(updated.id).forEach { rtdbSync.pushProduct(it) }
+        }
+        rtdbSync.pushUser(updated)
+
+        val notif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = updated.id,
+            targetRole = updated.role,
+            senderRole = UserRole.ADMIN.name,
+            type = "ACCOUNT_STATUS_CHANGE",
+            titleBn = "অ্যাকাউন্ট স্ট্যাটাস: ${newStatus.display(AppLanguage.BENGALI)}",
+            messageBn = reason.ifBlank { "অ্যাডমিন আপনার অ্যাকাউন্টের অবস্থা ${newStatus.display(AppLanguage.BENGALI)} হিসেবে আপডেট করেছেন।" },
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(notif)
+        rtdbSync.pushNotification(notif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "অ্যাকাউন্ট স্ট্যাটাস (${newStatus.name})",
+            targetEntity = "User",
+            targetId = updated.id,
+            detailsBn = "${updated.fullName} — ${newStatus.labelBn} ${if (reason.isNotBlank()) "($reason)" else ""}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updated)
+    }
+
+    suspend fun adminSavePaymentSettings(
+        admin: UserEntity,
+        settings: PaymentSettingsEntity
+    ): Result<PaymentSettingsEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন পেমেন্ট সেটিংস পরিবর্তন করতে পারেন।"))
+        }
+        val cleanBkash = SecurityHashUtil.normalizePhone(settings.bKashNumber)
+        val cleanNagad = SecurityHashUtil.normalizePhone(settings.nagadNumber)
+        if (cleanBkash.length < 10 || cleanNagad.length < 10) {
+            return Result.failure(IllegalArgumentException("সঠিক বিকাশ এবং নগদ পেমেন্ট নম্বর লিখুন।"))
+        }
+        val stamped = settings.copy(
+            id = "default",
+            bKashNumber = cleanBkash,
+            nagadNumber = cleanNagad,
+            bKashAccountType = if (settings.bKashAccountType.equals("MERCHANT", true)) "MERCHANT" else "PERSONAL",
+            nagadAccountType = if (settings.nagadAccountType.equals("MERCHANT", true)) "MERCHANT" else "PERSONAL",
+            farmerFee = settings.farmerFee.takeIf { it > 0 } ?: FIXED_ACTIVATION_FEE_BDT,
+            buyerFee = settings.buyerFee.takeIf { it > 0 } ?: FIXED_ACTIVATION_FEE_BDT,
+            renewalFee = settings.renewalFee.takeIf { it > 0 } ?: FIXED_ACTIVATION_FEE_BDT,
+            validityYears = FIXED_VALIDITY_YEARS,
+            updatedAt = System.currentTimeMillis()
+        )
+        db.paymentSettingsDao().upsertSettings(stamped)
+        rtdbSync.pushPaymentSettings(stamped)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "পেমেন্ট ও অ্যাক্টিভেশন সেটিংস আপডেট",
+            targetEntity = "PaymentSettings",
+            targetId = "default",
+            detailsBn = "bKash: ${stamped.bKashNumber} (${stamped.bKashAccountType}), Nagad: ${stamped.nagadNumber} (${stamped.nagadAccountType}), ফি: ৳${stamped.farmerFee.toInt()}/${stamped.validityYears} বছর"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(stamped)
     }
 
     suspend fun resetPasswordByPhone(
@@ -286,6 +847,8 @@ class MarketplaceRepository(
                 division = updated.division,
                 district = updated.district,
                 upazila = updated.upazila,
+                unionName = updated.unionName,
+                village = updated.village,
                 now = System.currentTimeMillis()
             )
             db.productDao().getProductsForFarmer(updated.id).forEach { rtdbSync.pushProduct(it) }
@@ -298,16 +861,20 @@ class MarketplaceRepository(
             actionBn = "প্রোফাইল তথ্য হালনাগাদ",
             targetEntity = "User",
             targetId = updated.id,
-            detailsBn = "${updated.fullName} — ${updated.upazila}, ${updated.district}, ${updated.division}"
+            detailsBn = "${updated.fullName} — ${updated.unionName.ifBlank { updated.upazila }}, ${updated.district}, ${updated.division}"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)
         return Result.success(updated)
     }
 
-    suspend fun addToCart(product: ProductEntity, requestedQty: Double): Result<Unit> {
+    suspend fun addToCart(product: ProductEntity, requestedQty: Double, actor: UserEntity? = null): Result<Unit> {
+        if (actor != null) {
+            val gate = requireActiveMarketplaceUser(actor, "কার্টে ফসল যোগ করার")
+            if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+        }
         if (requestedQty <= 0.0) {
-            return Result.failure(IllegalArgumentException("সঠিক পরিমাণ নির্বাচন করুন।"))
+            return Result.failure(IllegalArgumentException("সঠিক পরিমাণ (মণ) নির্বাচন করুন।"))
         }
         if (product.status != "ACTIVE" || product.availableQuantity <= 0.0) {
             return Result.failure(IllegalArgumentException("দুঃখিত, এই ফসলটির মজুত শেষ।"))
@@ -316,7 +883,7 @@ class MarketplaceRepository(
         val totalQty = (existing?.quantity ?: 0.0) + requestedQty
         if (totalQty > product.availableQuantity) {
             return Result.failure(
-                IllegalArgumentException("সর্বোচ্চ মজুত ${product.availableQuantity.formatQty()} ${product.unit} পর্যন্ত যোগ করা যাবে।")
+                IllegalArgumentException("সর্বোচ্চ মজুত ${product.availableQuantity.formatQty()} মণ পর্যন্ত যোগ করা যাবে।")
             )
         }
         val item = CartItemEntity(
@@ -325,7 +892,7 @@ class MarketplaceRepository(
             farmerId = product.farmerId,
             farmerName = product.farmerName,
             productNameBn = product.nameBn,
-            unit = product.unit,
+            unit = ProductUnit.MON.labelBn,
             pricePerUnit = product.pricePerUnit,
             quantity = totalQty,
             maxAvailableQuantity = product.availableQuantity,
@@ -343,7 +910,7 @@ class MarketplaceRepository(
             return Result.success(Unit)
         }
         if (newQty > maxAvailable) {
-            return Result.failure(IllegalArgumentException("পর্যাপ্ত মজুত নেই (সর্বোচ্চ ${maxAvailable.formatQty()})"))
+            return Result.failure(IllegalArgumentException("পর্যাপ্ত মজুত নেই (সর্বোচ্চ ${maxAvailable.formatQty()} মণ)"))
         }
         db.cartDao().updateQuantity(cartItemId, newQty)
         return Result.success(Unit)
@@ -358,6 +925,9 @@ class MarketplaceRepository(
         paymentMethod: PaymentMethod,
         transactionRef: String
     ): Result<List<OrderEntity>> {
+        val gate = requireActiveMarketplaceUser(buyer, "অর্ডার করার")
+        if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+
         val items = db.cartDao().getCartItemsOnce()
         if (items.isEmpty()) {
             return Result.failure(IllegalArgumentException("আপনার কার্ট খালি।"))
@@ -403,7 +973,7 @@ class MarketplaceRepository(
                                 orderId = orderId,
                                 productId = cartItem.productId,
                                 productNameBn = cartItem.productNameBn,
-                                unit = cartItem.unit,
+                                unit = ProductUnit.MON.labelBn,
                                 quantity = cartItem.quantity,
                                 pricePerUnit = cartItem.pricePerUnit,
                                 lineTotal = lineTotal
@@ -414,9 +984,13 @@ class MarketplaceRepository(
                     val deliveryCharge = if (deliveryOption == DeliveryOption.FARM_PICKUP) 0.0 else maxDeliveryFee
                     val grandTotal = productTotal + deliveryCharge
                     val summary = farmerItems.joinToString(", ") {
-                        "${it.productNameBn} × ${it.quantity.formatQty()} ${it.unit}"
+                        "${it.productNameBn} × ${it.quantity.formatQty()} মণ"
                     }
-                    val paymentStatus = if (paymentMethod.isDigital) "AWAITING_GATEWAY" else "PENDING"
+                    val paymentStatus = when {
+                        transactionRef.isNotBlank() -> "SUBMITTED"
+                        paymentMethod.isDigital -> "AWAITING_GATEWAY"
+                        else -> "PENDING"
+                    }
 
                     val order = OrderEntity(
                         id = orderId,
@@ -446,7 +1020,14 @@ class MarketplaceRepository(
                         itemsSummary = summary,
                         createdAt = now,
                         updatedAt = now,
-                        isDemoRecord = false
+                        isDemoRecord = false,
+                        paymentSenderNumber = if (transactionRef.isNotBlank()) buyer.phone else "",
+                        paymentReceiptUri = "",
+                        farmerPaymentConfirmed = false,
+                        farmerPaymentConfirmedAt = 0L,
+                        adminPaymentVerified = false,
+                        adminPaymentVerifiedBy = "",
+                        adminPaymentVerifiedAt = 0L
                     )
 
                     val farmerNotification = NotificationEntity(
@@ -457,7 +1038,7 @@ class MarketplaceRepository(
                         orderId = orderId,
                         type = "ORDER_NEW",
                         titleBn = "নতুন অর্ডার এসেছে ($orderCode)",
-                        messageBn = "ক্রেতা ${buyer.fullName} (${buyer.upazila}, ${buyer.district}) $summary অর্ডার করেছেন — মোট ${grandTotal.formatBdt()}।",
+                        messageBn = "ক্রেতা ${buyer.fullName} (${buyer.upazila}, ${buyer.district}) $summary অর্ডার করেছেন — মোট ${grandTotal.formatBdt()}। অনুগ্রহ করে অর্ডার গ্রহণ বা প্রত্যাখ্যান করুন।",
                         isRead = false,
                         createdAt = now
                     )
@@ -499,15 +1080,24 @@ class MarketplaceRepository(
         if (farmer.role != UserRole.FARMER.name) {
             return Result.failure(IllegalStateException("শুধুমাত্র কৃষক নিজস্ব ফসল তালিকাভুক্ত করতে পারেন।"))
         }
-        if (nameBn.isBlank() || quantity <= 0.0 || pricePerUnit <= 0.0 || deliveryCharge < 0.0) {
-            return Result.failure(IllegalArgumentException("ফসলের নাম, সঠিক পরিমাণ ও দাম দিন।"))
+        val gate = requireActiveMarketplaceUser(farmer, "ফসল তালিকাভুক্ত করার")
+        if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+
+        if (!ProductUnit.isAllowedUnit(unit)) {
+            return Result.failure(
+                IllegalArgumentException("কৃষি বন্ধুতে কেজি নয়, শুধুমাত্র 'মণ' এককে ফসল বিক্রি করা যাবে (১ মণ = ৪০ কেজি)।")
+            )
         }
+        if (nameBn.isBlank() || quantity <= 0.0 || pricePerUnit <= 0.0 || deliveryCharge < 0.0) {
+            return Result.failure(IllegalArgumentException("ফসলের নাম, সঠিক পরিমাণ (মণ) ও প্রতি মণের দাম দিন।"))
+        }
+        val activeFarmer = gate.getOrThrow()
         val now = System.currentTimeMillis()
         val product = ProductEntity(
             id = "prod_${UUID.randomUUID().toString().take(8)}",
-            farmerId = farmer.id,
-            farmerName = farmer.fullName,
-            farmerVerified = farmer.verificationStatus == "VERIFIED",
+            farmerId = activeFarmer.id,
+            farmerName = activeFarmer.fullName,
+            farmerVerified = activeFarmer.verificationStatus == "VERIFIED" || activeFarmer.accountStatus == AccountStatus.ACTIVE.name,
             categoryId = category.id,
             categoryNameBn = category.nameBn,
             nameBn = nameBn.trim(),
@@ -515,17 +1105,19 @@ class MarketplaceRepository(
             descriptionBn = descriptionBn.trim(),
             imageUri = imageUri,
             availableQuantity = quantity,
-            unit = unit,
+            unit = ProductUnit.MON.labelBn,
             pricePerUnit = pricePerUnit,
             harvestDate = harvestDate.ifBlank { "আজই সংগ্রহ" },
             availabilityDate = availabilityDate.ifBlank { "আজই পাওয়া যাবে" },
-            division = farmer.division,
-            district = farmer.district,
-            upazila = farmer.upazila,
-            unionName = farmer.unionName,
-            village = farmer.village,
+            division = activeFarmer.division,
+            district = activeFarmer.district,
+            upazila = activeFarmer.upazila,
+            unionName = activeFarmer.unionName,
+            village = activeFarmer.village,
             pickupAddress = pickupAddress.ifBlank {
-                listOf(farmer.village, farmer.upazila, farmer.district).filter { it.isNotBlank() }.joinToString(", ")
+                listOf(activeFarmer.village, activeFarmer.unionName, activeFarmer.upazila, activeFarmer.district)
+                    .filter { it.isNotBlank() }
+                    .joinToString(", ")
             },
             supportsFarmPickup = supportsFarmPickup,
             supportsDirectDelivery = supportsDirectDelivery,
@@ -539,14 +1131,15 @@ class MarketplaceRepository(
         )
         db.productDao().upsertProduct(product)
         rtdbSync.pushProduct(product)
+        val totalListingValue = quantity * pricePerUnit
         val audit = AuditLogEntity(
             id = "aud_${UUID.randomUUID().toString().take(8)}",
-            actorId = farmer.id,
-            actorRole = farmer.role,
+            actorId = activeFarmer.id,
+            actorRole = activeFarmer.role,
             actionBn = "নতুন ফসল যুক্ত",
             targetEntity = "Product",
             targetId = product.id,
-            detailsBn = "${product.nameBn} (${product.district}) — ${product.pricePerUnit.formatBdt()}/${product.unit}"
+            detailsBn = "${product.nameBn} (${product.district}) — ${quantity.formatQty()} মণ × ${pricePerUnit.formatBdt()}/মণ = ${totalListingValue.formatBdt()}"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)
@@ -559,8 +1152,12 @@ class MarketplaceRepository(
         newPrice: Double,
         newStock: Double
     ): Result<Unit> {
+        val farmer = db.userDao().getUserById(farmerId)
+        val gate = requireActiveMarketplaceUser(farmer, "দাম ও মজুত পরিবর্তনের")
+        if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+
         if (newPrice <= 0.0 || newStock < 0.0) {
-            return Result.failure(IllegalArgumentException("সঠিক মূল্য ও মজুতের পরিমাণ দিন।"))
+            return Result.failure(IllegalArgumentException("সঠিক প্রতি মণের মূল্য ও মজুতের পরিমাণ দিন।"))
         }
         val updated = db.productDao().updateFarmerPriceAndStock(
             productId = productId,
@@ -574,6 +1171,242 @@ class MarketplaceRepository(
         }
         db.productDao().getProductById(productId)?.let { rtdbSync.pushProduct(it) }
         return Result.success(Unit)
+    }
+
+    suspend fun submitOrderPayment(
+        orderId: String,
+        buyer: UserEntity,
+        paymentMethod: PaymentMethod,
+        senderNumber: String,
+        transactionReference: String,
+        receiptUri: String
+    ): Result<OrderEntity> {
+        val gate = requireActiveMarketplaceUser(buyer, "অর্ডার পেমেন্ট জমা দেওয়ার")
+        if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+
+        val order = db.orderDao().getOrderById(orderId)
+            ?: return Result.failure(IllegalArgumentException("অর্ডার পাওয়া যায়নি।"))
+        if (order.buyerId != buyer.id) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র অর্ডারকারী ক্রেতা পেমেন্ট তথ্য জমা দিতে পারবেন।"))
+        }
+        if (order.status == OrderStatus.REJECTED.name || order.status == OrderStatus.CANCELLED.name) {
+            return Result.failure(IllegalStateException("বাতিল বা প্রত্যাখ্যাত অর্ডারে পেমেন্ট জমা দেওয়া যাবে না।"))
+        }
+        if (order.status == OrderStatus.PENDING.name) {
+            return Result.failure(IllegalStateException("কৃষক অর্ডারটি গ্রহণ (Accept) করার পর পেমেন্ট জমা দিন।"))
+        }
+
+        val cleanSender = SecurityHashUtil.normalizePhone(senderNumber).ifBlank { buyer.phone }
+        val cleanTxId = normalizeTransactionId(transactionReference)
+        if (paymentMethod.isDigital && cleanTxId.length < 4 && receiptUri.isBlank()) {
+            return Result.failure(IllegalArgumentException("ডিজিটাল পেমেন্টের জন্য সঠিক Transaction ID অথবা রসিদ ছবি দিন।"))
+        }
+
+        val now = System.currentTimeMillis()
+        db.orderDao().updateBuyerPaymentSubmission(
+            orderId = orderId,
+            paymentMethod = paymentMethod.name,
+            senderNumber = cleanSender,
+            txId = cleanTxId,
+            receiptUri = receiptUri.trim(),
+            paymentStatus = "SUBMITTED",
+            now = now
+        )
+        val updatedOrder = db.orderDao().getOrderById(orderId)!!
+        val items = db.orderDao().getOrderItemsOnce(orderId)
+        rtdbSync.pushOrder(updatedOrder, items)
+
+        val farmerNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = order.farmerId,
+            targetRole = UserRole.FARMER.name,
+            senderRole = UserRole.BUYER.name,
+            orderId = orderId,
+            type = "ORDER_PAYMENT_SUBMITTED",
+            titleBn = "ক্রেতা পেমেন্ট তথ্য জমা দিয়েছেন (${order.orderCode})",
+            messageBn = "ক্রেতা ${buyer.fullName} ${order.grandTotal.formatBdt()} (${paymentMethod.labelEn}, TxID: ${cleanTxId.ifBlank { "রসিদ" }}) পাঠিয়েছেন। টাকা বুঝে পেলে 'টাকা বুঝে পেয়েছি' নিশ্চিত করুন।",
+            isRead = false,
+            createdAt = now
+        )
+        val adminNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = "ALL",
+            targetRole = UserRole.ADMIN.name,
+            senderRole = UserRole.BUYER.name,
+            orderId = orderId,
+            type = "ORDER_PAYMENT_VERIFY_REQ",
+            titleBn = "অর্ডার পেমেন্ট যাচাই প্রয়োজন (${order.orderCode})",
+            messageBn = "${buyer.fullName} -> ${order.farmerName}: ${order.grandTotal.formatBdt()} (${paymentMethod.labelEn}, TxID: ${cleanTxId.ifBlank { "রসিদ সংযুক্ত" }})।",
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(farmerNotif)
+        db.notificationAuditDao().insertNotification(adminNotif)
+        rtdbSync.pushNotification(farmerNotif)
+        rtdbSync.pushNotification(adminNotif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = buyer.id,
+            actorRole = buyer.role,
+            actionBn = "অর্ডার পেমেন্ট তথ্য জমা",
+            targetEntity = "Order",
+            targetId = orderId,
+            detailsBn = "${order.orderCode} — ${paymentMethod.labelEn} | TxID: ${cleanTxId.ifBlank { "নগদ/রসিদ" }}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updatedOrder)
+    }
+
+    suspend fun farmerConfirmPaymentReceived(
+        orderId: String,
+        farmer: UserEntity
+    ): Result<OrderEntity> {
+        val gate = requireActiveMarketplaceUser(farmer, "টাকা প্রাপ্তি নিশ্চিত করার")
+        if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+
+        val order = db.orderDao().getOrderById(orderId)
+            ?: return Result.failure(IllegalArgumentException("অর্ডার পাওয়া যায়নি।"))
+        if (order.farmerId != farmer.id && farmer.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সংশ্লিষ্ট কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ দিতে পারেন।"))
+        }
+        if (order.status == OrderStatus.PENDING.name || order.status == OrderStatus.REJECTED.name || order.status == OrderStatus.CANCELLED.name) {
+            return Result.failure(IllegalStateException("এই অবস্থায় টাকা প্রাপ্তি নিশ্চিত করা যাবে না।"))
+        }
+
+        val now = System.currentTimeMillis()
+        db.orderDao().updateFarmerPaymentConfirmed(
+            orderId = orderId,
+            confirmed = true,
+            confirmedAt = now,
+            now = now
+        )
+        // If Admin already verified the payment as well, transition accepted order to CONFIRMED & PAID
+        if (order.adminPaymentVerified && order.status in setOf(
+                OrderStatus.ACCEPTED.name,
+                OrderStatus.PROCESSING.name,
+                OrderStatus.READY_FOR_PICKUP.name,
+                OrderStatus.SHIPPED.name,
+                OrderStatus.DELIVERED.name
+            )
+        ) {
+            db.orderDao().updateOrderStatus(orderId, OrderStatus.CONFIRMED.name, now)
+            db.orderDao().updatePaymentDetails(orderId, "PAID", order.transactionReference, now)
+        }
+
+        val updatedOrder = db.orderDao().getOrderById(orderId)!!
+        val items = db.orderDao().getOrderItemsOnce(orderId)
+        rtdbSync.pushOrder(updatedOrder, items)
+
+        val buyerNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = order.buyerId,
+            targetRole = UserRole.BUYER.name,
+            senderRole = UserRole.FARMER.name,
+            orderId = orderId,
+            type = "FARMER_PAYMENT_CONFIRMED",
+            titleBn = "কৃষক টাকা বুঝে পেয়েছেন (${order.orderCode})",
+            messageBn = if (updatedOrder.adminPaymentVerified) {
+                "কৃষক টাকা প্রাপ্তি নিশ্চিত করেছেন এবং অ্যাডমিন যাচাই সম্পন্ন হওয়ায় অর্ডারটি নিশ্চিত (Confirmed) হয়েছে।"
+            } else {
+                "কৃষক ${farmer.fullName} টাকা পাওয়ার বিষয়টি নিশ্চিত করেছেন। অ্যাডমিন/গেটওয়ে যাচাইয়ের পর চূড়ান্ত কনফার্মেশন সম্পন্ন হবে।"
+            },
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(buyerNotif)
+        rtdbSync.pushNotification(buyerNotif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = farmer.id,
+            actorRole = farmer.role,
+            actionBn = "কৃষক কর্তৃক টাকা প্রাপ্তি নিশ্চিতকরণ",
+            targetEntity = "Order",
+            targetId = orderId,
+            detailsBn = "${order.orderCode} — কৃষক ${farmer.fullName} টাকা বুঝে পাওয়ার নিশ্চিতকরণ দিয়েছেন"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updatedOrder)
+    }
+
+    suspend fun adminVerifyOrderPayment(
+        orderId: String,
+        admin: UserEntity,
+        approved: Boolean,
+        notes: String = ""
+    ): Result<OrderEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন অর্ডার পেমেন্ট যাচাই করতে পারেন।"))
+        }
+        val order = db.orderDao().getOrderById(orderId)
+            ?: return Result.failure(IllegalArgumentException("অর্ডার পাওয়া যায়নি।"))
+        val now = System.currentTimeMillis()
+        val payStatus = when {
+            !approved -> "REJECTED"
+            order.farmerPaymentConfirmed -> "PAID"
+            else -> "VERIFIED"
+        }
+
+        db.withTransaction {
+            db.orderDao().updateAdminPaymentVerified(
+                orderId = orderId,
+                verified = approved,
+                verifiedBy = admin.id,
+                verifiedAt = now,
+                paymentStatus = payStatus,
+                now = now
+            )
+            // Security Rule: Only confirm order if Farmer has ALSO confirmed receiving money!
+            if (approved && order.farmerPaymentConfirmed && order.status in setOf(
+                    OrderStatus.ACCEPTED.name,
+                    OrderStatus.PROCESSING.name,
+                    OrderStatus.READY_FOR_PICKUP.name,
+                    OrderStatus.SHIPPED.name,
+                    OrderStatus.DELIVERED.name
+                )
+            ) {
+                db.orderDao().updateOrderStatus(orderId, OrderStatus.CONFIRMED.name, now)
+            }
+        }
+
+        val updatedOrder = db.orderDao().getOrderById(orderId)!!
+        val items = db.orderDao().getOrderItemsOnce(orderId)
+        rtdbSync.pushOrder(updatedOrder, items)
+
+        val buyerNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = order.buyerId,
+            targetRole = UserRole.BUYER.name,
+            senderRole = UserRole.ADMIN.name,
+            orderId = orderId,
+            type = "ORDER_PAYMENT_VERIFICATION",
+            titleBn = if (approved) "অর্ডার পেমেন্ট যাচাই সম্পন্ন (${order.orderCode})" else "অর্ডার পেমেন্ট যাচাই প্রত্যাখ্যাত (${order.orderCode})",
+            messageBn = when {
+                approved && updatedOrder.farmerPaymentConfirmed -> "অ্যাডমিন যাচাই এবং কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ সম্পন্ন হওয়ায় অর্ডারটি চূড়ান্তভাবে নিশ্চিত (Confirmed) হয়েছে।"
+                approved -> "অ্যাডমিন পেমেন্ট যাচাই করেছেন। কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ দিলে অর্ডার চূড়ান্তভাবে Confirmed হবে।"
+                else -> notes.ifBlank { "অ্যাডমিন পেমেন্ট যাচাইয়ে অমিল পেয়েছেন। অনুগ্রহ করে সঠিক তথ্য জমা দিন।" }
+            },
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(buyerNotif)
+        rtdbSync.pushNotification(buyerNotif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "অর্ডার পেমেন্ট যাচাই ($payStatus)",
+            targetEntity = "Order",
+            targetId = orderId,
+            detailsBn = "${order.orderCode} — $payStatus ${if (notes.isNotBlank()) "($notes)" else ""}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updatedOrder)
     }
 
     suspend fun updateOrderStatus(
@@ -599,13 +1432,27 @@ class MarketplaceRepository(
             return Result.failure(IllegalStateException("অর্ডার প্রক্রিয়াধীন হলে বাতিল করা যাবে না।"))
         }
 
+        // Strict Security Rule: Order CANNOT be Confirmed or Completed using buyer screenshot alone!
+        if (newStatus == OrderStatus.CONFIRMED || newStatus == OrderStatus.COMPLETED) {
+            if (!order.farmerPaymentConfirmed) {
+                return Result.failure(
+                    IllegalStateException("কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ ('টাকা বুঝে পেয়েছি') দেওয়ার আগে অর্ডার কনফার্ম বা সম্পন্ন হবে না।")
+                )
+            }
+            if (!order.adminPaymentVerified) {
+                return Result.failure(
+                    IllegalStateException("শুধু ক্রেতার পেমেন্ট রসিদ বা স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না — অ্যাডমিন পেমেন্ট যাচাই সম্পন্ন হতে হবে।")
+                )
+            }
+        }
+
         val wasActive = order.status != OrderStatus.CANCELLED.name && order.status != OrderStatus.REJECTED.name
         val restoringStock = wasActive && (newStatus == OrderStatus.CANCELLED || newStatus == OrderStatus.REJECTED)
         val restoredProducts = mutableListOf<ProductEntity>()
 
         db.withTransaction {
             db.orderDao().updateOrderStatus(orderId, newStatus.name, now)
-            if (newStatus == OrderStatus.COMPLETED && order.paymentStatus == "PENDING") {
+            if (newStatus == OrderStatus.COMPLETED && order.paymentStatus != "PAID") {
                 db.orderDao().updatePaymentDetails(orderId, "PAID", order.transactionReference, now)
             }
             if (restoringStock) {
@@ -714,13 +1561,32 @@ class MarketplaceRepository(
         val isFarmer = targetUser.role == UserRole.FARMER.name
         val roleTitle = if (isFarmer) "কৃষক" else "ক্রেতা"
         val status = if (approved) "VERIFIED" else "REJECTED"
+        val now = System.currentTimeMillis()
+        val settings = getEffectivePaymentSettings()
 
-        db.userDao().updateVerificationStatus(userId, status)
+        val updatedUser = if (approved) {
+            val act = if (targetUser.activationDate > 0L) targetUser.activationDate else now
+            val exp = if (targetUser.expiryDate > now) targetUser.expiryDate else addCalendarYears(now, settings.validityYears)
+            targetUser.copy(
+                verificationStatus = status,
+                accountStatus = AccountStatus.ACTIVE.name,
+                activationDate = act,
+                expiryDate = exp,
+                validityYears = settings.validityYears
+            )
+        } else {
+            targetUser.copy(
+                verificationStatus = status,
+                accountStatus = AccountStatus.PAYMENT_REJECTED.name
+            )
+        }
+
+        db.userDao().upsertUser(updatedUser)
         if (isFarmer) {
             db.productDao().updateFarmerVerifiedOnProducts(userId, approved)
             db.productDao().getProductsForFarmer(userId).forEach { rtdbSync.pushProduct(it) }
         }
-        db.userDao().getUserById(userId)?.let { rtdbSync.pushUser(it) }
+        rtdbSync.pushUser(updatedUser)
 
         val notif = NotificationEntity(
             id = "not_${UUID.randomUUID().toString().take(8)}",
@@ -728,11 +1594,11 @@ class MarketplaceRepository(
             targetRole = targetUser.role,
             senderRole = UserRole.ADMIN.name,
             type = "VERIFICATION",
-            titleBn = if (approved) "$roleTitle পরিচয় যাচাই সম্পন্ন" else "$roleTitle পরিচয় যাচাই প্রত্যাখ্যাত",
+            titleBn = if (approved) "$roleTitle পরিচয় যাচাই ও অ্যাকাউন্ট সক্রিয় সম্পন্ন" else "$roleTitle পরিচয় যাচাই প্রত্যাখ্যাত",
             messageBn = if (approved) {
-                "অভিনন্দন! আপনার $roleTitle অ্যাকাউন্টটি অ্যাডমিন কর্তৃক যাচাইকৃত হয়েছে।"
+                "অভিনন্দন! আপনার $roleTitle অ্যাকাউন্টটি অ্যাডমিন কর্তৃক যাচাইকৃত ও ২ বছরের জন্য সক্রিয় হয়েছে।"
             } else {
-                "অনুগ্রহ করে সঠিক তথ্য দিয়ে পুনরায় যাচাইয়ের জন্য আবেদন করুন।"
+                "অনুগ্রহ করে সঠিক তথ্য ও পেমেন্ট দিয়ে পুনরায় যাচাইয়ের জন্য আবেদন করুন।"
             },
             isRead = false
         )

@@ -12,15 +12,58 @@ enum class UserRole(val titleBn: String, val titleEn: String) {
 }
 
 enum class ProductUnit(val labelBn: String, val labelEn: String) {
-    KG("কেজি", "Kg"),
-    MON("মণ", "Maund"),
-    BAG("বস্তা", "Bag"),
-    TON("টন", "Ton"),
-    PIECE("পিস", "Piece"),
-    LITER("লিটার", "Liter");
+    MON("মণ", "Maund");
 
     companion object {
+        const val MON_TO_KG = 40
         val allLabelsBn: List<String> = entries.map { it.labelBn }
+        fun isAllowedUnit(unit: String?): Boolean {
+            val clean = unit?.trim().orEmpty()
+            return clean == "মণ" || clean == "মন" || clean.equals("MON", ignoreCase = true) || clean.equals("Maund", ignoreCase = true)
+        }
+    }
+}
+
+enum class AccountStatus(val labelBn: String, val labelEn: String) {
+    PENDING_REGISTRATION("নিবন্ধন অসম্পূর্ণ", "Pending Registration"),
+    PAYMENT_PENDING("পেমেন্ট অপেক্ষমান", "Payment Pending"),
+    PAYMENT_UNDER_REVIEW("পেমেন্ট যাচাইাধীন", "Payment Under Review"),
+    ACTIVE("সক্রিয় (Active)", "Active"),
+    PAYMENT_REJECTED("পেমেন্ট প্রত্যাখ্যাত", "Payment Rejected"),
+    EXPIRED("মেয়াদোত্তীর্ণ (Expired)", "Expired"),
+    SUSPENDED("স্থগিত (Suspended)", "Suspended");
+
+    fun display(lang: AppLanguage): String = if (lang == AppLanguage.BENGALI) labelBn else labelEn
+
+    companion object {
+        fun fromName(raw: String?): AccountStatus =
+            entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) } ?: PAYMENT_PENDING
+    }
+}
+
+enum class ActivationPaymentStatus(val labelBn: String, val labelEn: String) {
+    PENDING("অপেক্ষমান (Pending)", "Pending"),
+    APPROVED("অনুমোদিত (Approved)", "Approved"),
+    REJECTED("প্রত্যাখ্যাত (Rejected)", "Rejected"),
+    RESUBMISSION_REQUESTED("পুনরায় জমা প্রয়োজন", "Resubmission Requested");
+
+    fun display(lang: AppLanguage): String = if (lang == AppLanguage.BENGALI) labelBn else labelEn
+
+    companion object {
+        fun fromName(raw: String?): ActivationPaymentStatus =
+            entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) } ?: PENDING
+    }
+}
+
+enum class PaymentAccountType(val labelBn: String, val labelEn: String) {
+    PERSONAL("পার্সোনাল (Personal)", "Personal"),
+    MERCHANT("মার্চেন্ট (Merchant)", "Merchant");
+
+    fun display(lang: AppLanguage): String = if (lang == AppLanguage.BENGALI) labelBn else labelEn
+
+    companion object {
+        fun fromName(raw: String?): PaymentAccountType =
+            entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) } ?: PERSONAL
     }
 }
 
@@ -32,6 +75,7 @@ enum class OrderStatus(val labelBn: String, val labelEn: String) {
     READY_FOR_PICKUP("Ready for Pickup", "Ready for Pickup"),
     SHIPPED("Shipped", "Shipped"),
     DELIVERED("Delivered", "Delivered"),
+    CONFIRMED("Confirmed", "Confirmed"),
     COMPLETED("Completed", "Completed"),
     CANCELLED("Cancelled", "Cancelled"),
     DISPUTED("Disputed", "Disputed");
@@ -44,6 +88,7 @@ enum class OrderStatus(val labelBn: String, val labelEn: String) {
         READY_FOR_PICKUP -> if (lang == AppLanguage.BENGALI) "সংগ্রহের জন্য প্রস্তুত" else "Ready for Pickup"
         SHIPPED -> if (lang == AppLanguage.BENGALI) "পথে আছে (Shipped)" else "Shipped"
         DELIVERED -> if (lang == AppLanguage.BENGALI) "পৌঁছেছে (Delivered)" else "Delivered"
+        CONFIRMED -> if (lang == AppLanguage.BENGALI) "নিশ্চিতকৃত (Confirmed)" else "Confirmed"
         COMPLETED -> if (lang == AppLanguage.BENGALI) "সম্পন্ন (Completed)" else "Completed"
         CANCELLED -> if (lang == AppLanguage.BENGALI) "বাতিল (Cancelled)" else "Cancelled"
         DISPUTED -> if (lang == AppLanguage.BENGALI) "বিরোধপূর্ণ (Disputed)" else "Disputed"
@@ -92,7 +137,14 @@ data class AdminDashboardStats(
     val todaysOrders: Int = 0,
     val completedOrders: Int = 0,
     val totalSalesAmount: Double = 0.0,
-    val districtSales: Map<String, Double> = emptyMap()
+    val districtSales: Map<String, Double> = emptyMap(),
+    val pendingActivationPayments: Int = 0,
+    val approvedActivationPayments: Int = 0,
+    val rejectedActivationPayments: Int = 0,
+    val activeAccounts: Int = 0,
+    val expiredAccounts: Int = 0,
+    val suspendedAccounts: Int = 0,
+    val pendingOrderPaymentVerifications: Int = 0
 )
 
 data class AdConfig(

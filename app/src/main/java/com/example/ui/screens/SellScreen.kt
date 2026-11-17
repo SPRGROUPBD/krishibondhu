@@ -54,6 +54,7 @@ fun SellScreen(
     uiState: MarketplaceUiState,
     onLoginFarmer: () -> Unit,
     onRegisterFarmer: () -> Unit,
+    onOpenActivation: () -> Unit = {},
     onAddProduct: (
         category: CategoryEntity,
         nameBn: String,
@@ -105,7 +106,7 @@ fun SellScreen(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "কৃষি বন্ধুতে পণ্যের দাম কৃষক নিজেই নির্ধারণ করেন। কোনো বাধ্যতামূলক কমিশন নেই। ফসল বিক্রি করতে কৃষক হিসেবে লগইন করুন অথবা নতুন নিবন্ধন করুন।",
+                            text = "কৃষি বন্ধুতে ফসল বিক্রি হয় শুধুমাত্র মণ হিসেবে (১ মণ = ৪০ কেজি)। পণ্যের দাম কৃষক নিজেই নির্ধারণ করেন।",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -136,9 +137,10 @@ fun SellScreen(
         return
     }
 
+    val isFarmerActive = activeUser.isMarketplaceActive()
     val myProducts = uiState.products.filter { it.farmerId == activeUser.id }
     val myOrders = uiState.orders.filter { it.farmerId == activeUser.id }
-    val totalSales = myOrders.filter { it.status == OrderStatus.COMPLETED.name }.sumOf { it.productTotal }
+    val totalSales = myOrders.filter { it.status == OrderStatus.COMPLETED.name || it.status == OrderStatus.CONFIRMED.name }.sumOf { it.productTotal }
 
     var showAddForm by remember { mutableStateOf(false) }
     var editingProduct by remember { mutableStateOf<ProductEntity?>(null) }
@@ -169,11 +171,16 @@ fun SellScreen(
                             Icon(Icons.Filled.Verified, contentDescription = "যাচাইকৃত", tint = Color(0xFF4ADE80))
                         }
                     }
+                    val locLine = listOf(activeUser.unionName, activeUser.upazila, activeUser.district)
+                        .filter { it.isNotBlank() }
+                        .joinToString(", ")
                     Text(
-                        text = "${activeUser.upazila}, ${activeUser.district} • মোবাইল: ${activeUser.phone}",
+                        text = "$locLine • মোবাইল: ${activeUser.phone}",
                         style = MaterialTheme.typography.bodySmall,
                         color = LightGreen
                     )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    com.example.ui.components.AccountStatusBadge(activeUser.accountStatus, activeUser.expiryDate, lang)
                     Spacer(modifier = Modifier.height(12.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -187,33 +194,67 @@ fun SellScreen(
             }
         }
 
-        // Toggle Add Product Form
-        item {
-            Button(
-                onClick = { showAddForm = !showAddForm },
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .testTag("toggle_add_product_button")
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(if (showAddForm) "ফর্ম বন্ধ করুন" else "নতুন ফসল যুক্ত করুন (Add Product)")
-            }
-        }
-
-        if (showAddForm) {
+        // Active Account Gate Banner
+        if (!isFarmerActive) {
             item {
-                AddProductFormCard(
-                    categories = uiState.categories.filter { it.isActive },
-                    defaultAddress = "${activeUser.village}, ${activeUser.upazila}, ${activeUser.district}",
-                    defaultDistrict = activeUser.district.ifBlank { "কুষ্টিয়া" },
-                    onSubmit = { cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, delivery, fee, wholesale ->
-                        onAddProduct(cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, delivery, fee, wholesale)
-                        showAddForm = false
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = com.example.ui.theme.HarvestGoldLight),
+                    border = BorderStroke(1.dp, com.example.ui.theme.HarvestGold),
+                    modifier = Modifier.testTag("sell_activation_gate_banner")
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "ফসল প্রকাশ ও সম্পাদনার জন্য অ্যাকাউন্ট সক্রিয় করুন",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF78350F)
+                        )
+                        Text(
+                            text = "আপনার অ্যাকাউন্টের বর্তমান অবস্থা: ${AccountStatus.fromName(activeUser.accountStatus).display(lang)}। ৩০০ টাকা দিয়ে ২ বছরের জন্য অ্যাকাউন্ট সক্রিয়/রিনিউ করলে ফসল প্রকাশ ও দাম আপডেট করতে পারবেন।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF78350F)
+                        )
+                        Button(
+                            onClick = onOpenActivation,
+                            modifier = Modifier.fillMaxWidth().testTag("sell_go_activation_button")
+                        ) {
+                            Text("অ্যাকাউন্ট সক্রিয় / রিনিউ করুন (৩০০৳)", fontWeight = FontWeight.Bold)
+                        }
                     }
-                )
+                }
+            }
+        } else {
+            // Toggle Add Product Form
+            item {
+                Button(
+                    onClick = { showAddForm = !showAddForm },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("toggle_add_product_button")
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (showAddForm) "ফর্ম বন্ধ করুন" else "নতুন ফসল যুক্ত করুন (মণ হিসেবে)")
+                }
+            }
+
+            if (showAddForm) {
+                item {
+                    AddProductFormCard(
+                        categories = uiState.categories.filter { it.isActive },
+                        defaultAddress = listOf(activeUser.village, activeUser.unionName, activeUser.upazila, activeUser.district)
+                            .filter { it.isNotBlank() }
+                            .joinToString(", "),
+                        defaultDistrict = activeUser.district.ifBlank { "কুষ্টিয়া" },
+                        onSubmit = { cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, delivery, fee, wholesale ->
+                            onAddProduct(cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, delivery, fee, wholesale)
+                            showAddForm = false
+                        }
+                    )
+                }
             }
         }
 
@@ -230,7 +271,7 @@ fun SellScreen(
                 EmptyStateView(
                     emoji = "🌱",
                     title = "আপনার কোনো ফসল এখনো যুক্ত করা হয়নি",
-                    subtitle = "উপরের বাটনে ট্যাপ করে প্রথম ফসল যোগ করুন।"
+                    subtitle = if (isFarmerActive) "উপরের বাটনে ট্যাপ করে প্রথম ফসল যোগ করুন।" else "অ্যাকাউন্ট সক্রিয় হলে এখান থেকে ফসল যোগ করতে পারবেন।"
                 )
             }
         } else {
@@ -249,7 +290,7 @@ fun SellScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(prod.nameBn, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text(
-                                text = "${prod.pricePerUnit.formatBdt()}/${prod.unit} • মজুত: ${prod.availableQuantity.formatQty()} ${prod.unit}",
+                                text = "${prod.pricePerUnit.formatBdt()}/মণ • মজুত: ${prod.availableQuantity.formatQty()} মণ",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold
@@ -260,11 +301,13 @@ fun SellScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        FilledTonalIconButton(
-                            onClick = { editingProduct = prod },
-                            modifier = Modifier.testTag("edit_product_${prod.id}")
-                        ) {
-                            Icon(Icons.Filled.Edit, contentDescription = "দাম ও মজুত সম্পাদনা")
+                        if (isFarmerActive) {
+                            FilledTonalIconButton(
+                                onClick = { editingProduct = prod },
+                                modifier = Modifier.testTag("edit_product_${prod.id}")
+                            ) {
+                                Icon(Icons.Filled.Edit, contentDescription = "দাম ও মজুত সম্পাদনা")
+                            }
                         }
                     }
                 }
@@ -318,8 +361,8 @@ private fun AddProductFormCard(
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
     var showMapDialog by remember { mutableStateOf(false) }
     var mediaHint by remember { mutableStateOf<String?>(null) }
-    var qtyText by remember { mutableStateOf("20") }
-    var selectedUnit by remember { mutableStateOf(ProductUnit.KG.labelBn) }
+    var qtyText by remember { mutableStateOf("10") }
+    val selectedUnit = ProductUnit.MON.labelBn // শুধুমাত্র মণ (১ মণ = ৪০ কেজি)
     var priceText by remember { mutableStateOf("") }
     var harvestDate by remember { mutableStateOf("আজই সংগ্রহ") }
     var availDate by remember { mutableStateOf("আজই পাওয়া যাবে") }
@@ -339,19 +382,16 @@ private fun AddProductFormCard(
         }
     }
 
-    // 1. Play Policy compliant zero-permission Android Photo Picker
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
         onResult = { uri -> if (uri != null) handleSelectedImageUri(uri) }
     )
 
-    // 2. Play Policy compliant zero-permission Files / Storage Access Framework picker
     val fileDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri -> if (uri != null) handleSelectedImageUri(uri) }
     )
 
-    // 3. Camera Capture via FileProvider + runtime CAMERA permission
     val cameraTakePictureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
@@ -398,9 +438,8 @@ private fun AddProductFormCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("নতুন ফসলের তথ্য দিন", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("নতুন ফসলের তথ্য দিন (বিক্রয়ের একক: মণ)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
-            // Camera + Photo Picker + Files Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -484,7 +523,7 @@ private fun AddProductFormCard(
                 value = nameBn,
                 onValueChange = { nameBn = it },
                 label = { Text("ফসলের নাম *") },
-                placeholder = { Text("যেমন: খাঁটি মিনিকেট চাল") },
+                placeholder = { Text("যেমন: ধান / আলু / পেঁয়াজ") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().testTag("add_product_name_input")
             )
@@ -499,31 +538,51 @@ private fun AddProductFormCard(
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
-                    value = priceText,
-                    onValueChange = { priceText = it },
-                    label = { Text("দাম (৳/${selectedUnit}) *") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                    modifier = Modifier.weight(1f).testTag("add_product_price_input")
-                )
-                OutlinedTextField(
                     value = qtyText,
                     onValueChange = { qtyText = it },
-                    label = { Text("মজুত পরিমাণ *") },
+                    label = { Text("পরিমাণ (মণ) *") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     modifier = Modifier.weight(1f).testTag("add_product_qty_input")
                 )
+                OutlinedTextField(
+                    value = priceText,
+                    onValueChange = { priceText = it },
+                    label = { Text("প্রতি মণের দাম (৳) *") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                    modifier = Modifier.weight(1f).testTag("add_product_price_input")
+                )
             }
 
-            Text("একক (Unit)", style = MaterialTheme.typography.labelLarge)
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(ProductUnit.allLabelsBn) { u ->
-                    FilterChip(
-                        selected = selectedUnit == u,
-                        onClick = { selectedUnit = u },
-                        label = { Text(u) }
+            val priceVal = priceText.toDoubleOrNull() ?: 0.0
+            val qtyVal = qtyText.toDoubleOrNull() ?: 0.0
+            Surface(
+                color = LightGreen,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "বিক্রয়ের একক: মণ (বাংলাদেশ মানদণ্ড: ১ মণ = ${ProductUnit.MON_TO_KG} কেজি)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkGreen
                     )
+                    if (qtyVal > 0 && priceVal > 0) {
+                        Text(
+                            text = "মোট বিক্রয় মূল্য: ${(qtyVal * priceVal).formatBdt()} (${qtyVal.formatQty()} মণ × ${priceVal.formatBdt()}/মণ)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = PrimaryGreen
+                        )
+                        Text(
+                            text = "সমতুল্য মোট ওজন: ${(qtyVal * ProductUnit.MON_TO_KG).formatQty()} কেজি",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = DarkGreen
+                        )
+                    }
                 }
             }
 
@@ -599,16 +658,14 @@ private fun AddProductFormCard(
                 Text(if (isWholesale) "পাইকারি বিক্রি (Wholesale)" else "খুচরা বিক্রি (Retail)")
             }
 
-            val priceVal = priceText.toDoubleOrNull()
-            val qtyVal = qtyText.toDoubleOrNull()
-            val canSubmit = selectedCategory != null && nameBn.isNotBlank() && priceVal != null && priceVal > 0 && qtyVal != null && qtyVal > 0
+            val canSubmit = selectedCategory != null && nameBn.isNotBlank() && priceVal > 0 && qtyVal > 0
 
             Button(
                 onClick = {
                     val cat = selectedCategory ?: return@Button
                     onSubmit(
                         cat, nameBn, descBn.ifBlank { "$nameBn — সরাসরি কৃষকের ক্ষেত থেকে।" },
-                        imageUri, qtyVal ?: 1.0, selectedUnit, priceVal ?: 1.0,
+                        imageUri, qtyVal, selectedUnit, priceVal,
                         harvestDate, availDate, pickupAddress, supportsPickup, supportsDelivery,
                         deliveryFeeText.toDoubleOrNull() ?: 60.0, isWholesale
                     )
@@ -619,7 +676,7 @@ private fun AddProductFormCard(
                     .height(50.dp)
                     .testTag("submit_add_product_button")
             ) {
-                Text("ফসল প্রকাশ করুন", fontWeight = FontWeight.Bold)
+                Text("ফসল প্রকাশ করুন (মণ হিসেবে)", fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -650,18 +707,18 @@ private fun EditPriceStockDialog(
         title = { Text("দাম ও মজুত আপডেট (${product.nameBn})") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("কৃষক হিসেবে আপনি যেকোনো সময় আপনার পণ্যের দাম ও মজুত পরিবর্তন করতে পারবেন।", style = MaterialTheme.typography.bodySmall)
+                Text("কৃষক হিসেবে আপনি প্রতি মণ (১ মণ = ৪০ কেজি) দাম ও মজুত পরিবর্তন করতে পারবেন।", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = priceText,
                     onValueChange = { priceText = it },
-                    label = { Text("নতুন দাম (৳/${product.unit})") },
+                    label = { Text("প্রতি মণের নতুন দাম (৳/মণ)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true
                 )
                 OutlinedTextField(
                     value = stockText,
                     onValueChange = { stockText = it },
-                    label = { Text("বর্তমান মজুত (${product.unit})") },
+                    label = { Text("বর্তমান মজুত (মণ)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true
                 )

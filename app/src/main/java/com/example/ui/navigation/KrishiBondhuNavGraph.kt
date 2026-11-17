@@ -39,6 +39,7 @@ object Routes {
     const val SELL = "sell"
     const val ORDERS = "orders"
     const val PROFILE = "profile"
+    const val ACTIVATION = "activation"
     const val PRODUCT_DETAIL = "product/{productId}"
     const val FARMER_PROFILE = "farmer/{farmerId}"
     const val CART = "cart"
@@ -130,6 +131,17 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
         }
     }
 
+    val requireActiveAccountAction: () -> Unit = {
+        val currentUser = uiState.activeUser
+        if (currentUser == null) {
+            viewModel.showToast("এই সুবিধা পেতে অনুগ্রহ করে লগইন বা নিবন্ধন করুন")
+            navController.navigate(Routes.LOGIN)
+        } else {
+            viewModel.showToast("সুবিধাটি ব্যবহার করতে ৩০০ টাকা দিয়ে অ্যাকাউন্ট সক্রিয়/রিনিউ করুন")
+            navController.navigate(Routes.ACTIVATION)
+        }
+    }
+
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useNavigationRail = maxWidth >= 600.dp
 
@@ -145,6 +157,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         unreadNotifs = uiState.unreadNotificationCount,
                         activeRole = uiState.activeRole,
                         verificationStatus = uiState.activeUser?.verificationStatus ?: "",
+                        accountStatus = uiState.activeUser?.accountStatus ?: "",
                         onCartClick = { navController.navigate(Routes.CART) },
                         onNotificationsClick = { navController.navigate(Routes.NOTIFICATIONS) },
                         onLanguageToggle = { viewModel.toggleLanguage() }
@@ -311,7 +324,9 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onDivisionSelect = viewModel::setDivisionFilter,
                             onDistrictSelect = viewModel::setDistrictFilter,
                             onUpazilaSelect = viewModel::setUpazilaFilter,
-                            onLocationAutoSelect = viewModel::setLocationFilters,
+                            onUnionSelect = viewModel::setUnionFilter,
+                            onLocationAutoSelect = { div, dist, upz -> viewModel.setLocationFilters(div, dist, upz) },
+                            onUseMyLocation = viewModel::applyMyLocationFilter,
                             onWholesaleSelect = viewModel::setWholesaleFilter,
                             onSortSelect = viewModel::setPriceSort,
                             onResetFilters = viewModel::resetFilters,
@@ -334,7 +349,9 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onDivisionSelect = viewModel::setDivisionFilter,
                             onDistrictSelect = viewModel::setDistrictFilter,
                             onUpazilaSelect = viewModel::setUpazilaFilter,
-                            onLocationAutoSelect = viewModel::setLocationFilters,
+                            onUnionSelect = viewModel::setUnionFilter,
+                            onLocationAutoSelect = { div, dist, upz -> viewModel.setLocationFilters(div, dist, upz) },
+                            onUseMyLocation = viewModel::applyMyLocationFilter,
                             onWholesaleSelect = viewModel::setWholesaleFilter,
                             onSortSelect = viewModel::setPriceSort,
                             onResetFilters = viewModel::resetFilters,
@@ -353,6 +370,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             uiState = uiState,
                             onLoginFarmer = { navController.navigate(Routes.LOGIN) },
                             onRegisterFarmer = { navController.navigate(Routes.register(UserRole.FARMER)) },
+                            onOpenActivation = { navController.navigate(Routes.ACTIVATION) },
                             onAddProduct = { cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, deliv, fee, wholesale ->
                                 viewModel.addFarmerProduct(
                                     cat, name, desc, uri, qty, unit, price,
@@ -378,12 +396,28 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onOpenLogin = { navController.navigate(Routes.LOGIN) },
                             onOpenRegister = { navController.navigate(Routes.register(UserRole.BUYER)) },
                             onLogout = viewModel::logout,
+                            onOpenActivation = { navController.navigate(Routes.ACTIVATION) },
+                            onUpdateProfile = { name, div, dist, upz, union, village, bio, nid4, photoUri ->
+                                viewModel.updateProfile(name, div, dist, upz, union, village, bio, nid4, photoUri) {}
+                            },
                             onOpenAdminDashboard = { navController.navigate(Routes.ADMIN) },
                             onOpenNotifications = { navController.navigate(Routes.NOTIFICATIONS) },
                             onOpenInfo = { topic -> navController.navigate(Routes.info(topic)) },
                             onToggleLanguage = viewModel::toggleLanguage,
                             onToggleDarkMode = viewModel::setDarkMode,
                             onPermissionMessage = viewModel::showToast
+                        )
+                    }
+
+                    composable(Routes.ACTIVATION) {
+                        ActivationScreen(
+                            uiState = uiState,
+                            onBack = { navController.popBackStack() },
+                            onSubmitPayment = { method, sender, txId, amount, receiptUri, isRenewal ->
+                                viewModel.submitActivationPayment(method, sender, txId, amount, receiptUri, isRenewal)
+                            },
+                            onRequireLogin = { navController.navigate(Routes.LOGIN) },
+                            onCopyToast = viewModel::showToast
                         )
                     }
 
@@ -406,7 +440,9 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                     viewModel.addToCart(it, qty)
                                 }
                             },
-                            onGoToCart = { navController.navigate(Routes.CART) }
+                            onGoToCart = { navController.navigate(Routes.CART) },
+                            onOpenActivation = { navController.navigate(Routes.ACTIVATION) },
+                            onRequireActiveAccount = requireActiveAccountAction
                         )
                     }
 
@@ -421,7 +457,8 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 uiState.products.firstOrNull { it.id == pid }?.let {
                                     viewModel.addToCart(it, 1.0)
                                 }
-                            }
+                            },
+                            onRequireActiveAccount = requireActiveAccountAction
                         )
                     }
 
@@ -449,7 +486,8 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                         enabled = uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled
                                     )
                                 }
-                            }
+                            },
+                            onOpenActivation = { navController.navigate(Routes.ACTIVATION) }
                         )
                     }
 
@@ -461,6 +499,10 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             orderItemsFlow = viewModel.observeOrderItems(oid),
                             onBack = { navController.popBackStack() },
                             onUpdateStatus = { newStatus -> viewModel.updateOrderStatus(oid, newStatus) },
+                            onSubmitOrderPayment = { method, sender, txRef, receiptUri ->
+                                viewModel.submitOrderPayment(oid, method, sender, txRef, receiptUri)
+                            },
+                            onFarmerConfirmPaymentReceived = { viewModel.farmerConfirmPaymentReceived(oid) },
                             onSubmitReview = { prodId, rating, comment ->
                                 uiState.orders.firstOrNull { it.id == oid }?.let { ord ->
                                     viewModel.submitReview(ord, prodId, rating, comment)
@@ -478,6 +520,11 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 uiState = uiState,
                                 onBack = { navController.popBackStack() },
                                 onVerifyUser = viewModel::adminVerifyUser,
+                                onApproveActivationPayment = viewModel::adminApproveActivationPayment,
+                                onRejectActivationPayment = viewModel::adminRejectActivationPayment,
+                                onSetAccountStatus = viewModel::adminSetAccountStatus,
+                                onVerifyOrderPayment = viewModel::adminVerifyOrderPayment,
+                                onSavePaymentSettings = viewModel::adminSavePaymentSettings,
                                 onSendNotification = viewModel::adminSendNotification,
                                 onAddCategory = viewModel::adminAddCategory,
                                 onAddLocation = viewModel::adminAddLocation,
@@ -537,10 +584,10 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             uiState = uiState,
                             initialRole = initRole,
                             onBack = { navController.popBackStack() },
-                            onRegister = { name, phone, pass, role, division, dist, upazila, union, village, nid, bio ->
-                                viewModel.register(name, phone, pass, role, division, dist, upazila, union, village, nid, bio) {
-                                    navController.navigate(Routes.HOME) {
-                                        popUpTo(Routes.HOME) { inclusive = true }
+                            onRegister = { name, phone, pass, confirmPass, role, division, dist, upazila, union, village, nid, bio ->
+                                viewModel.register(name, phone, pass, confirmPass, role, division, dist, upazila, union, village, nid, bio) {
+                                    navController.navigate(Routes.ACTIVATION) {
+                                        popUpTo(Routes.HOME)
                                         launchSingleTop = true
                                     }
                                 }

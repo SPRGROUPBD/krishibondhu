@@ -256,6 +256,39 @@ class FirebaseRealtimeSyncManager(
 
             override fun onCancelled(error: DatabaseError) {}
         })
+
+        // 8. Activation Payments listener
+        root.child("activationPayments").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val payments = snapshot.children.mapNotNull { snapToActivationPayment(it) }
+                if (payments.isNotEmpty()) {
+                    scope.launch(Dispatchers.IO) {
+                        runCatching { localDb.activationPaymentDao().insertAll(payments) }
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "activationPayments listener cancelled: ${error.message}")
+            }
+        })
+
+        // 9. Payment Settings listener
+        root.child("paymentSettings").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (snapshot.exists()) {
+                    snapToPaymentSettings(snapshot)?.let { settings ->
+                        scope.launch(Dispatchers.IO) {
+                            runCatching { localDb.paymentSettingsDao().upsertSettings(settings) }
+                        }
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "paymentSettings listener cancelled: ${error.message}")
+            }
+        })
     }
 
     private fun itOrSelf(snap: DataSnapshot): DataSnapshot = snap
@@ -390,6 +423,21 @@ class FirebaseRealtimeSyncManager(
         rootObj.optJSONObject("adConfig")?.let { adObj ->
             jsonToAdConfig(adObj)?.let { onAdConfigChanged(it) }
         }
+
+        // 9. Activation Payments
+        rootObj.optJSONObject("activationPayments")?.let { payObj ->
+            val list = parseJsonMap(payObj) { id, obj -> jsonToActivationPayment(id, obj) }
+            if (list.isNotEmpty()) {
+                runCatching { localDb.activationPaymentDao().insertAll(list) }
+            }
+        }
+
+        // 10. Payment Settings
+        rootObj.optJSONObject("paymentSettings")?.let { psObj ->
+            jsonToPaymentSettings(psObj)?.let { settings ->
+                runCatching { localDb.paymentSettingsDao().upsertSettings(settings) }
+            }
+        }
     }
 
     /**
@@ -404,6 +452,18 @@ class FirebaseRealtimeSyncManager(
         localUsers.filter { !it.isDemoRecord && it.role != UserRole.ADMIN.name }.forEach { u ->
             if (!remoteUsersObj.has(u.id)) {
                 pushUser(u)
+            }
+        }
+        val remotePayStr = restGetJson("activationPayments.json")
+        if (remotePayStr != null) {
+            val remotePayObj = if (remotePayStr == "null") JSONObject() else runCatching { JSONObject(remotePayStr) }.getOrNull()
+            if (remotePayObj != null) {
+                val localPayments = runCatching { localDb.activationPaymentDao().getAllPaymentsOnce() }.getOrDefault(emptyList())
+                localPayments.forEach { pay ->
+                    if (!remotePayObj.has(pay.id)) {
+                        pushActivationPayment(pay)
+                    }
+                }
             }
         }
     }
@@ -533,6 +593,32 @@ class FirebaseRealtimeSyncManager(
         }
     }
 
+    suspend fun pushActivationPayment(payment: ActivationPaymentEntity) {
+        val map = activationPaymentToMap(payment)
+        pushNode("activationPayments/${payment.id}", map) { root ->
+            root.child("activationPayments").child(payment.id).setValue(map).await()
+        }
+    }
+
+    suspend fun pushPaymentSettings(settings: PaymentSettingsEntity) {
+        val map = paymentSettingsToMap(settings)
+        pushNode("paymentSettings", map) { root ->
+            root.child("paymentSettings").setValue(map).await()
+        }
+    }
+
+    suspend fun fetchAllActivationPayments(localDb: KrishiBondhuDatabase? = null): List<ActivationPaymentEntity> {
+        if (!enableRemoteSync) return emptyList()
+        val bodyStr = restGetJson("activationPayments.json") ?: return emptyList()
+        if (bodyStr == "null" || bodyStr.isBlank()) return emptyList()
+        val obj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return emptyList()
+        val list = parseJsonMap(obj) { id, pObj -> jsonToActivationPayment(id, pObj) }
+        if (localDb != null && list.isNotEmpty()) {
+            runCatching { localDb.activationPaymentDao().insertAll(list) }
+        }
+        return list
+    }
+
     private suspend fun pushNode(
         path: String,
         payloadMap: Map<String, Any?>,
@@ -637,18 +723,33 @@ class FirebaseRealtimeSyncManager(
         "isMobileVerified" to u.isMobileVerified,
         "rating" to u.rating,
         "reviewCount" to u.reviewCount,
-        "createdAt" to u.createdAt
+        "createdAt" to u.createdAt,
+        "accountStatus" to u.accountStatus,
+        "activationDate" to u.activationDate,
+        "expiryDate" to u.expiryDate,
+        "validityYears" to u.validityYears,
+        "lastPaymentId" to u.lastPaymentId
     )
+
+    private fun resolveAccountStatus(role: String, rawAccountStatus: String?, verificationStatus: String): String {
+        if (role == "ADMIN") return "ACTIVE"
+        val clean = rawAccountStatus?.trim().orEmpty()
+        if (clean.isNotBlank()) return clean
+        return if (verificationStatus == "VERIFIED") "ACTIVE" else "PAYMENT_PENDING"
+    }
 
     private fun snapToUser(s: DataSnapshot): UserEntity? {
         val id = s.str("id") ?: s.key ?: return null
         val phone = s.str("phone") ?: return null
+        val role = s.str("role") ?: "BUYER"
+        val verificationStatus = s.str("verificationStatus") ?: "PENDING"
+        val resolvedAccountStatus = resolveAccountStatus(role, s.str("accountStatus"), verificationStatus)
         return UserEntity(
             id = id,
             fullName = s.str("fullName") ?: "",
             phone = SecurityHashUtil.normalizePhone(phone),
             passwordHash = s.str("passwordHash") ?: "",
-            role = s.str("role") ?: "BUYER",
+            role = role,
             division = s.str("division") ?: "ঢাকা",
             district = s.str("district") ?: "ঢাকা",
             upazila = s.str("upazila") ?: "",
@@ -657,12 +758,17 @@ class FirebaseRealtimeSyncManager(
             farmBio = s.str("farmBio") ?: "",
             nidMasked = s.str("nidMasked") ?: "",
             profileImageUri = s.str("profileImageUri") ?: "",
-            verificationStatus = s.str("verificationStatus") ?: "PENDING",
+            verificationStatus = verificationStatus,
             isMobileVerified = s.bool("isMobileVerified") ?: s.bool("mobileVerified") ?: false,
             rating = s.dbl("rating") ?: 5.0,
             reviewCount = (s.lng("reviewCount") ?: 0L).toInt(),
             createdAt = s.lng("createdAt") ?: System.currentTimeMillis(),
-            isDemoRecord = false
+            isDemoRecord = false,
+            accountStatus = resolvedAccountStatus,
+            activationDate = s.lng("activationDate") ?: 0L,
+            expiryDate = s.lng("expiryDate") ?: 0L,
+            validityYears = (s.lng("validityYears") ?: 2L).toInt().coerceAtLeast(1),
+            lastPaymentId = s.str("lastPaymentId") ?: ""
         )
     }
 
@@ -670,12 +776,15 @@ class FirebaseRealtimeSyncManager(
         val id = o.optString("id", key).ifBlank { key }
         val phoneRaw = o.optString("phone", "")
         if (phoneRaw.isBlank()) return null
+        val role = o.optString("role", "BUYER")
+        val verificationStatus = o.optString("verificationStatus", "PENDING")
+        val resolvedAccountStatus = resolveAccountStatus(role, o.optString("accountStatus", ""), verificationStatus)
         return UserEntity(
             id = id,
             fullName = o.optString("fullName", ""),
             phone = SecurityHashUtil.normalizePhone(phoneRaw),
             passwordHash = o.optString("passwordHash", ""),
-            role = o.optString("role", "BUYER"),
+            role = role,
             division = o.optString("division", "ঢাকা"),
             district = o.optString("district", "ঢাকা"),
             upazila = o.optString("upazila", ""),
@@ -684,12 +793,17 @@ class FirebaseRealtimeSyncManager(
             farmBio = o.optString("farmBio", ""),
             nidMasked = o.optString("nidMasked", ""),
             profileImageUri = o.optString("profileImageUri", ""),
-            verificationStatus = o.optString("verificationStatus", "PENDING"),
+            verificationStatus = verificationStatus,
             isMobileVerified = o.optBoolean("isMobileVerified", o.optBoolean("mobileVerified", false)),
             rating = o.optDouble("rating", 5.0).takeUnless { it.isNaN() } ?: 5.0,
             reviewCount = o.optInt("reviewCount", 0),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
-            isDemoRecord = false
+            isDemoRecord = false,
+            accountStatus = resolvedAccountStatus,
+            activationDate = o.optLong("activationDate", 0L),
+            expiryDate = o.optLong("expiryDate", 0L),
+            validityYears = o.optInt("validityYears", 2).coerceAtLeast(1),
+            lastPaymentId = o.optString("lastPaymentId", "")
         )
     }
 
@@ -821,7 +935,7 @@ class FirebaseRealtimeSyncManager(
             descriptionBn = s.str("descriptionBn") ?: "",
             imageUri = s.str("imageUri") ?: "",
             availableQuantity = s.dbl("availableQuantity") ?: 0.0,
-            unit = s.str("unit") ?: "কেজি",
+            unit = "মণ",
             pricePerUnit = s.dbl("pricePerUnit") ?: 0.0,
             harvestDate = s.str("harvestDate") ?: "",
             availabilityDate = s.str("availabilityDate") ?: "",
@@ -860,7 +974,7 @@ class FirebaseRealtimeSyncManager(
             descriptionBn = o.optString("descriptionBn", ""),
             imageUri = o.optString("imageUri", ""),
             availableQuantity = o.optDouble("availableQuantity", 0.0).takeUnless { it.isNaN() } ?: 0.0,
-            unit = o.optString("unit", "কেজি"),
+            unit = "মণ",
             pricePerUnit = o.optDouble("pricePerUnit", 0.0).takeUnless { it.isNaN() } ?: 0.0,
             harvestDate = o.optString("harvestDate", ""),
             availabilityDate = o.optString("availabilityDate", ""),
@@ -906,6 +1020,13 @@ class FirebaseRealtimeSyncManager(
         "itemsSummary" to o.itemsSummary,
         "createdAt" to o.createdAt,
         "updatedAt" to o.updatedAt,
+        "paymentSenderNumber" to o.paymentSenderNumber,
+        "paymentReceiptUri" to o.paymentReceiptUri,
+        "farmerPaymentConfirmed" to o.farmerPaymentConfirmed,
+        "farmerPaymentConfirmedAt" to o.farmerPaymentConfirmedAt,
+        "adminPaymentVerified" to o.adminPaymentVerified,
+        "adminPaymentVerifiedBy" to o.adminPaymentVerifiedBy,
+        "adminPaymentVerifiedAt" to o.adminPaymentVerifiedAt,
         "items" to items.associate { it.id to orderItemToMap(it) }
     )
 
@@ -947,7 +1068,14 @@ class FirebaseRealtimeSyncManager(
             itemsSummary = s.str("itemsSummary") ?: "",
             createdAt = s.lng("createdAt") ?: System.currentTimeMillis(),
             updatedAt = s.lng("updatedAt") ?: System.currentTimeMillis(),
-            isDemoRecord = false
+            isDemoRecord = false,
+            paymentSenderNumber = s.str("paymentSenderNumber") ?: "",
+            paymentReceiptUri = s.str("paymentReceiptUri") ?: "",
+            farmerPaymentConfirmed = s.bool("farmerPaymentConfirmed") ?: false,
+            farmerPaymentConfirmedAt = s.lng("farmerPaymentConfirmedAt") ?: 0L,
+            adminPaymentVerified = s.bool("adminPaymentVerified") ?: false,
+            adminPaymentVerifiedBy = s.str("adminPaymentVerifiedBy") ?: "",
+            adminPaymentVerifiedAt = s.lng("adminPaymentVerifiedAt") ?: 0L
         )
     }
 
@@ -979,7 +1107,14 @@ class FirebaseRealtimeSyncManager(
             itemsSummary = o.optString("itemsSummary", ""),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
-            isDemoRecord = false
+            isDemoRecord = false,
+            paymentSenderNumber = o.optString("paymentSenderNumber", ""),
+            paymentReceiptUri = o.optString("paymentReceiptUri", ""),
+            farmerPaymentConfirmed = o.optBoolean("farmerPaymentConfirmed", false),
+            farmerPaymentConfirmedAt = o.optLong("farmerPaymentConfirmedAt", 0L),
+            adminPaymentVerified = o.optBoolean("adminPaymentVerified", false),
+            adminPaymentVerifiedBy = o.optString("adminPaymentVerifiedBy", ""),
+            adminPaymentVerifiedAt = o.optLong("adminPaymentVerifiedAt", 0L)
         )
     }
 
@@ -991,7 +1126,7 @@ class FirebaseRealtimeSyncManager(
             orderId = s.str("orderId") ?: orderId,
             productId = productId,
             productNameBn = s.str("productNameBn") ?: "",
-            unit = s.str("unit") ?: "কেজি",
+            unit = s.str("unit") ?: "মণ",
             quantity = s.dbl("quantity") ?: 0.0,
             pricePerUnit = s.dbl("pricePerUnit") ?: 0.0,
             lineTotal = s.dbl("lineTotal") ?: 0.0
@@ -1007,7 +1142,7 @@ class FirebaseRealtimeSyncManager(
             orderId = o.optString("orderId", orderId).ifBlank { orderId },
             productId = productId,
             productNameBn = o.optString("productNameBn", ""),
-            unit = o.optString("unit", "কেজি"),
+            unit = o.optString("unit", "মণ"),
             quantity = o.optDouble("quantity", 0.0).takeUnless { it.isNaN() } ?: 0.0,
             pricePerUnit = o.optDouble("pricePerUnit", 0.0).takeUnless { it.isNaN() } ?: 0.0,
             lineTotal = o.optDouble("lineTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0
@@ -1290,6 +1425,136 @@ class FirebaseRealtimeSyncManager(
             sponsorImageUrl = o.optString("sponsorImageUrl", ""),
             sponsorTargetUrl = o.optString("sponsorTargetUrl", ""),
             sponsorCtaText = o.optString("sponsorCtaText", "বিস্তারিত দেখুন"),
+            updatedAt = o.optLong("updatedAt", 0L)
+        )
+    }.getOrNull()
+
+    private fun activationPaymentToMap(p: ActivationPaymentEntity): Map<String, Any?> = mapOf(
+        "id" to p.id,
+        "userId" to p.userId,
+        "userName" to p.userName,
+        "userPhone" to p.userPhone,
+        "accountRole" to p.accountRole,
+        "paymentType" to p.paymentType,
+        "paymentMethod" to p.paymentMethod,
+        "receiverNumber" to p.receiverNumber,
+        "receiverAccountType" to p.receiverAccountType,
+        "senderMobile" to p.senderMobile,
+        "transactionId" to p.transactionId,
+        "amount" to p.amount,
+        "receiptUri" to p.receiptUri,
+        "status" to p.status,
+        "adminNotes" to p.adminNotes,
+        "reviewedBy" to p.reviewedBy,
+        "reviewedAt" to p.reviewedAt,
+        "createdAt" to p.createdAt,
+        "updatedAt" to p.updatedAt
+    )
+
+    private fun snapToActivationPayment(s: DataSnapshot): ActivationPaymentEntity? {
+        val id = s.str("id") ?: s.key ?: return null
+        val userId = s.str("userId") ?: return null
+        return ActivationPaymentEntity(
+            id = id,
+            userId = userId,
+            userName = s.str("userName") ?: "",
+            userPhone = s.str("userPhone") ?: "",
+            accountRole = s.str("accountRole") ?: "BUYER",
+            paymentType = s.str("paymentType") ?: "ACTIVATION",
+            paymentMethod = s.str("paymentMethod") ?: "BKASH",
+            receiverNumber = s.str("receiverNumber") ?: "01756144900",
+            receiverAccountType = s.str("receiverAccountType") ?: "PERSONAL",
+            senderMobile = s.str("senderMobile") ?: "",
+            transactionId = s.str("transactionId") ?: "",
+            amount = s.dbl("amount") ?: 300.0,
+            receiptUri = s.str("receiptUri") ?: "",
+            status = s.str("status") ?: "PENDING",
+            adminNotes = s.str("adminNotes") ?: "",
+            reviewedBy = s.str("reviewedBy") ?: "",
+            reviewedAt = s.lng("reviewedAt") ?: 0L,
+            createdAt = s.lng("createdAt") ?: System.currentTimeMillis(),
+            updatedAt = s.lng("updatedAt") ?: System.currentTimeMillis()
+        )
+    }
+
+    private fun jsonToActivationPayment(key: String, o: JSONObject): ActivationPaymentEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val userId = o.optString("userId", "")
+        if (userId.isBlank()) return null
+        return ActivationPaymentEntity(
+            id = id,
+            userId = userId,
+            userName = o.optString("userName", ""),
+            userPhone = o.optString("userPhone", ""),
+            accountRole = o.optString("accountRole", "BUYER"),
+            paymentType = o.optString("paymentType", "ACTIVATION"),
+            paymentMethod = o.optString("paymentMethod", "BKASH"),
+            receiverNumber = o.optString("receiverNumber", "01756144900"),
+            receiverAccountType = o.optString("receiverAccountType", "PERSONAL"),
+            senderMobile = o.optString("senderMobile", ""),
+            transactionId = o.optString("transactionId", ""),
+            amount = o.optDouble("amount", 300.0).takeUnless { it.isNaN() } ?: 300.0,
+            receiptUri = o.optString("receiptUri", ""),
+            status = o.optString("status", "PENDING"),
+            adminNotes = o.optString("adminNotes", ""),
+            reviewedBy = o.optString("reviewedBy", ""),
+            reviewedAt = o.optLong("reviewedAt", 0L),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
+        )
+    }
+
+    private fun paymentSettingsToMap(ps: PaymentSettingsEntity): Map<String, Any?> = mapOf(
+        "id" to ps.id,
+        "bKashNumber" to ps.bKashNumber,
+        "bKashAccountType" to ps.bKashAccountType,
+        "nagadNumber" to ps.nagadNumber,
+        "nagadAccountType" to ps.nagadAccountType,
+        "farmerFee" to ps.farmerFee,
+        "buyerFee" to ps.buyerFee,
+        "renewalFee" to ps.renewalFee,
+        "validityYears" to ps.validityYears,
+        "paymentInstructions" to ps.paymentInstructions,
+        "notify30Days" to ps.notify30Days,
+        "notify7Days" to ps.notify7Days,
+        "notifyOnExpiry" to ps.notifyOnExpiry,
+        "updatedAt" to ps.updatedAt
+    )
+
+    private fun snapToPaymentSettings(s: DataSnapshot): PaymentSettingsEntity? = runCatching {
+        PaymentSettingsEntity(
+            id = "default",
+            bKashNumber = s.str("bKashNumber") ?: "01756144900",
+            bKashAccountType = s.str("bKashAccountType") ?: "PERSONAL",
+            nagadNumber = s.str("nagadNumber") ?: "01756144900",
+            nagadAccountType = s.str("nagadAccountType") ?: "PERSONAL",
+            farmerFee = s.dbl("farmerFee") ?: 300.0,
+            buyerFee = s.dbl("buyerFee") ?: 300.0,
+            renewalFee = s.dbl("renewalFee") ?: 300.0,
+            validityYears = (s.lng("validityYears") ?: 2L).toInt().coerceAtLeast(1),
+            paymentInstructions = s.str("paymentInstructions") ?: PaymentSettingsEntity().paymentInstructions,
+            notify30Days = s.bool("notify30Days") ?: true,
+            notify7Days = s.bool("notify7Days") ?: true,
+            notifyOnExpiry = s.bool("notifyOnExpiry") ?: true,
+            updatedAt = s.lng("updatedAt") ?: 0L
+        )
+    }.getOrNull()
+
+    private fun jsonToPaymentSettings(o: JSONObject): PaymentSettingsEntity? = runCatching {
+        PaymentSettingsEntity(
+            id = "default",
+            bKashNumber = o.optString("bKashNumber", "01756144900").ifBlank { "01756144900" },
+            bKashAccountType = o.optString("bKashAccountType", "PERSONAL").ifBlank { "PERSONAL" },
+            nagadNumber = o.optString("nagadNumber", "01756144900").ifBlank { "01756144900" },
+            nagadAccountType = o.optString("nagadAccountType", "PERSONAL").ifBlank { "PERSONAL" },
+            farmerFee = o.optDouble("farmerFee", 300.0).takeUnless { it.isNaN() } ?: 300.0,
+            buyerFee = o.optDouble("buyerFee", 300.0).takeUnless { it.isNaN() } ?: 300.0,
+            renewalFee = o.optDouble("renewalFee", 300.0).takeUnless { it.isNaN() } ?: 300.0,
+            validityYears = o.optInt("validityYears", 2).coerceAtLeast(1),
+            paymentInstructions = o.optString("paymentInstructions", PaymentSettingsEntity().paymentInstructions),
+            notify30Days = o.optBoolean("notify30Days", true),
+            notify7Days = o.optBoolean("notify7Days", true),
+            notifyOnExpiry = o.optBoolean("notifyOnExpiry", true),
             updatedAt = o.optLong("updatedAt", 0L)
         )
     }.getOrNull()

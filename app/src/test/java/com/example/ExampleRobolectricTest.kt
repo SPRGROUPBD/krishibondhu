@@ -5,11 +5,16 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.KrishiBondhuDatabase
 import com.example.data.local.MasterCatalogSeeder
+import com.example.data.local.PaymentSettingsEntity
+import com.example.data.local.UserEntity
 import com.example.data.local.UserPreferences
+import com.example.data.model.AccountStatus
+import com.example.data.model.ActivationPaymentStatus
 import com.example.data.model.BangladeshLocations
 import com.example.data.model.DeliveryOption
 import com.example.data.model.OrderStatus
 import com.example.data.model.PaymentMethod
+import com.example.data.model.ProductUnit
 import com.example.data.model.UserRole
 import com.example.data.remote.FirebaseRealtimeSyncManager
 import com.example.data.repository.MarketplaceRepository
@@ -22,6 +27,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.Calendar
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -40,13 +46,17 @@ class ExampleRobolectricTest {
         repo = MarketplaceRepository(
             db = db,
             prefs = UserPreferences(context),
-            rtdbSync = FirebaseRealtimeSyncManager()
+            rtdbSync = FirebaseRealtimeSyncManager(enableRemoteSync = false)
         )
     }
 
     @After
     fun teardown() {
         db.close()
+    }
+
+    private suspend fun activateAsAdmin(admin: UserEntity, user: UserEntity): UserEntity {
+        return repo.adminSetAccountStatus(admin, user.id, AccountStatus.ACTIVE).getOrThrow()
     }
 
     @Test
@@ -110,50 +120,60 @@ class ExampleRobolectricTest {
     @Test
     fun checkoutSplitsOrdersSendsFarmerNotificationAndRestoresStockOnCancelOrReject() = runBlocking {
         MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
         val categories = repo.categories.first()
         val riceCat = categories.first()
 
-        val farmer1 = repo.registerUser(
-            fullName = "কৃষক ১",
-            phone = "01711000001",
-            rawPassword = "pass1234",
-            role = UserRole.FARMER,
-            division = "খুলনা",
-            district = "কুষ্টিয়া",
-            upazila = "কুমারখালী",
-            unionName = "বাঁশগ্রাম",
-            village = "শিমুলিয়া",
-            nidLastFour = "1234",
-            farmBio = "ধান চাষি"
-        ).getOrThrow()
+        val farmer1 = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "কৃষক ১",
+                phone = "01711000001",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "কুমারখালী",
+                unionName = "বাঁশগ্রাম",
+                village = "শিমুলিয়া",
+                nidLastFour = "1234",
+                farmBio = "ধান চাষি"
+            ).getOrThrow()
+        )
 
-        val farmer2 = repo.registerUser(
-            fullName = "কৃষক ২",
-            phone = "01711000002",
-            rawPassword = "pass1234",
-            role = UserRole.FARMER,
-            division = "রাজশাহী",
-            district = "বগুড়া",
-            upazila = "বগুড়া সদর",
-            unionName = "নুনগোলা",
-            village = "চরপাড়া",
-            nidLastFour = "5678",
-            farmBio = "সবজি চাষি"
-        ).getOrThrow()
+        val farmer2 = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "কৃষক ২",
+                phone = "01711000002",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "রাজশাহী",
+                district = "বগুড়া",
+                upazila = "বগুড়া সদর",
+                unionName = "নুনগোলা",
+                village = "চরপাড়া",
+                nidLastFour = "5678",
+                farmBio = "সবজি চাষি"
+            ).getOrThrow()
+        )
 
-        val buyer = repo.registerUser(
-            fullName = "ক্রেতা ১",
-            phone = "01811000003",
-            rawPassword = "pass1234",
-            role = UserRole.BUYER,
-            division = "ঢাকা",
-            district = "ঢাকা",
-            upazila = "সাভার",
-            unionName = "",
-            village = "",
-            nidLastFour = "",
-            farmBio = ""
-        ).getOrThrow()
+        val buyer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "ক্রেতা ১",
+                phone = "01811000003",
+                rawPassword = "pass1234",
+                role = UserRole.BUYER,
+                division = "ঢাকা",
+                district = "ঢাকা",
+                upazila = "সাভার",
+                unionName = "",
+                village = "",
+                nidLastFour = "",
+                farmBio = ""
+            ).getOrThrow()
+        )
 
         val prod1 = repo.createFarmerProduct(
             farmer = farmer1,
@@ -162,8 +182,8 @@ class ExampleRobolectricTest {
             descriptionBn = "তাজা মিনিকেট চাল",
             imageUri = "",
             quantity = 40.0,
-            unit = "কেজি",
-            pricePerUnit = 75.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 1300.0,
             harvestDate = "আজ",
             availabilityDate = "আজ",
             pickupAddress = "কুমারখালী",
@@ -180,8 +200,8 @@ class ExampleRobolectricTest {
             descriptionBn = "বগুড়ার পেঁয়াজ",
             imageUri = "",
             quantity = 100.0,
-            unit = "কেজি",
-            pricePerUnit = 60.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 1600.0,
             harvestDate = "আজ",
             availabilityDate = "আজ",
             pickupAddress = "বগুড়া সদর",
@@ -191,8 +211,8 @@ class ExampleRobolectricTest {
             isWholesale = false
         ).getOrThrow()
 
-        assertTrue(repo.addToCart(prod1, 2.0).isSuccess)
-        assertTrue(repo.addToCart(prod2, 5.0).isSuccess)
+        assertTrue(repo.addToCart(prod1, 2.0, buyer).isSuccess)
+        assertTrue(repo.addToCart(prod2, 5.0, buyer).isSuccess)
 
         val ordersResult = repo.placeOrdersFromCart(
             buyer = buyer,
@@ -239,35 +259,42 @@ class ExampleRobolectricTest {
     @Test
     fun submitReviewRecalculatesFarmerAverageRatingAndReviewCount() = runBlocking {
         MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
         val cat = repo.categories.first().first()
 
-        val farmer = repo.registerUser(
-            fullName = "সাব্বির কৃষক",
-            phone = "01733000001",
-            rawPassword = "pass1234",
-            role = UserRole.FARMER,
-            division = "সিলেট",
-            district = "সিলেট",
-            upazila = "সিলেট সদর",
-            unionName = "",
-            village = "",
-            nidLastFour = "1122",
-            farmBio = ""
-        ).getOrThrow()
+        val farmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "সাব্বির কৃষক",
+                phone = "01733000001",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "সিলেট",
+                district = "সিলেট",
+                upazila = "সিলেট সদর",
+                unionName = "",
+                village = "",
+                nidLastFour = "1122",
+                farmBio = ""
+            ).getOrThrow()
+        )
 
-        val buyer = repo.registerUser(
-            fullName = "নাসির ক্রেতা",
-            phone = "01733000002",
-            rawPassword = "pass1234",
-            role = UserRole.BUYER,
-            division = "ঢাকা",
-            district = "ঢাকা",
-            upazila = "সাভার",
-            unionName = "",
-            village = "",
-            nidLastFour = "",
-            farmBio = ""
-        ).getOrThrow()
+        val buyer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "নাসির ক্রেতা",
+                phone = "01733000002",
+                rawPassword = "pass1234",
+                role = UserRole.BUYER,
+                division = "ঢাকা",
+                district = "ঢাকা",
+                upazila = "সাভার",
+                unionName = "",
+                village = "",
+                nidLastFour = "",
+                farmBio = ""
+            ).getOrThrow()
+        )
 
         val prod = repo.createFarmerProduct(
             farmer = farmer,
@@ -276,8 +303,8 @@ class ExampleRobolectricTest {
             descriptionBn = "তাজা চাল",
             imageUri = "",
             quantity = 20.0,
-            unit = "কেজি",
-            pricePerUnit = 70.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 1400.0,
             harvestDate = "আজ",
             availabilityDate = "আজ",
             pickupAddress = "সিলেট সদর",
@@ -287,7 +314,7 @@ class ExampleRobolectricTest {
             isWholesale = false
         ).getOrThrow()
 
-        repo.addToCart(prod, 2.0)
+        repo.addToCart(prod, 2.0, buyer)
         val order = repo.placeOrdersFromCart(
             buyer = buyer,
             deliveryOption = DeliveryOption.FARM_PICKUP,
@@ -344,35 +371,42 @@ class ExampleRobolectricTest {
     @Test
     fun onlyOwningFarmerCanUpdateProductPrice() = runBlocking {
         MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
         val cat = repo.categories.first().first()
 
-        val ownerFarmer = repo.registerUser(
-            fullName = "মালিক কৃষক",
-            phone = "01722000001",
-            rawPassword = "pass1234",
-            role = UserRole.FARMER,
-            division = "খুলনা",
-            district = "কুষ্টিয়া",
-            upazila = "খোকসা",
-            unionName = "",
-            village = "",
-            nidLastFour = "4321",
-            farmBio = ""
-        ).getOrThrow()
+        val ownerFarmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "মালিক কৃষক",
+                phone = "01722000001",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "খোকসা",
+                unionName = "",
+                village = "",
+                nidLastFour = "4321",
+                farmBio = ""
+            ).getOrThrow()
+        )
 
-        val otherFarmer = repo.registerUser(
-            fullName = "অন্য কৃষক",
-            phone = "01722000002",
-            rawPassword = "pass1234",
-            role = UserRole.FARMER,
-            division = "খুলনা",
-            district = "কুষ্টিয়া",
-            upazila = "মিরপুর",
-            unionName = "",
-            village = "",
-            nidLastFour = "8765",
-            farmBio = ""
-        ).getOrThrow()
+        val otherFarmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "অন্য কৃষক",
+                phone = "01722000002",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "মিরপুর",
+                unionName = "",
+                village = "",
+                nidLastFour = "8765",
+                farmBio = ""
+            ).getOrThrow()
+        )
 
         val prod = repo.createFarmerProduct(
             farmer = ownerFarmer,
@@ -381,8 +415,8 @@ class ExampleRobolectricTest {
             descriptionBn = "টাটকা আলু",
             imageUri = "",
             quantity = 50.0,
-            unit = "কেজি",
-            pricePerUnit = 35.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 900.0,
             harvestDate = "আজ",
             availabilityDate = "আজ",
             pickupAddress = "খোকসা",
@@ -403,7 +437,7 @@ class ExampleRobolectricTest {
         val ownerResult = repo.updateFarmerPriceAndStock(
             productId = prod.id,
             farmerId = ownerFarmer.id,
-            newPrice = 40.0,
+            newPrice = 1000.0,
             newStock = 45.0
         )
         assertTrue(ownerResult.isSuccess)
@@ -501,7 +535,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun bothFarmerAndBuyerStartPendingAndAdminCanVerifyBoth() = runBlocking {
+    fun bothFarmerAndBuyerStartPaymentPendingAndAdminCanVerifyBoth() = runBlocking {
         MasterCatalogSeeder.initialize(db)
         val admin = repo.loginUser("admin", "bondhu").getOrThrow()
         val cat = repo.categories.first().first()
@@ -534,21 +568,23 @@ class ExampleRobolectricTest {
             farmBio = ""
         ).getOrThrow()
 
-        // Both start PENDING with mobile marked directly verified (no OTP)
+        // Both start PENDING / PAYMENT_PENDING and inactive cannot list crops yet
         assertEquals("PENDING", farmer.verificationStatus)
         assertEquals("PENDING", buyer.verificationStatus)
+        assertEquals(AccountStatus.PAYMENT_PENDING.name, farmer.accountStatus)
+        assertEquals(AccountStatus.PAYMENT_PENDING.name, buyer.accountStatus)
         assertTrue(farmer.isMobileVerified)
         assertTrue(buyer.isMobileVerified)
 
-        val prod = repo.createFarmerProduct(
+        val blockedListing = repo.createFarmerProduct(
             farmer = farmer,
             category = cat,
             nameBn = "নতুন ধান",
             descriptionBn = "টাটকা ধান",
             imageUri = "",
             quantity = 10.0,
-            unit = "কেজি",
-            pricePerUnit = 45.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 1300.0,
             harvestDate = "আজ",
             availabilityDate = "আজ",
             pickupAddress = "কুমারখালী",
@@ -556,8 +592,8 @@ class ExampleRobolectricTest {
             supportsDirectDelivery = false,
             deliveryCharge = 0.0,
             isWholesale = false
-        ).getOrThrow()
-        assertFalse(prod.farmerVerified)
+        )
+        assertTrue(blockedListing.isFailure)
 
         // Non-admin cannot verify
         assertTrue(repo.adminVerifyUser(buyer, farmer.id, true).isFailure)
@@ -566,13 +602,34 @@ class ExampleRobolectricTest {
         assertTrue(repo.adminVerifyUser(admin, buyer.id, true).isSuccess)
         val verifiedBuyer = db.userDao().getUserById(buyer.id)!!
         assertEquals("VERIFIED", verifiedBuyer.verificationStatus)
+        assertEquals(AccountStatus.ACTIVE.name, verifiedBuyer.accountStatus)
 
-        // Admin rejects then approves farmer
+        // Admin rejects then approves farmer, then farmer can list crops as verified
         assertTrue(repo.adminVerifyUser(admin, farmer.id, false).isSuccess)
         assertEquals("REJECTED", db.userDao().getUserById(farmer.id)!!.verificationStatus)
         assertTrue(repo.adminVerifyUser(admin, farmer.id, true).isSuccess)
-        assertEquals("VERIFIED", db.userDao().getUserById(farmer.id)!!.verificationStatus)
-        assertTrue(db.productDao().getProductById(prod.id)!!.farmerVerified)
+        val activeFarmer = db.userDao().getUserById(farmer.id)!!
+        assertEquals("VERIFIED", activeFarmer.verificationStatus)
+        assertEquals(AccountStatus.ACTIVE.name, activeFarmer.accountStatus)
+
+        val prod = repo.createFarmerProduct(
+            farmer = activeFarmer,
+            category = cat,
+            nameBn = "নতুন ধান",
+            descriptionBn = "টাটকা ধান",
+            imageUri = "",
+            quantity = 10.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 1300.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        ).getOrThrow()
+        assertTrue(prod.farmerVerified)
 
         val notifications = repo.notifications.first()
         assertTrue(notifications.any { it.userId == buyer.id && it.type == "VERIFICATION" && it.targetRole == "BUYER" })
@@ -581,6 +638,522 @@ class ExampleRobolectricTest {
         val logs = repo.auditLogs.first()
         assertTrue(logs.any { it.actionBn == "ক্রেতা যাচাইকরণ (VERIFIED)" })
         assertTrue(logs.any { it.actionBn == "কৃষক যাচাইকরণ (VERIFIED)" })
+    }
+
+    @Test
+    fun registrationRequiresConfirmPasswordAndBlocksDuplicatePhone() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+
+        val mismatch = repo.registerUser(
+            fullName = "ভুল পাসওয়ার্ড কৃষক",
+            phone = "01712345678",
+            rawPassword = "password1",
+            confirmPassword = "password2",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "কুমারখালী",
+            unionName = "বাঁশগ্রাম",
+            village = "শিমুলিয়া",
+            nidLastFour = "1234",
+            farmBio = "ধান"
+        )
+        assertTrue(mismatch.isFailure)
+
+        val first = repo.registerUser(
+            fullName = "সঠিক কৃষক",
+            phone = "01712345678",
+            rawPassword = "password1",
+            confirmPassword = "password1",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "কুমারখালী",
+            unionName = "বাঁশগ্রাম",
+            village = "শিমুলিয়া",
+            nidLastFour = "1234",
+            farmBio = "ধান"
+        )
+        assertTrue(first.isSuccess)
+        val created = first.getOrThrow()
+        assertEquals(AccountStatus.PAYMENT_PENDING.name, created.accountStatus)
+        assertEquals(0L, created.activationDate)
+        assertEquals(0L, created.expiryDate)
+        assertEquals(2, created.validityYears)
+
+        val dup = repo.registerUser(
+            fullName = "ডুপ্লিকেট কৃষক",
+            phone = "+8801712345678",
+            rawPassword = "password1",
+            confirmPassword = "password1",
+            role = UserRole.BUYER,
+            division = "ঢাকা",
+            district = "ঢাকা",
+            upazila = "সাভার",
+            unionName = "",
+            village = "",
+            nidLastFour = "",
+            farmBio = ""
+        )
+        assertTrue(dup.isFailure)
+    }
+
+    @Test
+    fun activationPaymentEnforcesFixedFeeDuplicateTxIdAnd2YearValidityRenewal() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+
+        val farmer = repo.registerUser(
+            fullName = "পেমেন্ট কৃষক",
+            phone = "01744000011",
+            rawPassword = "pass1234",
+            confirmPassword = "pass1234",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "ভেড়ামারা",
+            unionName = "",
+            village = "",
+            nidLastFour = "1010",
+            farmBio = "ভুট্টা"
+        ).getOrThrow()
+
+        val buyer = repo.registerUser(
+            fullName = "পেমেন্ট ক্রেতা",
+            phone = "01744000012",
+            rawPassword = "pass1234",
+            confirmPassword = "pass1234",
+            role = UserRole.BUYER,
+            division = "ঢাকা",
+            district = "ঢাকা",
+            upazila = "সাভার",
+            unionName = "",
+            village = "",
+            nidLastFour = "",
+            farmBio = ""
+        ).getOrThrow()
+
+        // Wrong amount (not 300) rejected
+        assertTrue(
+            repo.submitActivationPayment(
+                user = farmer,
+                paymentMethod = PaymentMethod.BKASH,
+                senderMobile = "01744000011",
+                transactionId = "TX99887766",
+                amount = 200.0,
+                receiptUri = ""
+            ).isFailure
+        )
+
+        // Valid BDT 300 submission succeeds & transitions user to PAYMENT_UNDER_REVIEW
+        val pay1 = repo.submitActivationPayment(
+            user = farmer,
+            paymentMethod = PaymentMethod.BKASH,
+            senderMobile = "01744000011",
+            transactionId = "tx 9988 7766",
+            amount = 300.0,
+            receiptUri = ""
+        ).getOrThrow()
+        assertEquals("TX99887766", pay1.transactionId)
+        assertEquals(AccountStatus.PAYMENT_UNDER_REVIEW.name, db.userDao().getUserById(farmer.id)!!.accountStatus)
+
+        // Same user cannot submit duplicate PENDING payment
+        assertTrue(
+            repo.submitActivationPayment(
+                user = db.userDao().getUserById(farmer.id)!!,
+                paymentMethod = PaymentMethod.NAGAD,
+                senderMobile = "01744000011",
+                transactionId = "TX11112222",
+                amount = 300.0,
+                receiptUri = ""
+            ).isFailure
+        )
+
+        // Different user cannot reuse normalized duplicate TxID
+        assertTrue(
+            repo.submitActivationPayment(
+                user = buyer,
+                paymentMethod = PaymentMethod.NAGAD,
+                senderMobile = "01744000012",
+                transactionId = "tx99887766",
+                amount = 300.0,
+                receiptUri = ""
+            ).isFailure
+        )
+
+        // Non-admin cannot approve
+        assertTrue(repo.adminApproveActivationPayment(buyer, pay1.id).isFailure)
+
+        // Admin approves farmer -> ACTIVE for 2 calendar years from approval timestamp
+        val approvalNow = 1_760_000_000_000L
+        val activatedFarmer = repo.adminApproveActivationPayment(admin, pay1.id, "ভেরিফায়েড", now = approvalNow).getOrThrow()
+        assertEquals(AccountStatus.ACTIVE.name, activatedFarmer.accountStatus)
+        assertEquals(approvalNow, activatedFarmer.activationDate)
+        assertEquals(2, activatedFarmer.validityYears)
+        val expectedCal = Calendar.getInstance().apply {
+            timeInMillis = approvalNow
+            add(Calendar.YEAR, 2)
+        }
+        assertEquals(expectedCal.timeInMillis, activatedFarmer.expiryDate)
+
+        // Early renewal before expiry adds 2 more calendar years to existing expiryDate
+        val renewalPay = repo.submitActivationPayment(
+            user = activatedFarmer,
+            paymentMethod = PaymentMethod.NAGAD,
+            senderMobile = "01744000011",
+            transactionId = "RENEW2028",
+            amount = 300.0,
+            receiptUri = "",
+            isRenewal = true
+        ).getOrThrow()
+        val renewedFarmer = repo.adminApproveActivationPayment(admin, renewalPay.id, now = approvalNow + 1000L).getOrThrow()
+        val expectedRenewedCal = Calendar.getInstance().apply {
+            timeInMillis = expectedCal.timeInMillis
+            add(Calendar.YEAR, 2)
+        }
+        assertEquals(expectedRenewedCal.timeInMillis, renewedFarmer.expiryDate)
+
+        // Rejecting with resubmission request resets status and lets buyer submit new TxID
+        val buyerPay = repo.submitActivationPayment(
+            user = buyer,
+            paymentMethod = PaymentMethod.NAGAD,
+            senderMobile = "01744000012",
+            transactionId = "BADTX001",
+            amount = 300.0,
+            receiptUri = ""
+        ).getOrThrow()
+        assertTrue(repo.adminRejectActivationPayment(admin, buyerPay.id, "অস্পষ্ট TxID", requestResubmission = true).isSuccess)
+        assertEquals(ActivationPaymentStatus.RESUBMISSION_REQUESTED.name, db.activationPaymentDao().getPaymentById(buyerPay.id)!!.status)
+        assertEquals(AccountStatus.PAYMENT_REJECTED.name, db.userDao().getUserById(buyer.id)!!.accountStatus)
+        assertTrue(
+            repo.submitActivationPayment(
+                user = db.userDao().getUserById(buyer.id)!!,
+                paymentMethod = PaymentMethod.BKASH,
+                senderMobile = "01744000012",
+                transactionId = "GOODTX002",
+                amount = 300.0,
+                receiptUri = ""
+            ).isSuccess
+        )
+    }
+
+    @Test
+    fun expiryEvaluatorCreatesDeduplicatedRemindersAndDisablesExpiredUser() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val cat = repo.categories.first().first()
+
+        val farmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "মেয়াদ কৃষক",
+                phone = "01755000022",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "দৌলতপুর",
+                unionName = "",
+                village = "",
+                nidLastFour = "2233",
+                farmBio = "ধান"
+            ).getOrThrow()
+        )
+        val expiry = farmer.expiryDate
+        val dayMs = 24L * 60L * 60L * 1000L
+
+        // 20 days left -> 30-day reminder once
+        repo.evaluateAccountExpiries(now = expiry - 20L * dayMs)
+        repo.evaluateAccountExpiries(now = expiry - 19L * dayMs)
+        val notifs30 = repo.notifications.first().filter { it.userId == farmer.id && it.type == "EXPIRY_REMINDER_30D" }
+        assertEquals(1, notifs30.size)
+
+        // 5 days left -> 7-day reminder once
+        repo.evaluateAccountExpiries(now = expiry - 5L * dayMs)
+        val notifs7 = repo.notifications.first().filter { it.userId == farmer.id && it.type == "EXPIRY_REMINDER_7D" }
+        assertEquals(1, notifs7.size)
+
+        // At expiry -> transitions to EXPIRED, sends ACCOUNT_EXPIRED notification, and blocks listing
+        repo.evaluateAccountExpiries(now = expiry + 1000L)
+        val expiredUser = db.userDao().getUserById(farmer.id)!!
+        assertEquals(AccountStatus.EXPIRED.name, expiredUser.accountStatus)
+        assertTrue(repo.notifications.first().any { it.userId == farmer.id && it.type == "ACCOUNT_EXPIRED" })
+
+        val blockedListing = repo.createFarmerProduct(
+            farmer = expiredUser,
+            category = cat,
+            nameBn = "মেয়াদোত্তীর্ণ ধান",
+            descriptionBn = "",
+            imageUri = "",
+            quantity = 10.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 1300.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "দৌলতপুর",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        )
+        assertTrue(blockedListing.isFailure)
+    }
+
+    @Test
+    fun monOnlyUnitEnforcementRejectsKgAndAcceptsMon() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val cat = repo.categories.first().first()
+        val farmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "মণ একক কৃষক",
+                phone = "01766000033",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "কুমারখালী",
+                unionName = "",
+                village = "",
+                nidLastFour = "4455",
+                farmBio = ""
+            ).getOrThrow()
+        )
+
+        val kgResult = repo.createFarmerProduct(
+            farmer = farmer,
+            category = cat,
+            nameBn = "ধান",
+            descriptionBn = "",
+            imageUri = "",
+            quantity = 10.0,
+            unit = "কেজি",
+            pricePerUnit = 50.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        )
+        assertTrue(kgResult.isFailure)
+
+        val monResult = repo.createFarmerProduct(
+            farmer = farmer,
+            category = cat,
+            nameBn = "ধান",
+            descriptionBn = "",
+            imageUri = "",
+            quantity = 10.0,
+            unit = "মণ",
+            pricePerUnit = 1300.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        )
+        assertTrue(monResult.isSuccess)
+        assertEquals("মণ", monResult.getOrThrow().unit)
+        assertEquals(40, ProductUnit.MON_TO_KG)
+    }
+
+    @Test
+    fun fiveStepOrderSecurityRequiresBothFarmerConfirmAndAdminVerifyBeforeConfirmedOrCompleted() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val cat = repo.categories.first().first()
+
+        val farmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "নিরাপদ অর্ডার কৃষক",
+                phone = "01777000044",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "কুমারখালী",
+                unionName = "বাঁশগ্রাম",
+                village = "শিমুলিয়া",
+                nidLastFour = "6677",
+                farmBio = ""
+            ).getOrThrow()
+        )
+        val buyer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "নিরাপদ অর্ডার ক্রেতা",
+                phone = "01777000045",
+                rawPassword = "pass1234",
+                role = UserRole.BUYER,
+                division = "ঢাকা",
+                district = "ঢাকা",
+                upazila = "সাভার",
+                unionName = "",
+                village = "",
+                nidLastFour = "",
+                farmBio = ""
+            ).getOrThrow()
+        )
+
+        val prod = repo.createFarmerProduct(
+            farmer = farmer,
+            category = cat,
+            nameBn = "আমন ধান",
+            descriptionBn = "",
+            imageUri = "",
+            quantity = 15.0,
+            unit = "মণ",
+            pricePerUnit = 1300.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        ).getOrThrow()
+
+        // Step 1: Buyer places order
+        repo.addToCart(prod, 10.0, buyer).getOrThrow()
+        val order = repo.placeOrdersFromCart(
+            buyer = buyer,
+            deliveryOption = DeliveryOption.FARM_PICKUP,
+            deliveryAddress = "",
+            paymentMethod = PaymentMethod.CASH_ON_PICKUP,
+            transactionRef = ""
+        ).getOrThrow().first()
+        assertEquals(OrderStatus.PENDING.name, order.status)
+
+        // Cannot submit payment before farmer accepts
+        assertTrue(
+            repo.submitOrderPayment(
+                orderId = order.id,
+                buyer = buyer,
+                paymentMethod = PaymentMethod.BKASH,
+                senderNumber = "01777000045",
+                transactionReference = "ORDTX1234",
+                receiptUri = "data:image/jpeg;base64,/9j/4AAQ"
+            ).isFailure
+        )
+
+        // Step 2: Farmer accepts order
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.ACCEPTED, farmer).isSuccess)
+
+        // Step 3: Buyer submits payment TxID + receipt -> must NOT auto-confirm!
+        val submitted = repo.submitOrderPayment(
+            orderId = order.id,
+            buyer = buyer,
+            paymentMethod = PaymentMethod.BKASH,
+            senderNumber = "01777000045",
+            transactionReference = "ORDTX1234",
+            receiptUri = "data:image/jpeg;base64,/9j/4AAQ"
+        ).getOrThrow()
+        assertEquals(OrderStatus.ACCEPTED.name, submitted.status)
+        assertEquals("SUBMITTED", submitted.paymentStatus)
+        assertFalse(submitted.farmerPaymentConfirmed)
+        assertFalse(submitted.adminPaymentVerified)
+
+        // Cannot transition to CONFIRMED or COMPLETED from buyer receipt alone
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.CONFIRMED, farmer).isFailure)
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isFailure)
+
+        // Step 4a: Farmer confirms money received -> still awaits admin verify before CONFIRMED
+        val afterFarmer = repo.farmerConfirmPaymentReceived(order.id, farmer).getOrThrow()
+        assertTrue(afterFarmer.farmerPaymentConfirmed)
+        assertNotEquals(OrderStatus.CONFIRMED.name, afterFarmer.status)
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isFailure)
+
+        // Step 4b & Step 5: Admin verifies order payment -> dual-confirmed -> CONFIRMED & PAID -> COMPLETED succeeds
+        val afterAdmin = repo.adminVerifyOrderPayment(order.id, admin, approved = true, notes = "TxID verified").getOrThrow()
+        assertTrue(afterAdmin.adminPaymentVerified)
+        assertEquals(OrderStatus.CONFIRMED.name, afterAdmin.status)
+        assertEquals("PAID", afterAdmin.paymentStatus)
+
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isSuccess)
+        assertEquals(OrderStatus.COMPLETED.name, db.orderDao().getOrderById(order.id)!!.status)
+    }
+
+    @Test
+    fun profileUpdatePropagatesToFarmerProductsAndAdminUpdatesPaymentSettings() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val cat = repo.categories.first().first()
+
+        val farmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "পুরোনো নাম",
+                phone = "01788000055",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "কুমারখালী",
+                unionName = "পুরোনো ইউনিয়ন",
+                village = "পুরোনো গ্রাম",
+                nidLastFour = "1234",
+                farmBio = "ধান"
+            ).getOrThrow()
+        )
+        val prod = repo.createFarmerProduct(
+            farmer = farmer,
+            category = cat,
+            nameBn = "সরিষা",
+            descriptionBn = "",
+            imageUri = "",
+            quantity = 5.0,
+            unit = "মণ",
+            pricePerUnit = 3200.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        ).getOrThrow()
+
+        val updatedUser = repo.updateUserProfile(
+            userId = farmer.id,
+            fullName = "নতুন নাম কৃষক",
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "খোকসা",
+            unionName = "জানিপুর",
+            village = "নতুন গ্রাম",
+            farmBio = "ধান ও সরিষা চাষি",
+            nidLastFour = "9876",
+            profileImageUri = "data:image/jpeg;base64,/9j/4AAQ"
+        ).getOrThrow()
+        assertEquals("নতুন নাম কৃষক", updatedUser.fullName)
+        assertEquals("NID-****-9876", updatedUser.nidMasked)
+        val updatedProd = db.productDao().getProductById(prod.id)!!
+        assertEquals("নতুন নাম কৃষক", updatedProd.farmerName)
+        assertEquals("খোকসা", updatedProd.upazila)
+        assertEquals("জানিপুর", updatedProd.unionName)
+
+        // Payment settings permission & update
+        assertTrue(repo.adminSavePaymentSettings(updatedUser, PaymentSettingsEntity()).isFailure)
+        val savedSettings = repo.adminSavePaymentSettings(
+            admin,
+            PaymentSettingsEntity(
+                bKashNumber = "01756144900",
+                bKashAccountType = "MERCHANT",
+                nagadNumber = "01756144900",
+                nagadAccountType = "PERSONAL",
+                paymentInstructions = "Send Money করুন"
+            )
+        ).getOrThrow()
+        assertEquals("MERCHANT", savedSettings.bKashAccountType)
+        assertEquals("PERSONAL", savedSettings.nagadAccountType)
+        assertEquals(300.0, savedSettings.farmerFee, 0.01)
+        assertEquals(2, savedSettings.validityYears)
     }
 
     @Test

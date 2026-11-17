@@ -44,6 +44,15 @@
     "adConfig": {
       ".read": true,
       ".write": true
+    },
+    "activationPayments": {
+      ".read": true,
+      ".write": true,
+      ".indexOn": ["userId", "transactionId", "status"]
+    },
+    "paymentSettings": {
+      ".read": true,
+      ".write": true
     }
   }
 }

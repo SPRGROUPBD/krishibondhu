@@ -2,16 +2,22 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -20,20 +26,27 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.data.local.UserEntity
+import com.example.data.model.AccountStatus
 import com.example.data.model.AppLanguage
+import com.example.data.model.BangladeshLocations
 import com.example.data.model.UserRole
+import com.example.ui.components.AccountStatusBadge
+import com.example.ui.components.UserAvatar
+import com.example.ui.components.formatDateBn
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.MarketplaceUiState
 import com.example.util.LocationHelper
+import com.example.util.MediaCaptureHelper
+import kotlinx.coroutines.launch
 
 @Composable
 fun ProfileScreen(
@@ -41,6 +54,18 @@ fun ProfileScreen(
     onOpenLogin: () -> Unit,
     onOpenRegister: () -> Unit,
     onLogout: () -> Unit,
+    onOpenActivation: () -> Unit = {},
+    onUpdateProfile: (
+        fullName: String,
+        division: String,
+        district: String,
+        upazila: String,
+        unionName: String,
+        village: String,
+        farmBio: String,
+        nidLastFour: String,
+        profileImageUri: String
+    ) -> Unit = { _, _, _, _, _, _, _, _, _ -> },
     onOpenAdminDashboard: () -> Unit,
     onOpenNotifications: () -> Unit,
     onOpenInfo: (String) -> Unit,
@@ -51,6 +76,7 @@ fun ProfileScreen(
     val context = LocalContext.current
     val lang = uiState.language
     val user = uiState.activeUser
+    var showEditDialog by remember { mutableStateOf(false) }
 
     var hasNotifPermission by remember {
         mutableStateOf(
@@ -119,23 +145,11 @@ fun ProfileScreen(
                         .padding(18.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(58.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.2f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = when (uiState.activeRole) {
-                                UserRole.FARMER -> "🧑‍🌾"
-                                UserRole.ADMIN -> "🛡️"
-                                UserRole.BUYER -> "🛍️"
-                                null -> "👤"
-                            },
-                            fontSize = 28.sp
-                        )
-                    }
+                    UserAvatar(
+                        imageUri = user?.profileImageUri.orEmpty(),
+                        role = user?.role.orEmpty(),
+                        size = 62.dp
+                    )
                     Spacer(modifier = Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -145,7 +159,11 @@ fun ProfileScreen(
                             fontWeight = FontWeight.Bold
                         )
                         val roleLabel = uiState.activeRole?.titleBn ?: "অতিথি"
-                        val locationLabel = if (user != null) "${user.upazila}, ${user.district}" else "সারা বাংলাদেশ (৬৪ জেলা)"
+                        val locationLabel = if (user != null) {
+                            listOf(user.unionName, user.upazila, user.district)
+                                .filter { it.isNotBlank() }
+                                .joinToString(", ")
+                        } else "সারা বাংলাদেশ (৬৪ জেলা)"
                         Text(
                             text = "$roleLabel • $locationLabel",
                             style = MaterialTheme.typography.bodySmall,
@@ -197,28 +215,123 @@ fun ProfileScreen(
                             }
                         }
                     } else {
-                        Text(
-                            text = "সক্রিয় অ্যাকাউন্ট (${uiState.activeRole?.titleBn ?: ""})",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "সক্রিয় অ্যাকাউন্ট (${uiState.activeRole?.titleBn ?: ""})",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (user.role != UserRole.ADMIN.name) {
+                                AccountStatusBadge(user.accountStatus, user.expiryDate, lang)
+                            }
+                        }
+                        if (user.farmBio.isNotBlank()) {
+                            Text(
+                                text = user.farmBio,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         val verificationLabel = when (user.verificationStatus) {
                             "VERIFIED" -> "যাচাইকৃত ✓ (Verified)"
                             "REJECTED" -> "যাচাই প্রত্যাখ্যাত (Rejected)"
                             else -> "অ্যাডমিন যাচাই অপেক্ষমাণ (Pending)"
                         }
                         Text(
-                            text = "যাচাই অবস্থা: $verificationLabel",
+                            text = "পরিচয় অবস্থা: $verificationLabel",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (user.verificationStatus == "VERIFIED") PrimaryGreen else MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        OutlinedButton(
-                            onClick = onLogout,
-                            modifier = Modifier.fillMaxWidth().testTag("profile_logout_button")
+
+                        if (user.role != UserRole.ADMIN.name) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    onClick = { showEditDialog = true },
+                                    modifier = Modifier.weight(1f).testTag("profile_edit_button")
+                                ) {
+                                    Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("প্রোফাইল এডিট")
+                                }
+                                OutlinedButton(
+                                    onClick = onLogout,
+                                    modifier = Modifier.weight(1f).testTag("profile_logout_button")
+                                ) {
+                                    Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("লগআউট")
+                                }
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = onLogout,
+                                modifier = Modifier.fillMaxWidth().testTag("profile_logout_button")
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("লগআউট করুন")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Account Activation & 2-Year Validity Card (Farmers & Buyers)
+        if (user != null && user.role != UserRole.ADMIN.name) {
+            item {
+                val isActive = user.isMarketplaceActive()
+                val daysLeft = user.daysUntilExpiry()
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = if (isActive) LightGreen else HarvestGoldLight),
+                    border = BorderStroke(1.dp, if (isActive) PrimaryGreen else HarvestGold),
+                    modifier = Modifier.testTag("profile_activation_card")
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("লগআউট করুন")
+                            Text(
+                                text = "অ্যাকাউন্ট সক্রিয়করণ ও ২ বছরের মেয়াদ",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = DarkGreen
+                            )
+                            AccountStatusBadge(user.accountStatus, user.expiryDate, lang)
+                        }
+                        if (user.activationDate > 0L) {
+                            Text(
+                                text = "সক্রিয় তারিখ: ${formatDateBn(user.activationDate)} • মেয়াদ শেষ: ${formatDateBn(user.expiryDate)}" +
+                                    if (daysLeft != null) " (${daysLeft} দিন বাকি)" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = DarkGreen
+                            )
+                        } else {
+                            Text(
+                                text = "এককালীন ৩০০ টাকা অ্যাক্টিভেশন ফি জমা দিয়ে ২ বছরের জন্য মার্কেটপ্লেসে সম্পূর্ণ অ্যাক্সেস চালু করুন।",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF78350F)
+                            )
+                        }
+                        Button(
+                            onClick = onOpenActivation,
+                            modifier = Modifier.fillMaxWidth().testTag("profile_activation_button")
+                        ) {
+                            Text(
+                                text = when {
+                                    user.accountStatus == AccountStatus.PAYMENT_UNDER_REVIEW.name -> "পেমেন্ট অবস্থা দেখুন (যাচাইাধীন)"
+                                    isActive -> "মেয়াদ ও রিনিউ ব্যবস্থাপনা (৳ ৩০০ / ২ বছর)"
+                                    else -> "অ্যাকাউন্ট সক্রিয় / রিনিউ করুন (৩০০৳)"
+                                },
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
@@ -246,7 +359,7 @@ fun ProfileScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("সুপার অ্যাডমিন ড্যাশবোর্ড", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = DarkGreen)
                             Text(
-                                "কৃষক ও ক্রেতা যাচাই, সব অ্যাড নেটওয়ার্ক, ২৪ ক্যাটাগরি ও অডিট লগ",
+                                "পেমেন্ট যাচাই, কৃষক ও ক্রেতা ম্যানেজমেন্ট, ২৪ ক্যাটাগরি ও অডিট লগ",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = DarkGreen
                             )
@@ -319,8 +432,8 @@ fun ProfileScreen(
                     )
                     HorizontalDivider()
                     ListItem(
-                        headlineContent = { Text("ক্যামেরা (ফসলের ছবি তোলা)") },
-                        supportingContent = { Text("ফসল যুক্ত করতে সরাসরি ছবি তোলার অনুমতি") },
+                        headlineContent = { Text("ক্যামেরা (ফসল ও প্রোফাইল ছবি)") },
+                        supportingContent = { Text("সরাসরি ছবি তোলার অনুমতি") },
                         leadingContent = { Icon(Icons.Filled.CameraAlt, contentDescription = null) },
                         trailingContent = {
                             if (!hasCameraPermission) {
@@ -345,7 +458,7 @@ fun ProfileScreen(
                     ListItem(
                         headlineContent = { Text("পুশ নোটিফিকেশন অনুমতি") },
                         supportingContent = {
-                            Text(if (hasNotifPermission) "অর্ডার ও অ্যাডমিন ঘোষণার জন্য সক্রিয়" else "অনুমতি প্রয়োজন")
+                            Text(if (hasNotifPermission) "অর্ডার, মেয়াদ ও অ্যাডমিন ঘোষণার জন্য সক্রিয়" else "অনুমতি প্রয়োজন")
                         },
                         leadingContent = { Icon(Icons.Filled.NotificationsActive, contentDescription = null) },
                         trailingContent = {
@@ -386,6 +499,247 @@ fun ProfileScreen(
             }
         }
     }
+
+    if (showEditDialog && user != null) {
+        EditProfileDialog(
+            user = user,
+            onDismiss = { showEditDialog = false },
+            onSave = { name, div, dist, upz, union, village, bio, nid4, photoUri ->
+                onUpdateProfile(name, div, dist, upz, union, village, bio, nid4, photoUri)
+                showEditDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun EditProfileDialog(
+    user: UserEntity,
+    onDismiss: () -> Unit,
+    onSave: (
+        fullName: String,
+        division: String,
+        district: String,
+        upazila: String,
+        unionName: String,
+        village: String,
+        farmBio: String,
+        nidLastFour: String,
+        profileImageUri: String
+    ) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var fullName by remember(user) { mutableStateOf(user.fullName) }
+    var division by remember(user) { mutableStateOf(user.division.ifBlank { BangladeshLocations.divisions.first() }) }
+    var district by remember(user) { mutableStateOf(user.district.ifBlank { "কুষ্টিয়া" }) }
+    var upazila by remember(user) { mutableStateOf(user.upazila) }
+    var unionName by remember(user) { mutableStateOf(user.unionName) }
+    var village by remember(user) { mutableStateOf(user.village) }
+    var farmBio by remember(user) { mutableStateOf(user.farmBio) }
+    var nidLastFour by remember(user) { mutableStateOf(user.nidMasked.takeLast(4).filter { it.isDigit() }) }
+    var profileImageUri by remember(user) { mutableStateOf(user.profileImageUri) }
+    var processingImage by remember { mutableStateOf(false) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+
+    val districts = remember(division) {
+        BangladeshLocations.districtsForDivision(division).map { it.districtBn }
+    }
+    val upazilas = remember(district) {
+        BangladeshLocations.upazilasForDistrict(district)
+    }
+
+    val handleImage: (Uri) -> Unit = { uri ->
+        processingImage = true
+        scope.launch {
+            val encoded = MediaCaptureHelper.encodeUriToCompactDataUrl(context, uri)
+            profileImageUri = encoded ?: uri.toString()
+            processingImage = false
+        }
+    }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = { uri -> if (uri != null) handleImage(uri) }
+    )
+    val fileDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri -> if (uri != null) handleImage(uri) }
+    )
+    val cameraTakePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val captured = pendingCameraUri
+        if (success && captured != null) handleImage(captured)
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            val uri = MediaCaptureHelper.createCameraImageUri(context)
+            pendingCameraUri = uri
+            cameraTakePictureLauncher.launch(uri)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("প্রোফাইল সম্পাদনা করুন") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    UserAvatar(imageUri = profileImageUri, role = user.role, size = 60.dp)
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("প্রোফাইল ছবি আপলোড", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                    if (granted) {
+                                        val uri = MediaCaptureHelper.createCameraImageUri(context)
+                                        pendingCameraUri = uri
+                                        cameraTakePictureLauncher.launch(uri)
+                                    } else {
+                                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) { Text("ক্যামেরা", style = MaterialTheme.typography.labelSmall) }
+                            OutlinedButton(
+                                onClick = {
+                                    photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.testTag("edit_profile_gallery_button")
+                            ) { Text("গ্যালারি", style = MaterialTheme.typography.labelSmall) }
+                            OutlinedButton(
+                                onClick = { fileDocumentLauncher.launch(arrayOf("image/*")) },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) { Text("ফাইল", style = MaterialTheme.typography.labelSmall) }
+                        }
+                    }
+                }
+                if (processingImage) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+
+                OutlinedTextField(
+                    value = fullName,
+                    onValueChange = { fullName = it },
+                    label = { Text("পূর্ণ নাম *") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("edit_profile_name_input")
+                )
+
+                Text("বিভাগ", style = MaterialTheme.typography.labelMedium)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(BangladeshLocations.divisions) { div ->
+                        FilterChip(
+                            selected = division == div,
+                            onClick = {
+                                division = div
+                                val firstDist = BangladeshLocations.districtsForDivision(div).firstOrNull()?.districtBn ?: "ঢাকা"
+                                district = firstDist
+                                upazila = BangladeshLocations.upazilasForDistrict(firstDist).firstOrNull() ?: firstDist
+                            },
+                            label = { Text(div) }
+                        )
+                    }
+                }
+
+                Text("জেলা", style = MaterialTheme.typography.labelMedium)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(districts) { d ->
+                        FilterChip(
+                            selected = district == d,
+                            onClick = {
+                                district = d
+                                upazila = BangladeshLocations.upazilasForDistrict(d).firstOrNull() ?: d
+                            },
+                            label = { Text(d) }
+                        )
+                    }
+                }
+
+                if (upazilas.isNotEmpty()) {
+                    Text("উপজেলা", style = MaterialTheme.typography.labelMedium)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(upazilas) { u ->
+                            FilterChip(
+                                selected = upazila == u,
+                                onClick = { upazila = u },
+                                label = { Text(u) }
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = upazila,
+                    onValueChange = { upazila = it },
+                    label = { Text("উপজেলা / থানা *") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = unionName,
+                        onValueChange = { unionName = it },
+                        label = { Text("ইউনিয়ন") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f).testTag("edit_profile_union_input")
+                    )
+                    OutlinedTextField(
+                        value = village,
+                        onValueChange = { village = it },
+                        label = { Text("গ্রাম") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                OutlinedTextField(
+                    value = nidLastFour,
+                    onValueChange = { if (it.length <= 4) nidLastFour = it },
+                    label = { Text("এনআইডি শেষ ৪ অঙ্ক (ঐচ্ছিক)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = farmBio,
+                    onValueChange = { farmBio = it },
+                    label = { Text(if (user.role == UserRole.FARMER.name) "খামার পরিচিতি" else "ঠিকানা / পরিচিতি") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (fullName.isNotBlank()) {
+                        onSave(fullName, division, district, upazila, unionName, village, farmBio, nidLastFour, profileImageUri)
+                    }
+                },
+                enabled = fullName.isNotBlank() && !processingImage,
+                modifier = Modifier.testTag("edit_profile_save_button")
+            ) {
+                Text("সংরক্ষণ করুন")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("বাতিল") }
+        }
+    )
 }
 
 @Composable

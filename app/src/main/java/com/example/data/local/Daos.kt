@@ -43,6 +43,20 @@ interface UserDao {
     @Query("UPDATE users SET verificationStatus = :status WHERE id = :userId")
     suspend fun updateVerificationStatus(userId: String, status: String)
 
+    @Query("UPDATE users SET accountStatus = :accountStatus WHERE id = :userId")
+    suspend fun updateAccountStatus(userId: String, accountStatus: String)
+
+    @Query("UPDATE users SET accountStatus = :accountStatus, verificationStatus = :verificationStatus, activationDate = :activationDate, expiryDate = :expiryDate, validityYears = :validityYears, lastPaymentId = :lastPaymentId WHERE id = :userId")
+    suspend fun updateAccountLifecycle(
+        userId: String,
+        accountStatus: String,
+        verificationStatus: String,
+        activationDate: Long,
+        expiryDate: Long,
+        validityYears: Int,
+        lastPaymentId: String
+    )
+
     @Query("UPDATE users SET passwordHash = :passwordHash WHERE id = :userId")
     suspend fun updatePasswordHash(userId: String, passwordHash: String)
 
@@ -118,8 +132,17 @@ interface ProductDao {
     @Query("UPDATE products SET farmerVerified = :verified WHERE farmerId = :farmerId")
     suspend fun updateFarmerVerifiedOnProducts(farmerId: String, verified: Boolean)
 
-    @Query("UPDATE products SET farmerName = :farmerName, division = :division, district = :district, upazila = :upazila, updatedAt = :now WHERE farmerId = :farmerId")
-    suspend fun updateFarmerMetadataOnProducts(farmerId: String, farmerName: String, division: String, district: String, upazila: String, now: Long)
+    @Query("UPDATE products SET farmerName = :farmerName, division = :division, district = :district, upazila = :upazila, unionName = :unionName, village = :village, updatedAt = :now WHERE farmerId = :farmerId")
+    suspend fun updateFarmerMetadataOnProducts(
+        farmerId: String,
+        farmerName: String,
+        division: String,
+        district: String,
+        upazila: String,
+        unionName: String,
+        village: String,
+        now: Long
+    )
 }
 
 @Dao
@@ -174,6 +197,35 @@ interface OrderDao {
 
     @Query("UPDATE orders SET paymentStatus = :paymentStatus, transactionReference = :ref, updatedAt = :now WHERE id = :orderId")
     suspend fun updatePaymentDetails(orderId: String, paymentStatus: String, ref: String, now: Long)
+
+    @Query("UPDATE orders SET paymentMethod = :paymentMethod, paymentSenderNumber = :senderNumber, transactionReference = :txId, paymentReceiptUri = :receiptUri, paymentStatus = :paymentStatus, updatedAt = :now WHERE id = :orderId")
+    suspend fun updateBuyerPaymentSubmission(
+        orderId: String,
+        paymentMethod: String,
+        senderNumber: String,
+        txId: String,
+        receiptUri: String,
+        paymentStatus: String,
+        now: Long
+    )
+
+    @Query("UPDATE orders SET farmerPaymentConfirmed = :confirmed, farmerPaymentConfirmedAt = :confirmedAt, updatedAt = :now WHERE id = :orderId")
+    suspend fun updateFarmerPaymentConfirmed(
+        orderId: String,
+        confirmed: Boolean,
+        confirmedAt: Long,
+        now: Long
+    )
+
+    @Query("UPDATE orders SET adminPaymentVerified = :verified, adminPaymentVerifiedBy = :verifiedBy, adminPaymentVerifiedAt = :verifiedAt, paymentStatus = :paymentStatus, updatedAt = :now WHERE id = :orderId")
+    suspend fun updateAdminPaymentVerified(
+        orderId: String,
+        verified: Boolean,
+        verifiedBy: String,
+        verifiedAt: Long,
+        paymentStatus: String,
+        now: Long
+    )
 }
 
 @Dao
@@ -240,4 +292,40 @@ interface NotificationAuditDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditLogs(logs: List<AuditLogEntity>)
+}
+
+@Dao
+interface ActivationPaymentDao {
+    @Query("SELECT * FROM activation_payments ORDER BY createdAt DESC")
+    fun observeAllPayments(): Flow<List<ActivationPaymentEntity>>
+
+    @Query("SELECT * FROM activation_payments WHERE userId = :userId ORDER BY createdAt DESC")
+    fun observePaymentsForUser(userId: String): Flow<List<ActivationPaymentEntity>>
+
+    @Query("SELECT * FROM activation_payments ORDER BY createdAt DESC")
+    suspend fun getAllPaymentsOnce(): List<ActivationPaymentEntity>
+
+    @Query("SELECT * FROM activation_payments WHERE id = :id LIMIT 1")
+    suspend fun getPaymentById(id: String): ActivationPaymentEntity?
+
+    @Query("SELECT * FROM activation_payments WHERE userId = :userId AND status = 'PENDING' ORDER BY createdAt DESC LIMIT 1")
+    suspend fun getPendingPaymentForUser(userId: String): ActivationPaymentEntity?
+
+    @Upsert
+    suspend fun upsertPayment(payment: ActivationPaymentEntity)
+
+    @Upsert
+    suspend fun insertAll(payments: List<ActivationPaymentEntity>)
+}
+
+@Dao
+interface PaymentSettingsDao {
+    @Query("SELECT * FROM payment_settings WHERE id = 'default' LIMIT 1")
+    fun observeSettings(): Flow<PaymentSettingsEntity?>
+
+    @Query("SELECT * FROM payment_settings WHERE id = 'default' LIMIT 1")
+    suspend fun getSettingsOnce(): PaymentSettingsEntity?
+
+    @Upsert
+    suspend fun upsertSettings(settings: PaymentSettingsEntity)
 }

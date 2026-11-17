@@ -41,11 +41,14 @@ fun CartCheckoutScreen(
     onBrowseClick: () -> Unit,
     onUpdateQty: (CartItemEntity, Double) -> Unit,
     onRemoveItem: (String) -> Unit,
-    onPlaceOrder: (DeliveryOption, String, PaymentMethod, String) -> Unit
+    onPlaceOrder: (DeliveryOption, String, PaymentMethod, String) -> Unit,
+    onOpenActivation: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lang = uiState.language
+    val activeUser = uiState.activeUser
+    val isUserInactive = activeUser != null && !activeUser.isMarketplaceActive()
     val grouped = remember(uiState.cartItems) { uiState.cartItems.groupBy { it.farmerId } }
     var selectedDelivery by remember { mutableStateOf(DeliveryOption.FARM_PICKUP) }
     var deliveryAddress by remember(uiState.activeUser) {
@@ -120,6 +123,33 @@ fun CartCheckoutScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            if (isUserInactive) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = HarvestGoldLight),
+                        border = BorderStroke(1.dp, HarvestGold),
+                        modifier = Modifier.testTag("cart_activation_gate")
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "অর্ডার করতে অ্যাকাউন্ট সক্রিয় থাকা আবশ্যক",
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF78350F)
+                            )
+                            Text(
+                                text = "৩০০ টাকা অ্যাক্টিভেশন ফি জমা দিয়ে ২ বছরের জন্য অ্যাকাউন্ট সক্রিয়/রিনিউ করুন।",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF78350F)
+                            )
+                            Button(onClick = onOpenActivation, modifier = Modifier.fillMaxWidth()) {
+                                Text("অ্যাকাউন্ট সক্রিয় / রিনিউ করুন (৩০০৳)")
+                            }
+                        }
+                    }
+                }
+            }
+
             // Split-order rule notice
             item {
                 Surface(
@@ -134,7 +164,7 @@ fun CartCheckoutScreen(
                         Icon(Icons.Filled.Info, contentDescription = null, tint = InfoBlue)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "নিয়ম: প্রতিটি অর্ডার একজন কৃষকের জন্য। আপনার কার্টে ${grouped.size} জন কৃষকের পণ্য থাকায় ${grouped.size}টি আলাদা অর্ডার তৈরি হবে।",
+                            text = "নিয়ম: প্রতিটি অর্ডার একজন কৃষকের জন্য (১ মণ = ৪০ কেজি)। আপনার কার্টে ${grouped.size} জন কৃষকের পণ্য থাকায় ${grouped.size}টি আলাদা অর্ডার তৈরি হবে।",
                             style = MaterialTheme.typography.bodySmall,
                             color = InfoBlue
                         )
@@ -169,7 +199,7 @@ fun CartCheckoutScreen(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(item.productNameBn, fontWeight = FontWeight.SemiBold)
                                         Text(
-                                            text = "${item.pricePerUnit.formatBdt()}/${item.unit}",
+                                            text = "${item.pricePerUnit.formatBdt()}/মণ (~${(item.quantity * ProductUnit.MON_TO_KG).formatQty()} কেজি)",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.primary
                                         )
@@ -178,7 +208,7 @@ fun CartCheckoutScreen(
                                         IconButton(onClick = { onUpdateQty(item, item.quantity - 1.0) }) {
                                             Icon(Icons.Filled.Remove, contentDescription = "কমান")
                                         }
-                                        Text("${item.quantity.formatQty()} ${item.unit}", fontWeight = FontWeight.Bold)
+                                        Text("${item.quantity.formatQty()} মণ", fontWeight = FontWeight.Bold)
                                         IconButton(onClick = { onUpdateQty(item, item.quantity + 1.0) }) {
                                             Icon(Icons.Filled.Add, contentDescription = "বাড়ান")
                                         }
@@ -283,7 +313,7 @@ fun CartCheckoutScreen(
                         if (selectedPayment.isDigital) {
                             Surface(color = HarvestGoldLight, shape = RoundedCornerShape(10.dp)) {
                                 Text(
-                                    text = "নিরাপদ পেমেন্ট নীতি: অনুমোদিত ${selectedPayment.labelBn} গেটওয়ে রেফারেন্স দিন। যাচাই সম্পন্ন না হওয়া পর্যন্ত অর্ডার 'অপেক্ষমান যাচাই' অবস্থায় থাকবে।",
+                                    text = "নিরাপদ পেমেন্ট নীতি: শুধু ট্রানজেকশন/স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না। কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ এবং অ্যাডমিন যাচাইয়ের পর অর্ডার Confirmed হবে।",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color(0xFF78350F),
                                     modifier = Modifier.padding(10.dp)
@@ -325,7 +355,11 @@ fun CartCheckoutScreen(
             item {
                 Button(
                     onClick = {
-                        onPlaceOrder(selectedDelivery, deliveryAddress, selectedPayment, transactionRef)
+                        if (isUserInactive) {
+                            onOpenActivation()
+                        } else {
+                            onPlaceOrder(selectedDelivery, deliveryAddress, selectedPayment, transactionRef)
+                        }
                     },
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
@@ -334,7 +368,7 @@ fun CartCheckoutScreen(
                         .testTag("place_order_button")
                 ) {
                     Text(
-                        text = "অর্ডার নিশ্চিত করুন (${grandTotal.formatBdt()})",
+                        text = if (isUserInactive) "প্রথমে অ্যাকাউন্ট সক্রিয় করুন" else "অর্ডার পাঠান (${grandTotal.formatBdt()})",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )

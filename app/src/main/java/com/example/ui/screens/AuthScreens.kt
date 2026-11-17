@@ -112,6 +112,7 @@ fun RegisterScreen(
         fullName: String,
         phone: String,
         password: String,
+        confirmPassword: String,
         role: UserRole,
         division: String,
         district: String,
@@ -129,6 +130,7 @@ fun RegisterScreen(
     var fullName by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
 
     var selectedDivision by remember { mutableStateOf(BangladeshLocations.divisions.first()) }
     var selectedDistrict by remember {
@@ -207,18 +209,40 @@ fun RegisterScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = LightGreen),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "অ্যাকাউন্ট সক্রিয়করণ নীতি (২ বছর মেয়াদ — ৩০০৳)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = DarkGreen
+                        )
+                        Text(
+                            text = "নিবন্ধনের পর কৃষক ও ক্রেতা উভয়ের জন্য এককালীন ৩০০ টাকা অ্যাক্টিভেশন ফি (২ বছরের মেয়াদ) জমা দিয়ে অ্যাডমিন যাচাইয়ের পর অ্যাকাউন্ট সক্রিয় হবে।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = DarkGreen
+                        )
+                    }
+                }
+            }
+
+            item {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     FilterChip(
                         selected = role == UserRole.BUYER,
                         onClick = { role = UserRole.BUYER },
                         label = { Text("ক্রেতা (Buyer)") },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("register_role_buyer")
                     )
                     FilterChip(
                         selected = role == UserRole.FARMER,
                         onClick = { role = UserRole.FARMER },
                         label = { Text("কৃষক (Farmer)") },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("register_role_farmer")
                     )
                 }
             }
@@ -229,7 +253,7 @@ fun RegisterScreen(
                     onValueChange = { fullName = it },
                     label = { Text("পূর্ণ নাম *") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().testTag("register_name_input")
                 )
             }
 
@@ -238,7 +262,7 @@ fun RegisterScreen(
                     value = phone,
                     onValueChange = { phone = it },
                     label = { Text("মোবাইল নম্বর *") },
-                    supportingText = { Text("কোনো OTP ছাড়াই সরাসরি মোবাইল নম্বর ও পাসওয়ার্ড দিয়ে নিবন্ধন হবে") },
+                    supportingText = { Text("সঠিক ১১ অঙ্কের বাংলাদেশী মোবাইল নম্বর দিন") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     modifier = Modifier.fillMaxWidth().testTag("register_phone_input")
@@ -358,14 +382,14 @@ fun RegisterScreen(
                         onValueChange = { unionName = it },
                         label = { Text("ইউনিয়ন") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("register_union_input")
                     )
                     OutlinedTextField(
                         value = village,
                         onValueChange = { village = it },
                         label = { Text("গ্রাম") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("register_village_input")
                     )
                 }
             }
@@ -391,29 +415,46 @@ fun RegisterScreen(
             }
 
             item {
+                val passwordMismatch = confirmPassword.isNotEmpty() && password != confirmPassword
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
                     label = { Text("পাসওয়ার্ড (সর্বনিম্ন ৬ অক্ষর) *") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().testTag("register_password_input")
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = confirmPassword,
+                    onValueChange = { confirmPassword = it },
+                    label = { Text("পাসওয়ার্ড নিশ্চিত করুন (Confirm Password) *") },
+                    singleLine = true,
+                    isError = passwordMismatch,
+                    supportingText = if (passwordMismatch) {
+                        { Text("দুটি পাসওয়ার্ড মেলেনি", color = MaterialTheme.colorScheme.error) }
+                    } else null,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth().testTag("register_confirm_password_input")
                 )
             }
 
             item {
-                val canSubmit = fullName.isNotBlank() && phone.length >= 10 && password.length >= 6
+                val canSubmit = fullName.isNotBlank() &&
+                    phone.length >= 10 &&
+                    password.length >= 6 &&
+                    confirmPassword == password
                 Button(
                     onClick = {
                         onRegister(
-                            fullName, phone, password, role,
+                            fullName, phone, password, confirmPassword, role,
                             selectedDivision, selectedDistrict, selectedUpazila, unionName, village, nidLastFour, farmBio
                         )
                     },
                     enabled = canSubmit,
                     modifier = Modifier.fillMaxWidth().height(50.dp).testTag("register_submit_button")
                 ) {
-                    Text("নিবন্ধন সম্পন্ন করুন", fontWeight = FontWeight.Bold)
+                    Text("নিবন্ধন ও সক্রিয়করণে যান", fontWeight = FontWeight.Bold)
                 }
             }
         }

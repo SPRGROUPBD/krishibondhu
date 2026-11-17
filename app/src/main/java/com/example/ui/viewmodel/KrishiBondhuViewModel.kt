@@ -29,11 +29,14 @@ data class MarketplaceUiState(
     val complaints: List<ComplaintEntity> = emptyList(),
     val notifications: List<NotificationEntity> = emptyList(),
     val auditLogs: List<AuditLogEntity> = emptyList(),
+    val activationPayments: List<ActivationPaymentEntity> = emptyList(),
+    val paymentSettings: PaymentSettingsEntity = PaymentSettingsEntity(),
     val searchQuery: String = "",
     val selectedCategoryId: String? = null,
     val selectedDivision: String? = null,
     val selectedDistrict: String? = null,
     val selectedUpazila: String? = null,
+    val selectedUnion: String? = null,
     val wholesaleOnly: Boolean? = null,
     val priceSort: PriceSort = PriceSort.NEWEST,
     val adConfig: AdConfig = AdConfig(),
@@ -71,13 +74,18 @@ data class MarketplaceUiState(
                     p.division.contains(searchQuery, ignoreCase = true) ||
                     p.district.contains(searchQuery, ignoreCase = true) ||
                     p.upazila.contains(searchQuery, ignoreCase = true) ||
+                    p.unionName.contains(searchQuery, ignoreCase = true) ||
                     p.categoryNameBn.contains(searchQuery, ignoreCase = true)
                 val matchesCat = selectedCategoryId == null || p.categoryId == selectedCategoryId
                 val matchesDiv = selectedDivision == null || p.division == selectedDivision
                 val matchesDist = selectedDistrict == null || p.district == selectedDistrict
                 val matchesUpazila = selectedUpazila == null || p.upazila == selectedUpazila
+                val matchesUnion = selectedUnion == null ||
+                    p.unionName.equals(selectedUnion, ignoreCase = true) ||
+                    p.village.contains(selectedUnion, ignoreCase = true) ||
+                    p.pickupAddress.contains(selectedUnion, ignoreCase = true)
                 val matchesWholesale = wholesaleOnly == null || p.isWholesale == wholesaleOnly
-                matchesQuery && matchesCat && matchesDiv && matchesDist && matchesUpazila && matchesWholesale && p.status == "ACTIVE"
+                matchesQuery && matchesCat && matchesDiv && matchesDist && matchesUpazila && matchesUnion && matchesWholesale && p.status == "ACTIVE"
             }
             return when (priceSort) {
                 PriceSort.NEWEST -> base.sortedByDescending { it.createdAt }
@@ -93,11 +101,13 @@ data class MarketplaceUiState(
                 f.division.contains(searchQuery, ignoreCase = true) ||
                 f.district.contains(searchQuery, ignoreCase = true) ||
                 f.upazila.contains(searchQuery, ignoreCase = true) ||
+                f.unionName.contains(searchQuery, ignoreCase = true) ||
                 f.farmBio.contains(searchQuery, ignoreCase = true)
             val matchesDiv = selectedDivision == null || f.division == selectedDivision
             val matchesDist = selectedDistrict == null || f.district == selectedDistrict
             val matchesUpazila = selectedUpazila == null || f.upazila == selectedUpazila
-            matchesQuery && matchesDiv && matchesDist && matchesUpazila
+            val matchesUnion = selectedUnion == null || f.unionName.equals(selectedUnion, ignoreCase = true)
+            matchesQuery && matchesDiv && matchesDist && matchesUpazila && matchesUnion
         }
 
     val unreadNotificationCount: Int
@@ -122,6 +132,20 @@ data class MarketplaceUiState(
                 .filter { it.status != OrderStatus.CANCELLED.name && it.status != OrderStatus.REJECTED.name }
                 .groupBy { it.district.ifBlank { "অন্যান্য" } }
                 .mapValues { entry -> entry.value.sumOf { it.productTotal } }
+            val nonAdmins = users.filter { it.role != UserRole.ADMIN.name }
+            val pendingPays = activationPayments.count { it.status == ActivationPaymentStatus.PENDING.name }
+            val approvedPays = activationPayments.count { it.status == ActivationPaymentStatus.APPROVED.name }
+            val rejectedPays = activationPayments.count {
+                it.status == ActivationPaymentStatus.REJECTED.name || it.status == ActivationPaymentStatus.RESUBMISSION_REQUESTED.name
+            }
+            val activeAcc = nonAdmins.count { it.isMarketplaceActive() }
+            val expiredAcc = nonAdmins.count { it.accountStatus == AccountStatus.EXPIRED.name }
+            val suspendedAcc = nonAdmins.count { it.accountStatus == AccountStatus.SUSPENDED.name }
+            val pendingOrderVerifs = orders.count {
+                it.status !in setOf(OrderStatus.CANCELLED.name, OrderStatus.REJECTED.name) &&
+                    !it.adminPaymentVerified &&
+                    (it.paymentStatus == "SUBMITTED" || it.paymentStatus == "AWAITING_GATEWAY" || it.transactionReference.isNotBlank() || it.paymentReceiptUri.isNotBlank() || it.farmerPaymentConfirmed)
+            }
             return AdminDashboardStats(
                 totalFarmers = totalFarmers,
                 verifiedFarmers = verifiedFarmers,
@@ -131,7 +155,14 @@ data class MarketplaceUiState(
                 todaysOrders = todaysOrders,
                 completedOrders = completedOrders,
                 totalSalesAmount = totalSales,
-                districtSales = districtSales
+                districtSales = districtSales,
+                pendingActivationPayments = pendingPays,
+                approvedActivationPayments = approvedPays,
+                rejectedActivationPayments = rejectedPays,
+                activeAccounts = activeAcc,
+                expiredAccounts = expiredAcc,
+                suspendedAccounts = suspendedAcc,
+                pendingOrderPaymentVerifications = pendingOrderVerifs
             )
         }
 }
@@ -151,6 +182,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         val division: String? = null,
         val district: String? = null,
         val upazila: String? = null,
+        val unionName: String? = null,
         val wholesaleOnly: Boolean? = null,
         val priceSort: PriceSort = PriceSort.NEWEST
     )
@@ -203,17 +235,22 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         CommerceBundle(cart, orders, reviews, complaints, notifs)
     }
 
+    private val extrasFlow = combine(
+        repo.auditLogs,
+        repo.activationPayments,
+        repo.paymentSettings,
+        toastFlow,
+        combine(NetworkMonitor.observeIsOnline(application), repo.adConfig) { online, adCfg -> online to adCfg }
+    ) { audits, actPayments, paySettings, toast, (online, adCfg) ->
+        ExtrasBundle(audits, actPayments, paySettings, toast, online, adCfg)
+    }
+
     val uiState: StateFlow<MarketplaceUiState> = combine(
         coreDataFlow,
         commerceDataFlow,
-        repo.auditLogs,
-        filterState,
-        combine(
-            toastFlow,
-            NetworkMonitor.observeIsOnline(application),
-            repo.adConfig
-        ) { t, online, adCfg -> Triple(t, online, adCfg) }
-    ) { core, commerce, audits, filter, (toast, online, adConfig) ->
+        extrasFlow,
+        filterState
+    ) { core, commerce, extras, filter ->
         val activeUser = if (core.session.activeUserId.isNotBlank()) {
             core.users.firstOrNull { it.id == core.session.activeUserId }
         } else {
@@ -221,7 +258,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         }
         MarketplaceUiState(
             isLoading = core.categories.isEmpty(),
-            isOnline = online,
+            isOnline = extras.online,
             activeUser = activeUser,
             language = core.session.language,
             darkMode = core.session.darkMode,
@@ -236,16 +273,19 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             reviews = commerce.reviews,
             complaints = commerce.complaints,
             notifications = commerce.notifications,
-            auditLogs = audits,
+            auditLogs = extras.audits,
+            activationPayments = extras.activationPayments,
+            paymentSettings = extras.paymentSettings,
             searchQuery = filter.query,
             selectedCategoryId = filter.categoryId,
             selectedDivision = filter.division,
             selectedDistrict = filter.district,
             selectedUpazila = filter.upazila,
+            selectedUnion = filter.unionName,
             wholesaleOnly = filter.wholesaleOnly,
             priceSort = filter.priceSort,
-            adConfig = adConfig,
-            toastMessage = toast
+            adConfig = extras.adConfig,
+            toastMessage = extras.toast
         )
     }.stateIn(
         scope = viewModelScope,
@@ -273,19 +313,43 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun setDivisionFilter(division: String?) {
-        filterState.update { it.copy(division = division, district = null, upazila = null) }
+        filterState.update { it.copy(division = division, district = null, upazila = null, unionName = null) }
     }
 
     fun setDistrictFilter(district: String?) {
-        filterState.update { it.copy(district = district, upazila = null) }
+        filterState.update { it.copy(district = district, upazila = null, unionName = null) }
     }
 
     fun setUpazilaFilter(upazila: String?) {
-        filterState.update { it.copy(upazila = upazila) }
+        filterState.update { it.copy(upazila = upazila, unionName = null) }
     }
 
-    fun setLocationFilters(division: String?, district: String?, upazila: String?) {
-        filterState.update { it.copy(division = division, district = district, upazila = upazila) }
+    fun setUnionFilter(unionName: String?) {
+        filterState.update { it.copy(unionName = unionName) }
+    }
+
+    fun setLocationFilters(division: String?, district: String?, upazila: String?, unionName: String? = null) {
+        filterState.update {
+            it.copy(
+                division = division,
+                district = district,
+                upazila = upazila,
+                unionName = unionName
+            )
+        }
+    }
+
+    fun applyMyLocationFilter() {
+        val user = uiState.value.activeUser ?: return
+        filterState.update {
+            it.copy(
+                division = user.division.ifBlank { null },
+                district = user.district.ifBlank { null },
+                upazila = user.upazila.ifBlank { null },
+                unionName = user.unionName.ifBlank { null }
+            )
+        }
+        showToast("আপনার নিজস্ব এলাকার ফসল দেখানো হচ্ছে ✓")
     }
 
     fun setWholesaleFilter(wholesaleOnly: Boolean?) {
@@ -385,6 +449,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         fullName: String,
         phone: String,
         password: String,
+        confirmPassword: String,
         role: UserRole,
         division: String,
         district: String,
@@ -407,20 +472,94 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
                 unionName = unionName,
                 village = village,
                 nidLastFour = nidLastFour,
-                farmBio = farmBio
+                farmBio = farmBio,
+                confirmPassword = confirmPassword
             )
                 .onSuccess {
-                    showToast("নিবন্ধন সফল হয়েছে! স্বাগতম, ${it.fullName}")
+                    showToast("নিবন্ধন সম্পন্ন হয়েছে! অ্যাকাউন্ট সক্রিয় করতে ৩০০ টাকা পেমেন্ট জমা দিন।")
                     onSuccess()
                 }
                 .onFailure { showToast(it.message ?: "নিবন্ধন ব্যর্থ হয়েছে") }
         }
     }
 
+    fun submitActivationPayment(
+        paymentMethod: PaymentMethod,
+        senderMobile: String,
+        transactionId: String,
+        amount: Double,
+        receiptUri: String,
+        isRenewal: Boolean = false,
+        onSuccess: () -> Unit = {}
+    ) {
+        val user = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.submitActivationPayment(
+                user = user,
+                paymentMethod = paymentMethod,
+                senderMobile = senderMobile,
+                transactionId = transactionId,
+                amount = amount,
+                receiptUri = receiptUri,
+                isRenewal = isRenewal
+            )
+                .onSuccess {
+                    showToast("পেমেন্ট তথ্য জমা হয়েছে! অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য সক্রিয় হবে ✓")
+                    onSuccess()
+                }
+                .onFailure { showToast(it.message ?: "পেমেন্ট জমা দেওয়া যায়নি") }
+        }
+    }
+
+    fun adminApproveActivationPayment(paymentId: String, notes: String = "") {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminApproveActivationPayment(admin, paymentId, notes)
+                .onSuccess { showToast("${it.fullName}-এর অ্যাকাউন্ট ২ বছরের জন্য সক্রিয় হয়েছে ✓") }
+                .onFailure { showToast(it.message ?: "অনুমোদন করা যায়নি") }
+        }
+    }
+
+    fun adminRejectActivationPayment(paymentId: String, reason: String, requestResubmission: Boolean = false) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminRejectActivationPayment(admin, paymentId, reason, requestResubmission)
+                .onSuccess {
+                    showToast(
+                        if (requestResubmission) "পুনরায় পেমেন্ট জমার অনুরোধ পাঠানো হয়েছে"
+                        else "পেমেন্ট আবেদন প্রত্যাখ্যাত হয়েছে"
+                    )
+                }
+                .onFailure { showToast(it.message ?: "প্রক্রিয়া ব্যর্থ হয়েছে") }
+        }
+    }
+
+    fun adminSetAccountStatus(userId: String, status: AccountStatus, reason: String = "") {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminSetAccountStatus(admin, userId, status, reason)
+                .onSuccess { showToast("${it.fullName} -> ${status.display(uiState.value.language)}") }
+                .onFailure { showToast(it.message ?: "অবস্থা পরিবর্তন করা যায়নি") }
+        }
+    }
+
+    fun adminSavePaymentSettings(settings: PaymentSettingsEntity) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminSavePaymentSettings(admin, settings)
+                .onSuccess { showToast("অ্যাক্টিভেশন পেমেন্ট সেটিংস সংরক্ষিত হয়েছে ✓") }
+                .onFailure { showToast(it.message ?: "পেমেন্ট সেটিংস সংরক্ষণ ব্যর্থ হয়েছে") }
+        }
+    }
+
     fun addToCart(product: ProductEntity, qty: Double = 1.0) {
         viewModelScope.launch {
-            repo.addToCart(product, qty)
-                .onSuccess { showToast("${product.nameBn} কার্টে যোগ করা হয়েছে") }
+            repo.addToCart(product, qty, uiState.value.activeUser)
+                .onSuccess { showToast("${product.nameBn} (${qty.formatQty()} মণ) কার্টে যোগ করা হয়েছে") }
                 .onFailure { showToast(it.message ?: "কার্টে যোগ করা যায়নি") }
         }
     }
@@ -507,6 +646,58 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             repo.updateOrderStatus(orderId, status, actor)
                 .onSuccess { showToast("অর্ডার অবস্থা: ${status.display(uiState.value.language)}") }
                 .onFailure { showToast(it.message ?: "অবস্থা পরিবর্তন করা যায়নি") }
+        }
+    }
+
+    fun submitOrderPayment(
+        orderId: String,
+        paymentMethod: PaymentMethod,
+        senderNumber: String,
+        transactionReference: String,
+        receiptUri: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        val buyer = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.submitOrderPayment(
+                orderId = orderId,
+                buyer = buyer,
+                paymentMethod = paymentMethod,
+                senderNumber = senderNumber,
+                transactionReference = transactionReference,
+                receiptUri = receiptUri
+            )
+                .onSuccess {
+                    showToast("পেমেন্ট তথ্য ও রসিদ জমা হয়েছে! কৃষক ও অ্যাডমিন যাচাইয়ের পর অর্ডার নিশ্চিত হবে।")
+                    onSuccess()
+                }
+                .onFailure { showToast(it.message ?: "পেমেন্ট জমা দেওয়া যায়নি") }
+        }
+    }
+
+    fun farmerConfirmPaymentReceived(orderId: String) {
+        val farmer = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.farmerConfirmPaymentReceived(orderId, farmer)
+                .onSuccess { updated ->
+                    showToast(
+                        if (updated.adminPaymentVerified) "টাকা প্রাপ্তি নিশ্চিত হয়েছে এবং অর্ডার Confirmed সম্পন্ন ✓"
+                        else "টাকা প্রাপ্তি নিশ্চিত হয়েছে! অ্যাডমিন যাচাই শেষে অর্ডার Confirmed হবে ✓"
+                    )
+                }
+                .onFailure { showToast(it.message ?: "নিশ্চিতকরণ করা যায়নি") }
+        }
+    }
+
+    fun adminVerifyOrderPayment(orderId: String, approved: Boolean, notes: String = "") {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminVerifyOrderPayment(orderId, admin, approved, notes)
+                .onSuccess {
+                    showToast(if (approved) "অর্ডার পেমেন্ট যাচাই সম্পন্ন ✓" else "অর্ডার পেমেন্ট প্রত্যাখ্যাত হয়েছে")
+                }
+                .onFailure { showToast(it.message ?: "যাচাই ব্যর্থ হয়েছে") }
         }
     }
 
@@ -618,5 +809,13 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         val reviews: List<ReviewEntity>,
         val complaints: List<ComplaintEntity>,
         val notifications: List<NotificationEntity>
+    )
+    private data class ExtrasBundle(
+        val audits: List<AuditLogEntity>,
+        val activationPayments: List<ActivationPaymentEntity>,
+        val paymentSettings: PaymentSettingsEntity,
+        val toast: String?,
+        val online: Boolean,
+        val adConfig: AdConfig
     )
 }
