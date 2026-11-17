@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.model.AppLanguage
 import com.example.data.model.BangladeshLocations
 import com.example.data.model.PriceSort
+import com.example.data.model.UserRole
 import com.example.ui.components.AdBannerSection
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.FarmerCard
@@ -116,7 +117,30 @@ fun BrowseScreen(
         uiState.wholesaleOnly != null ||
         uiState.priceSort != PriceSort.NEWEST
 
+    val isFarmerRole = uiState.activeRole == UserRole.FARMER
+
     Column(modifier = Modifier.fillMaxSize()) {
+        if (isFarmerRole) {
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .testTag("farmer_market_reference_banner")
+            ) {
+                Text(
+                    text = if (lang == AppLanguage.BENGALI)
+                        "📊 কৃষকের বাজার দর রেফারেন্স — বিভিন্ন জেলার ফসলের দাম যাচাই করুন"
+                    else
+                        "📊 Farmer Market Reference — Compare crop prices across districts",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
+        }
         // Tab Switcher: ফসল vs কৃষক
         Row(
             modifier = Modifier
@@ -401,7 +425,8 @@ fun BrowseScreen(
                             categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
                             language = lang,
                             onClick = { onProductClick(prod.id) },
-                            onQuickAddToCart = { onQuickAddToCart(prod.id) }
+                            onQuickAddToCart = { onQuickAddToCart(prod.id) },
+                            showQuickAdd = !isFarmerRole
                         )
                     }
                     item(span = { GridItemSpan(maxLineSpan) }) {

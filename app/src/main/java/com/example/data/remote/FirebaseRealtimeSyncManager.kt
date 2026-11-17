@@ -3,36 +3,64 @@ package com.example.data.remote
 import android.util.Log
 import com.example.data.local.*
 import com.example.data.model.AdConfig
+import com.example.data.model.UserRole
 import com.google.firebase.FirebaseApp
 import com.google.firebase.database.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 /**
  * Shared Firebase Realtime Database synchronization for Android & Website
  * pointing to `https://screen-playbd-default-rtdb.europe-west1.firebasedatabase.app`.
- * Safely degrades to local Room persistence whenever Firebase is offline or unavailable
- * (e.g., unit tests or offline Superadmin access).
+ * Uses BOTH Firebase Android SDK real-time listeners AND OkHttp REST fallback/polling
+ * so App <-> Website <-> Admin Panel always remain synchronized regardless of WebSocket state
+ * or RTDB `.indexOn` server rules.
  */
-class FirebaseRealtimeSyncManager {
+class FirebaseRealtimeSyncManager(
+    private val enableRemoteSync: Boolean = true
+) {
 
     companion object {
         const val RTDB_URL = "https://screen-playbd-default-rtdb.europe-west1.firebasedatabase.app"
         private const val TAG = "KrishiRTDBSync"
+        private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     }
 
     private var listenersAttached = false
+    private val launchTimestamp = System.currentTimeMillis()
 
-    private fun rootRefOrNull(): DatabaseReference? = runCatching {
-        if (FirebaseApp.getApps(FirebaseApp.getInstance().applicationContext).isEmpty()) {
-            null
-        } else {
-            FirebaseDatabase.getInstance(RTDB_URL).reference
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .writeTimeout(8, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private fun rootRefOrNull(): DatabaseReference? {
+        if (!enableRemoteSync) return null
+        return runCatching {
+            if (FirebaseApp.getApps(FirebaseApp.getInstance().applicationContext).isEmpty()) {
+                null
+            } else {
+                FirebaseDatabase.getInstance(RTDB_URL).reference
+            }
+        }.getOrElse {
+            runCatching { FirebaseDatabase.getInstance(RTDB_URL).reference }.getOrNull()
         }
-    }.getOrElse {
-        runCatching { FirebaseDatabase.getInstance(RTDB_URL).reference }.getOrNull()
     }
 
     fun startRealtimeListeners(
@@ -41,17 +69,28 @@ class FirebaseRealtimeSyncManager {
         onAdConfigChanged: (AdConfig) -> Unit = {},
         onIncomingNotification: (NotificationEntity) -> Unit
     ) {
-        if (listenersAttached) return
-        val root = rootRefOrNull() ?: return
+        if (!enableRemoteSync || listenersAttached) return
         listenersAttached = true
+
+        // Always launch REST immediate pull + periodic live mirror loop + offline push flush
+        scope.launch(Dispatchers.IO) {
+            pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+            pushMissingLocalRecordsToRest(localDb)
+            while (isActive) {
+                delay(10_000L)
+                pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+            }
+        }
+
+        val root = rootRefOrNull() ?: return
 
         // 1. Users listener
         root.child("users").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                val users = snapshot.children.mapNotNull { snap -> snapToUser(snap) }
+                val users = snapshot.children.mapNotNull { snap -> snapToUser(itOrSelf(snap)) }
                 if (users.isNotEmpty()) {
                     scope.launch(Dispatchers.IO) {
-                        runCatching { localDb.userDao().insertAll(users) }
+                        users.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
                     }
                 }
             }
@@ -93,13 +132,13 @@ class FirebaseRealtimeSyncManager {
             }
         })
 
-        // 4. Products listener
+        // 4. Products listener (ensures farmer user exists before inserting to satisfy FK cleanly)
         root.child("products").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val products = snapshot.children.mapNotNull { snap -> snapToProduct(snap) }
                 if (products.isNotEmpty()) {
                     scope.launch(Dispatchers.IO) {
-                        runCatching { localDb.productDao().insertAll(products) }
+                        upsertProductsEnsuringFarmers(localDb, products)
                     }
                 }
             }
@@ -139,18 +178,12 @@ class FirebaseRealtimeSyncManager {
             }
         })
 
-        // 6. Notifications real-time ChildEventListener (preserves local read state & alerts on new unread items)
+        // 6. Notifications real-time ChildEventListener
         root.child("notifications").addChildEventListener(object : ChildEventListener {
             override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
                 val notif = snapToNotification(snapshot) ?: return
                 scope.launch(Dispatchers.IO) {
-                    val dao = localDb.notificationAuditDao()
-                    val existing = runCatching { dao.getNotificationById(notif.id) }.getOrNull()
-                    val merged = if (existing != null && existing.isRead) notif.copy(isRead = true) else notif
-                    runCatching { dao.insertNotification(merged) }
-                    if (existing == null && !merged.isRead) {
-                        onIncomingNotification(merged)
-                    }
+                    ingestRemoteNotification(localDb, notif, onIncomingNotification)
                 }
             }
 
@@ -184,7 +217,7 @@ class FirebaseRealtimeSyncManager {
             }
         })
 
-        // 7. Reviews & Complaints listeners
+        // 7. Reviews, Complaints & AuditLogs listeners
         root.child("reviews").addValueEventListener(object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val reviews = snapshot.children.mapNotNull { snapToReview(it) }
@@ -225,98 +258,367 @@ class FirebaseRealtimeSyncManager {
         })
     }
 
-    suspend fun pushUser(user: UserEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("users").child(user.id).setValue(userToMap(user)).await()
-        }.onFailure { Log.w(TAG, "pushUser skipped: ${it.message}") }
+    private fun itOrSelf(snap: DataSnapshot): DataSnapshot = snap
+
+    private suspend fun ingestRemoteNotification(
+        localDb: KrishiBondhuDatabase,
+        notif: NotificationEntity,
+        onIncomingNotification: (NotificationEntity) -> Unit
+    ) {
+        val dao = localDb.notificationAuditDao()
+        val existing = runCatching { dao.getNotificationById(notif.id) }.getOrNull()
+        val merged = if (existing != null && existing.isRead) notif.copy(isRead = true) else notif
+        runCatching { dao.insertNotification(merged) }
+        if (existing == null && !merged.isRead && merged.createdAt >= launchTimestamp - 30_000L) {
+            onIncomingNotification(merged)
+        }
     }
 
-    suspend fun fetchUserByPhone(phone: String): UserEntity? {
-        return runCatching {
-            val root = rootRefOrNull() ?: return null
-            val snap = root.child("users")
-                .orderByChild("phone")
-                .equalTo(phone)
-                .limitToFirst(1)
-                .get()
-                .await()
-            val first = snap.children.firstOrNull() ?: return null
-            snapToUser(first)
-        }.onFailure { Log.w(TAG, "fetchUserByPhone skipped: ${it.message}") }.getOrNull()
+    private suspend fun upsertProductsEnsuringFarmers(
+        localDb: KrishiBondhuDatabase,
+        products: List<ProductEntity>
+    ) {
+        val missingFarmer = products.any { p ->
+            runCatching { localDb.userDao().getUserById(p.farmerId) == null }.getOrDefault(false)
+        }
+        if (missingFarmer) {
+            pullUsersFromRestIntoDb(localDb)
+        }
+        products.forEach { prod ->
+            runCatching { localDb.productDao().upsertProduct(prod) }
+                .onFailure { Log.w(TAG, "Product upsert skipped (${prod.id}): ${it.message}") }
+        }
+    }
+
+    /**
+     * Pulls the entire shared RTDB tree over HTTPS REST (`/.json`) and merges into Room in safe FK order.
+     * Guarantees Website <-> Android <-> Admin parity even if Firebase SDK WebSocket or `.indexOn` fails.
+     */
+    suspend fun pullAllFromRest(
+        localDb: KrishiBondhuDatabase,
+        onAdConfigChanged: (AdConfig) -> Unit = {},
+        onIncomingNotification: (NotificationEntity) -> Unit = {}
+    ) {
+        if (!enableRemoteSync) return
+        val bodyStr = restGetJson(".json") ?: return
+        val rootObj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return
+
+        // 1. Categories first (FK target of products)
+        rootObj.optJSONObject("categories")?.let { catsObj ->
+            val cats = parseJsonMap(catsObj) { id, obj -> jsonToCategory(id, obj) }
+            if (cats.isNotEmpty()) {
+                runCatching { localDb.categoryDao().insertAll(cats) }
+            }
+        }
+
+        // 2. Locations
+        rootObj.optJSONObject("locations")?.let { locsObj ->
+            val locs = parseJsonMap(locsObj) { id, obj -> jsonToLocation(id, obj) }
+            if (locs.isNotEmpty()) {
+                runCatching { localDb.locationDao().insertAll(locs) }
+            }
+        }
+
+        // 3. Users (FK target of products)
+        rootObj.optJSONObject("users")?.let { usersObj ->
+            val users = parseJsonMap(usersObj) { id, obj -> jsonToUser(id, obj) }
+            users.forEach { u ->
+                runCatching { localDb.userDao().upsertUser(u) }
+            }
+        }
+
+        // 4. Products (after users & categories)
+        rootObj.optJSONObject("products")?.let { prodsObj ->
+            val prods = parseJsonMap(prodsObj) { id, obj -> jsonToProduct(id, obj) }
+            prods.forEach { p ->
+                runCatching { localDb.productDao().upsertProduct(p) }
+            }
+        }
+
+        // 5. Orders + items
+        rootObj.optJSONObject("orders")?.let { ordersObj ->
+            val orders = mutableListOf<OrderEntity>()
+            val items = mutableListOf<OrderItemEntity>()
+            val keys = ordersObj.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val obj = ordersObj.optJSONObject(key) ?: continue
+                jsonToOrder(key, obj)?.let { ord ->
+                    orders.add(ord)
+                    obj.optJSONObject("items")?.let { itemsObj ->
+                        val itemKeys = itemsObj.keys()
+                        while (itemKeys.hasNext()) {
+                            val ik = itemKeys.next()
+                            itemsObj.optJSONObject(ik)?.let { iObj ->
+                                jsonToOrderItem(ik, iObj, ord.id)?.let { items.add(it) }
+                            }
+                        }
+                    }
+                }
+            }
+            if (orders.isNotEmpty()) {
+                runCatching {
+                    localDb.orderDao().insertOrders(orders)
+                    if (items.isNotEmpty()) localDb.orderDao().insertOrderItems(items)
+                }
+            }
+        }
+
+        // 6. Notifications
+        rootObj.optJSONObject("notifications")?.let { notifsObj ->
+            val notifs = parseJsonMap(notifsObj) { id, obj -> jsonToNotification(id, obj) }
+            notifs.forEach { n ->
+                ingestRemoteNotification(localDb, n, onIncomingNotification)
+            }
+        }
+
+        // 7. Reviews, Complaints, AuditLogs
+        rootObj.optJSONObject("reviews")?.let { revObj ->
+            val list = parseJsonMap(revObj) { id, obj -> jsonToReview(id, obj) }
+            if (list.isNotEmpty()) runCatching { localDb.reviewComplaintDao().insertReviews(list) }
+        }
+        rootObj.optJSONObject("complaints")?.let { cmpObj ->
+            val list = parseJsonMap(cmpObj) { id, obj -> jsonToComplaint(id, obj) }
+            if (list.isNotEmpty()) runCatching { localDb.reviewComplaintDao().insertComplaints(list) }
+        }
+        rootObj.optJSONObject("auditLogs")?.let { audObj ->
+            val list = parseJsonMap(audObj) { id, obj -> jsonToAuditLog(id, obj) }
+            if (list.isNotEmpty()) runCatching { localDb.notificationAuditDao().insertAuditLogs(list) }
+        }
+
+        // 8. AdConfig
+        rootObj.optJSONObject("adConfig")?.let { adObj ->
+            jsonToAdConfig(adObj)?.let { onAdConfigChanged(it) }
+        }
+    }
+
+    /**
+     * Pushes any locally created non-demo users (excluding offline-only superadmin) or products
+     * that aren't yet on Firebase RTDB (e.g. created while offline or before REST fallback).
+     */
+    private suspend fun pushMissingLocalRecordsToRest(localDb: KrishiBondhuDatabase) {
+        if (!enableRemoteSync) return
+        val remoteUsersStr = restGetJson("users.json") ?: return
+        val remoteUsersObj = if (remoteUsersStr == "null") JSONObject() else runCatching { JSONObject(remoteUsersStr) }.getOrNull() ?: return
+        val localUsers = runCatching { localDb.userDao().getAllUsersOnce() }.getOrDefault(emptyList())
+        localUsers.filter { !it.isDemoRecord && it.role != UserRole.ADMIN.name }.forEach { u ->
+            if (!remoteUsersObj.has(u.id)) {
+                pushUser(u)
+            }
+        }
+    }
+
+    private suspend fun pullUsersFromRestIntoDb(localDb: KrishiBondhuDatabase): List<UserEntity> {
+        val bodyStr = restGetJson("users.json") ?: return emptyList()
+        if (bodyStr == "null" || bodyStr.isBlank()) return emptyList()
+        val obj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return emptyList()
+        val users = parseJsonMap(obj) { id, uObj -> jsonToUser(id, uObj) }
+        users.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
+        return users
+    }
+
+    /**
+     * Looks up a user by normalized phone across BOTH Firebase SDK and RTDB REST `/users.json`,
+     * never relying solely on `.orderByChild("phone")` which requires `.indexOn` in server rules.
+     */
+    suspend fun fetchUserByPhone(phone: String, localDb: KrishiBondhuDatabase? = null): UserEntity? {
+        if (!enableRemoteSync) return null
+        val targetPhone = SecurityHashUtil.normalizePhone(phone)
+        if (targetPhone.isBlank()) return null
+
+        // 1. Try scanning SDK users snapshot directly (works even without .indexOn)
+        val sdkUser = runCatching {
+            withTimeoutOrNull(3000L) {
+                val root = rootRefOrNull() ?: return@withTimeoutOrNull null
+                val snap = root.child("users").get().await()
+                val allUsers = snap.children.mapNotNull { snapToUser(it) }
+                if (localDb != null && allUsers.isNotEmpty()) {
+                    allUsers.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
+                }
+                allUsers.firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == targetPhone }
+            }
+        }.getOrNull()
+        if (sdkUser != null) return sdkUser
+
+        // 2. Fallback to OkHttp REST `/users.json`
+        val bodyStr = restGetJson("users.json") ?: return null
+        if (bodyStr == "null" || bodyStr.isBlank()) return null
+        val usersObj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return null
+        val allRestUsers = parseJsonMap(usersObj) { id, obj -> jsonToUser(id, obj) }
+        if (localDb != null && allRestUsers.isNotEmpty()) {
+            allRestUsers.forEach { u -> runCatching { localDb.userDao().upsertUser(u) } }
+        }
+        return allRestUsers.firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == targetPhone }
+    }
+
+    suspend fun pushUser(user: UserEntity) {
+        pushNode("users/${user.id}", userToMap(user)) { root ->
+            root.child("users").child(user.id).setValue(userToMap(user)).await()
+        }
     }
 
     suspend fun pushProduct(product: ProductEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
+        pushNode("products/${product.id}", productToMap(product)) { root ->
             root.child("products").child(product.id).setValue(productToMap(product)).await()
-        }.onFailure { Log.w(TAG, "pushProduct skipped: ${it.message}") }
+        }
     }
 
     suspend fun pushOrder(order: OrderEntity, items: List<OrderItemEntity>) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("orders").child(order.id).setValue(orderToMap(order, items)).await()
-        }.onFailure { Log.w(TAG, "pushOrder skipped: ${it.message}") }
+        val map = orderToMap(order, items)
+        pushNode("orders/${order.id}", map) { root ->
+            root.child("orders").child(order.id).setValue(map).await()
+        }
     }
 
     suspend fun pushCategory(category: CategoryEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("categories").child(category.id).setValue(categoryToMap(category)).await()
-        }.onFailure { Log.w(TAG, "pushCategory skipped: ${it.message}") }
+        val map = categoryToMap(category)
+        pushNode("categories/${category.id}", map) { root ->
+            root.child("categories").child(category.id).setValue(map).await()
+        }
     }
 
     suspend fun pushLocation(location: LocationEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("locations").child(location.id).setValue(locationToMap(location)).await()
-        }.onFailure { Log.w(TAG, "pushLocation skipped: ${it.message}") }
+        val map = locationToMap(location)
+        pushNode("locations/${location.id}", map) { root ->
+            root.child("locations").child(location.id).setValue(map).await()
+        }
     }
 
     suspend fun pushNotification(notification: NotificationEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("notifications").child(notification.id).setValue(notificationToMap(notification)).await()
-        }.onFailure { Log.w(TAG, "pushNotification skipped: ${it.message}") }
+        val map = notificationToMap(notification)
+        pushNode("notifications/${notification.id}", map) { root ->
+            root.child("notifications").child(notification.id).setValue(map).await()
+        }
     }
 
     suspend fun pushReview(review: ReviewEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("reviews").child(review.id).setValue(reviewToMap(review)).await()
-        }.onFailure { Log.w(TAG, "pushReview skipped: ${it.message}") }
+        val map = reviewToMap(review)
+        pushNode("reviews/${review.id}", map) { root ->
+            root.child("reviews").child(review.id).setValue(map).await()
+        }
     }
 
     suspend fun pushComplaint(complaint: ComplaintEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("complaints").child(complaint.id).setValue(complaintToMap(complaint)).await()
-        }.onFailure { Log.w(TAG, "pushComplaint skipped: ${it.message}") }
+        val map = complaintToMap(complaint)
+        pushNode("complaints/${complaint.id}", map) { root ->
+            root.child("complaints").child(complaint.id).setValue(map).await()
+        }
     }
 
     suspend fun pushAuditLog(log: AuditLogEntity) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("auditLogs").child(log.id).setValue(auditLogToMap(log)).await()
-        }.onFailure { Log.w(TAG, "pushAuditLog skipped: ${it.message}") }
+        val map = auditLogToMap(log)
+        pushNode("auditLogs/${log.id}", map) { root ->
+            root.child("auditLogs").child(log.id).setValue(map).await()
+        }
     }
 
     suspend fun pushNotificationRead(notificationId: String) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("notifications").child(notificationId).child("isRead").setValue(true).await()
-        }.onFailure { Log.w(TAG, "pushNotificationRead skipped: ${it.message}") }
+        if (!enableRemoteSync) return
+        val sdkDone = withTimeoutOrNull(2500L) {
+            runCatching {
+                val root = rootRefOrNull() ?: return@runCatching false
+                root.child("notifications").child(notificationId).child("isRead").setValue(true).await()
+                true
+            }.getOrDefault(false)
+        } ?: false
+        if (!sdkDone) {
+            restPutJson("notifications/$notificationId/isRead.json", "true")
+        }
     }
 
     suspend fun pushAdConfig(config: AdConfig) {
-        runCatching {
-            val root = rootRefOrNull() ?: return
-            root.child("adConfig").setValue(adConfigToMap(config)).await()
-        }.onFailure { Log.w(TAG, "pushAdConfig skipped: ${it.message}") }
+        val map = adConfigToMap(config)
+        pushNode("adConfig", map) { root ->
+            root.child("adConfig").setValue(map).await()
+        }
     }
 
-    // Explicit Map conversions (avoids Kotlin boolean `is*` getter naming mismatch with JS/Web)
+    private suspend fun pushNode(
+        path: String,
+        payloadMap: Map<String, Any?>,
+        sdkWrite: suspend (DatabaseReference) -> Unit
+    ) {
+        if (!enableRemoteSync) return
+        val sdkOk = withTimeoutOrNull(3000L) {
+            runCatching {
+                val root = rootRefOrNull() ?: return@runCatching false
+                sdkWrite(root)
+                true
+            }.onFailure { Log.w(TAG, "SDK push ($path) fallback to REST: ${it.message}") }
+                .getOrDefault(false)
+        } ?: false
+
+        if (!sdkOk) {
+            val json = mapToJsonObject(payloadMap).toString()
+            restPutJson("$path.json", json)
+        }
+    }
+
+    private suspend fun restGetJson(relativePath: String): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("$RTDB_URL/$relativePath")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string() else {
+                    Log.w(TAG, "REST GET $relativePath HTTP ${resp.code}")
+                    null
+                }
+            }
+        }.onFailure {
+            Log.w(TAG, "REST GET $relativePath skipped: ${it.message}")
+        }.getOrNull()
+    }
+
+    private suspend fun restPutJson(relativePath: String, jsonBody: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("$RTDB_URL/$relativePath")
+                .put(jsonBody.toRequestBody(JSON_MEDIA))
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "REST PUT $relativePath HTTP ${resp.code}")
+                }
+                resp.isSuccessful
+            }
+        }.onFailure {
+            Log.w(TAG, "REST PUT $relativePath skipped: ${it.message}")
+        }.getOrDefault(false)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun mapToJsonValue(value: Any?): Any = when (value) {
+        null -> JSONObject.NULL
+        is Map<*, *> -> mapToJsonObject(value as Map<String, Any?>)
+        is List<*> -> JSONArray().apply { value.forEach { put(mapToJsonValue(it)) } }
+        is Boolean, is Number, is String -> value
+        else -> value.toString()
+    }
+
+    private fun mapToJsonObject(map: Map<String, Any?>): JSONObject {
+        val obj = JSONObject()
+        map.forEach { (k, v) -> obj.put(k, mapToJsonValue(v)) }
+        return obj
+    }
+
+    private inline fun <T> parseJsonMap(
+        obj: JSONObject,
+        mapper: (String, JSONObject) -> T?
+    ): List<T> {
+        val list = mutableListOf<T>()
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            val itemObj = obj.optJSONObject(k) ?: continue
+            mapper(k, itemObj)?.let { list.add(it) }
+        }
+        return list
+    }
+
+    // ---------------------- Explicit Map / DataSnapshot / JSON Conversions ----------------------
+
     private fun userToMap(u: UserEntity): Map<String, Any?> = mapOf(
         "id" to u.id,
         "fullName" to u.fullName,
@@ -330,6 +632,7 @@ class FirebaseRealtimeSyncManager {
         "village" to u.village,
         "farmBio" to u.farmBio,
         "nidMasked" to u.nidMasked,
+        "profileImageUri" to u.profileImageUri,
         "verificationStatus" to u.verificationStatus,
         "isMobileVerified" to u.isMobileVerified,
         "rating" to u.rating,
@@ -343,7 +646,7 @@ class FirebaseRealtimeSyncManager {
         return UserEntity(
             id = id,
             fullName = s.str("fullName") ?: "",
-            phone = phone,
+            phone = SecurityHashUtil.normalizePhone(phone),
             passwordHash = s.str("passwordHash") ?: "",
             role = s.str("role") ?: "BUYER",
             division = s.str("division") ?: "ঢাকা",
@@ -353,11 +656,39 @@ class FirebaseRealtimeSyncManager {
             village = s.str("village") ?: "",
             farmBio = s.str("farmBio") ?: "",
             nidMasked = s.str("nidMasked") ?: "",
+            profileImageUri = s.str("profileImageUri") ?: "",
             verificationStatus = s.str("verificationStatus") ?: "PENDING",
             isMobileVerified = s.bool("isMobileVerified") ?: s.bool("mobileVerified") ?: false,
             rating = s.dbl("rating") ?: 5.0,
             reviewCount = (s.lng("reviewCount") ?: 0L).toInt(),
             createdAt = s.lng("createdAt") ?: System.currentTimeMillis(),
+            isDemoRecord = false
+        )
+    }
+
+    private fun jsonToUser(key: String, o: JSONObject): UserEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val phoneRaw = o.optString("phone", "")
+        if (phoneRaw.isBlank()) return null
+        return UserEntity(
+            id = id,
+            fullName = o.optString("fullName", ""),
+            phone = SecurityHashUtil.normalizePhone(phoneRaw),
+            passwordHash = o.optString("passwordHash", ""),
+            role = o.optString("role", "BUYER"),
+            division = o.optString("division", "ঢাকা"),
+            district = o.optString("district", "ঢাকা"),
+            upazila = o.optString("upazila", ""),
+            unionName = o.optString("unionName", ""),
+            village = o.optString("village", ""),
+            farmBio = o.optString("farmBio", ""),
+            nidMasked = o.optString("nidMasked", ""),
+            profileImageUri = o.optString("profileImageUri", ""),
+            verificationStatus = o.optString("verificationStatus", "PENDING"),
+            isMobileVerified = o.optBoolean("isMobileVerified", o.optBoolean("mobileVerified", false)),
+            rating = o.optDouble("rating", 5.0).takeUnless { it.isNaN() } ?: 5.0,
+            reviewCount = o.optInt("reviewCount", 0),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
             isDemoRecord = false
         )
     }
@@ -386,6 +717,21 @@ class FirebaseRealtimeSyncManager {
         )
     }
 
+    private fun jsonToCategory(key: String, o: JSONObject): CategoryEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val nameBn = o.optString("nameBn", "")
+        if (nameBn.isBlank()) return null
+        return CategoryEntity(
+            id = id,
+            nameBn = nameBn,
+            nameEn = o.optString("nameEn", nameBn).ifBlank { nameBn },
+            groupKey = o.optString("groupKey", "OTHER"),
+            emoji = o.optString("emoji", "🌱"),
+            sortOrder = o.optInt("sortOrder", 99),
+            isActive = o.optBoolean("isActive", o.optBoolean("active", true))
+        )
+    }
+
     private fun locationToMap(l: LocationEntity): Map<String, Any?> = mapOf(
         "id" to l.id,
         "divisionBn" to l.divisionBn,
@@ -408,6 +754,22 @@ class FirebaseRealtimeSyncManager {
             unionBn = s.str("unionBn") ?: "",
             villageBn = s.str("villageBn") ?: "",
             isActive = s.bool("isActive") ?: s.bool("active") ?: true
+        )
+    }
+
+    private fun jsonToLocation(key: String, o: JSONObject): LocationEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val districtBn = o.optString("districtBn", "")
+        val upazilaBn = o.optString("upazilaBn", "")
+        if (districtBn.isBlank() || upazilaBn.isBlank()) return null
+        return LocationEntity(
+            id = id,
+            divisionBn = o.optString("divisionBn", "ঢাকা"),
+            districtBn = districtBn,
+            upazilaBn = upazilaBn,
+            unionBn = o.optString("unionBn", ""),
+            villageBn = o.optString("villageBn", ""),
+            isActive = o.optBoolean("isActive", o.optBoolean("active", true))
         )
     }
 
@@ -481,6 +843,45 @@ class FirebaseRealtimeSyncManager {
         )
     }
 
+    private fun jsonToProduct(key: String, o: JSONObject): ProductEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val nameBn = o.optString("nameBn", "")
+        val farmerId = o.optString("farmerId", "")
+        if (nameBn.isBlank() || farmerId.isBlank()) return null
+        return ProductEntity(
+            id = id,
+            farmerId = farmerId,
+            farmerName = o.optString("farmerName", ""),
+            farmerVerified = o.optBoolean("farmerVerified", false),
+            categoryId = o.optString("categoryId", "cat_other").ifBlank { "cat_other" },
+            categoryNameBn = o.optString("categoryNameBn", ""),
+            nameBn = nameBn,
+            nameEn = o.optString("nameEn", nameBn).ifBlank { nameBn },
+            descriptionBn = o.optString("descriptionBn", ""),
+            imageUri = o.optString("imageUri", ""),
+            availableQuantity = o.optDouble("availableQuantity", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            unit = o.optString("unit", "কেজি"),
+            pricePerUnit = o.optDouble("pricePerUnit", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            harvestDate = o.optString("harvestDate", ""),
+            availabilityDate = o.optString("availabilityDate", ""),
+            division = o.optString("division", "ঢাকা"),
+            district = o.optString("district", "ঢাকা"),
+            upazila = o.optString("upazila", ""),
+            unionName = o.optString("unionName", ""),
+            village = o.optString("village", ""),
+            pickupAddress = o.optString("pickupAddress", ""),
+            supportsFarmPickup = o.optBoolean("supportsFarmPickup", true),
+            supportsDirectDelivery = o.optBoolean("supportsDirectDelivery", true),
+            deliveryChargeEstimate = o.optDouble("deliveryChargeEstimate", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            isWholesale = o.optBoolean("isWholesale", o.optBoolean("wholesale", false)),
+            isPopular = o.optBoolean("isPopular", o.optBoolean("popular", false)),
+            status = o.optString("status", "ACTIVE"),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
+            isDemoRecord = false
+        )
+    }
+
     private fun orderToMap(o: OrderEntity, items: List<OrderItemEntity>): Map<String, Any?> = mapOf(
         "id" to o.id,
         "orderCode" to o.orderCode,
@@ -550,6 +951,38 @@ class FirebaseRealtimeSyncManager {
         )
     }
 
+    private fun jsonToOrder(key: String, o: JSONObject): OrderEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val orderCode = o.optString("orderCode", "")
+        if (orderCode.isBlank()) return null
+        return OrderEntity(
+            id = id,
+            orderCode = orderCode,
+            buyerId = o.optString("buyerId", ""),
+            buyerName = o.optString("buyerName", ""),
+            buyerPhone = o.optString("buyerPhone", ""),
+            farmerId = o.optString("farmerId", ""),
+            farmerName = o.optString("farmerName", ""),
+            farmerPhone = o.optString("farmerPhone", ""),
+            status = o.optString("status", "PENDING"),
+            deliveryOption = o.optString("deliveryOption", "FARM_PICKUP"),
+            deliveryAddress = o.optString("deliveryAddress", ""),
+            division = o.optString("division", "ঢাকা"),
+            district = o.optString("district", "ঢাকা"),
+            upazila = o.optString("upazila", ""),
+            productTotal = o.optDouble("productTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            deliveryCharge = o.optDouble("deliveryCharge", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            grandTotal = o.optDouble("grandTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            paymentMethod = o.optString("paymentMethod", "CASH_ON_PICKUP"),
+            transactionReference = o.optString("transactionReference", ""),
+            paymentStatus = o.optString("paymentStatus", "PENDING"),
+            itemsSummary = o.optString("itemsSummary", ""),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
+            isDemoRecord = false
+        )
+    }
+
     private fun snapToOrderItem(s: DataSnapshot, orderId: String): OrderItemEntity? {
         val id = s.str("id") ?: s.key ?: return null
         val productId = s.str("productId") ?: return null
@@ -562,6 +995,22 @@ class FirebaseRealtimeSyncManager {
             quantity = s.dbl("quantity") ?: 0.0,
             pricePerUnit = s.dbl("pricePerUnit") ?: 0.0,
             lineTotal = s.dbl("lineTotal") ?: 0.0
+        )
+    }
+
+    private fun jsonToOrderItem(key: String, o: JSONObject, orderId: String): OrderItemEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val productId = o.optString("productId", "")
+        if (productId.isBlank()) return null
+        return OrderItemEntity(
+            id = id,
+            orderId = o.optString("orderId", orderId).ifBlank { orderId },
+            productId = productId,
+            productNameBn = o.optString("productNameBn", ""),
+            unit = o.optString("unit", "কেজি"),
+            quantity = o.optDouble("quantity", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            pricePerUnit = o.optDouble("pricePerUnit", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            lineTotal = o.optDouble("lineTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0
         )
     }
 
@@ -595,6 +1044,24 @@ class FirebaseRealtimeSyncManager {
         )
     }
 
+    private fun jsonToNotification(key: String, o: JSONObject): NotificationEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val titleBn = o.optString("titleBn", "")
+        if (titleBn.isBlank()) return null
+        return NotificationEntity(
+            id = id,
+            userId = o.optString("userId", "ALL"),
+            targetRole = o.optString("targetRole", ""),
+            senderRole = o.optString("senderRole", "SYSTEM"),
+            orderId = o.optString("orderId", ""),
+            type = o.optString("type", "SYSTEM"),
+            titleBn = titleBn,
+            messageBn = o.optString("messageBn", ""),
+            isRead = o.optBoolean("isRead", o.optBoolean("read", false)),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis())
+        )
+    }
+
     private fun reviewToMap(r: ReviewEntity): Map<String, Any?> = mapOf(
         "id" to r.id,
         "orderId" to r.orderId,
@@ -619,6 +1086,21 @@ class FirebaseRealtimeSyncManager {
             rating = (s.lng("rating") ?: 5L).toInt(),
             commentBn = s.str("commentBn") ?: "",
             createdAt = s.lng("createdAt") ?: System.currentTimeMillis()
+        )
+    }
+
+    private fun jsonToReview(key: String, o: JSONObject): ReviewEntity {
+        val id = o.optString("id", key).ifBlank { key }
+        return ReviewEntity(
+            id = id,
+            orderId = o.optString("orderId", ""),
+            productId = o.optString("productId", ""),
+            farmerId = o.optString("farmerId", ""),
+            buyerId = o.optString("buyerId", ""),
+            buyerName = o.optString("buyerName", ""),
+            rating = o.optInt("rating", 5),
+            commentBn = o.optString("commentBn", ""),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis())
         )
     }
 
@@ -647,6 +1129,20 @@ class FirebaseRealtimeSyncManager {
         )
     }
 
+    private fun jsonToComplaint(key: String, o: JSONObject): ComplaintEntity {
+        val id = o.optString("id", key).ifBlank { key }
+        return ComplaintEntity(
+            id = id,
+            orderId = o.optString("orderId", ""),
+            reporterId = o.optString("reporterId", ""),
+            reporterName = o.optString("reporterName", ""),
+            subjectBn = o.optString("subjectBn", ""),
+            descriptionBn = o.optString("descriptionBn", ""),
+            status = o.optString("status", "OPEN"),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis())
+        )
+    }
+
     private fun auditLogToMap(a: AuditLogEntity): Map<String, Any?> = mapOf(
         "id" to a.id,
         "actorId" to a.actorId,
@@ -669,6 +1165,20 @@ class FirebaseRealtimeSyncManager {
             targetId = s.str("targetId") ?: "",
             detailsBn = s.str("detailsBn") ?: "",
             createdAt = s.lng("createdAt") ?: System.currentTimeMillis()
+        )
+    }
+
+    private fun jsonToAuditLog(key: String, o: JSONObject): AuditLogEntity {
+        val id = o.optString("id", key).ifBlank { key }
+        return AuditLogEntity(
+            id = id,
+            actorId = o.optString("actorId", ""),
+            actorRole = o.optString("actorRole", ""),
+            actionBn = o.optString("actionBn", ""),
+            targetEntity = o.optString("targetEntity", ""),
+            targetId = o.optString("targetId", ""),
+            detailsBn = o.optString("detailsBn", ""),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis())
         )
     }
 
@@ -743,6 +1253,44 @@ class FirebaseRealtimeSyncManager {
             sponsorTargetUrl = s.str("sponsorTargetUrl") ?: "",
             sponsorCtaText = s.str("sponsorCtaText") ?: "বিস্তারিত দেখুন",
             updatedAt = s.lng("updatedAt") ?: 0L
+        )
+    }.getOrNull()
+
+    private fun jsonToAdConfig(o: JSONObject): AdConfig? = runCatching {
+        AdConfig(
+            adsEnabled = o.optBoolean("adsEnabled", true),
+            showAdsLabel = o.optBoolean("showAdsLabel", true),
+            androidAdsEnabled = o.optBoolean("androidAdsEnabled", true),
+            androidBannerId = o.optString("androidBannerId", ""),
+            androidInterstitialId = o.optString("androidInterstitialId", ""),
+            mobileWebAdsEnabled = o.optBoolean("mobileWebAdsEnabled", true),
+            mobileAdNetworkPriority = o.optString("mobileAdNetworkPriority", "ALL"),
+            mobileCustomAdHtml = o.optString("mobileCustomAdHtml", ""),
+            mobileDirectLinkUrl = o.optString("mobileDirectLinkUrl", ""),
+            adsenseEnabled = o.optBoolean("adsenseEnabled", false),
+            adsenseClient = o.optString("adsenseClient", ""),
+            adsenseTopSlot = o.optString("adsenseTopSlot", ""),
+            adsenseFeedSlot = o.optString("adsenseFeedSlot", ""),
+            adsenseFooterSlot = o.optString("adsenseFooterSlot", ""),
+            adsterraEnabled = o.optBoolean("adsterraEnabled", false),
+            adsterraBannerKey = o.optString("adsterraBannerKey", ""),
+            adsterraScriptUrl = o.optString("adsterraScriptUrl", ""),
+            adsterraSocialBarUrl = o.optString("adsterraSocialBarUrl", ""),
+            monetagEnabled = o.optBoolean("monetagEnabled", false),
+            monetagZoneId = o.optString("monetagZoneId", ""),
+            monetagScriptUrl = o.optString("monetagScriptUrl", ""),
+            customAdEnabled = o.optBoolean("customAdEnabled", false),
+            customAdName = o.optString("customAdName", "Ezoic / Media.net / Custom"),
+            customTopHtml = o.optString("customTopHtml", ""),
+            customFeedHtml = o.optString("customFeedHtml", ""),
+            customFooterHtml = o.optString("customFooterHtml", ""),
+            sponsorEnabled = o.optBoolean("sponsorEnabled", true),
+            sponsorTitle = o.optString("sponsorTitle", "সরাসরি কৃষকের বীজ, সার ও আধুনিক কৃষি পরামর্শ"),
+            sponsorSubtitle = o.optString("sponsorSubtitle", "কৃষি বন্ধু স্পন্সর স্লট — অ্যাডমিন প্যানেল থেকে কাস্টম বিজ্ঞাপন বা ব্যানার যুক্ত করুন।"),
+            sponsorImageUrl = o.optString("sponsorImageUrl", ""),
+            sponsorTargetUrl = o.optString("sponsorTargetUrl", ""),
+            sponsorCtaText = o.optString("sponsorCtaText", "বিস্তারিত দেখুন"),
+            updatedAt = o.optLong("updatedAt", 0L)
         )
     }.getOrNull()
 

@@ -60,7 +60,7 @@ fun SplashScreen(
     isAppLoading: Boolean,
     onSplashComplete: () -> Unit,
     appVersion: String = BuildConfig.VERSION_NAME,
-    buildVersion: Int = BuildConfig.VERSION_CODE
+    buildVersion: String = BuildConfig.BUILD_VERSION
 ) {
     val logoScale = remember { Animatable(0.78f) }
     val logoAlpha = remember { Animatable(0f) }

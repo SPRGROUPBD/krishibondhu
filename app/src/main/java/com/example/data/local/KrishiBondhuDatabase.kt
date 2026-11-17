@@ -5,6 +5,9 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+
 @Database(
     entities = [
         UserEntity::class,
@@ -19,7 +22,7 @@ import androidx.room.RoomDatabase
         NotificationEntity::class,
         AuditLogEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class KrishiBondhuDatabase : RoomDatabase() {
@@ -36,6 +39,14 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: KrishiBondhuDatabase? = null
 
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE users ADD COLUMN profileImageUri TEXT NOT NULL DEFAULT ''"
+                )
+            }
+        }
+
         fun getInstance(context: Context): KrishiBondhuDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -43,6 +54,7 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
                     KrishiBondhuDatabase::class.java,
                     "krishi_bondhu_local_dev.db"
                 )
+                    .addMigrations(MIGRATION_2_3)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

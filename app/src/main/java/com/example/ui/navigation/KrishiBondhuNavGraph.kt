@@ -24,6 +24,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.ads.AdMonetizationManager
 import com.example.data.model.AppLanguage
+import com.example.data.model.OrderStatus
 import com.example.data.model.UserRole
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.KrishiTopBar
@@ -34,6 +35,7 @@ object Routes {
     const val SPLASH = "splash"
     const val HOME = "home"
     const val BROWSE = "browse?farmers={farmers}"
+    const val FARMERS = "farmers"
     const val SELL = "sell"
     const val ORDERS = "orders"
     const val PROFILE = "profile"
@@ -61,7 +63,8 @@ private data class BottomNavTab(
     val labelEn: String,
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector,
-    val testTag: String
+    val testTag: String,
+    val badgeCount: Int = 0
 )
 
 @Composable
@@ -82,17 +85,49 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route ?: Routes.SPLASH
 
-    val topLevelRoutes = setOf(Routes.HOME, Routes.BROWSE, Routes.SELL, Routes.ORDERS, Routes.PROFILE)
+    val topLevelRoutes = setOf(Routes.HOME, Routes.BROWSE, Routes.FARMERS, Routes.SELL, Routes.ORDERS, Routes.PROFILE)
     val isTopLevel = topLevelRoutes.any { currentRoute.startsWith(it.substringBefore("?")) }
 
-    val tabs = remember {
-        listOf(
-            BottomNavTab(Routes.HOME, "হোম", "Home", Icons.Filled.Home, Icons.Outlined.Home, "nav_home"),
-            BottomNavTab(Routes.browse(false), "ফসল খুঁজুন", "Browse", Icons.Filled.Search, Icons.Outlined.Search, "nav_browse"),
-            BottomNavTab(Routes.SELL, "বিক্রি করুন", "Sell", Icons.Filled.AddCircle, Icons.Outlined.AddCircleOutline, "nav_sell"),
-            BottomNavTab(Routes.ORDERS, "অর্ডার", "Orders", Icons.Filled.ShoppingBag, Icons.Outlined.ShoppingBag, "nav_orders"),
-            BottomNavTab(Routes.PROFILE, "প্রোফাইল", "Profile", Icons.Filled.Person, Icons.Outlined.Person, "nav_profile")
-        )
+    val farmerPendingOrderCount = remember(uiState.orders, uiState.activeUser) {
+        val activeUser = uiState.activeUser
+        if (activeUser?.role == UserRole.FARMER.name) {
+            uiState.orders.count { it.farmerId == activeUser.id && it.status == OrderStatus.PENDING.name }
+        } else {
+            0
+        }
+    }
+
+    val tabs = remember(uiState.activeRole, farmerPendingOrderCount) {
+        when (uiState.activeRole) {
+            UserRole.FARMER -> listOf(
+                BottomNavTab(Routes.HOME, "খামার", "Farm", Icons.Filled.Agriculture, Icons.Outlined.Agriculture, "nav_home"),
+                BottomNavTab(Routes.SELL, "আমার ফসল", "My Crops", Icons.Filled.Inventory2, Icons.Outlined.Inventory2, "nav_sell"),
+                BottomNavTab(Routes.ORDERS, "অর্ডার", "Orders", Icons.Filled.ShoppingBag, Icons.Outlined.ShoppingBag, "nav_orders", badgeCount = farmerPendingOrderCount),
+                BottomNavTab(Routes.browse(false), "বাজার", "Market", Icons.Filled.Storefront, Icons.Outlined.Storefront, "nav_browse"),
+                BottomNavTab(Routes.PROFILE, "প্রোফাইল", "Profile", Icons.Filled.Person, Icons.Outlined.Person, "nav_profile")
+            )
+            UserRole.BUYER -> listOf(
+                BottomNavTab(Routes.HOME, "হোম", "Home", Icons.Filled.Home, Icons.Outlined.Home, "nav_home"),
+                BottomNavTab(Routes.browse(false), "ফসল খুঁজুন", "Crops", Icons.Filled.Search, Icons.Outlined.Search, "nav_browse"),
+                BottomNavTab(Routes.FARMERS, "কৃষক", "Farmers", Icons.Filled.Groups, Icons.Outlined.Groups, "nav_farmers"),
+                BottomNavTab(Routes.ORDERS, "অর্ডার", "Orders", Icons.Filled.ShoppingBag, Icons.Outlined.ShoppingBag, "nav_orders"),
+                BottomNavTab(Routes.PROFILE, "প্রোফাইল", "Profile", Icons.Filled.Person, Icons.Outlined.Person, "nav_profile")
+            )
+            UserRole.ADMIN -> listOf(
+                BottomNavTab(Routes.HOME, "হোম", "Home", Icons.Filled.Home, Icons.Outlined.Home, "nav_home"),
+                BottomNavTab(Routes.browse(false), "ফসল খুঁজুন", "Crops", Icons.Filled.Search, Icons.Outlined.Search, "nav_browse"),
+                BottomNavTab(Routes.FARMERS, "কৃষক", "Farmers", Icons.Filled.Groups, Icons.Outlined.Groups, "nav_farmers"),
+                BottomNavTab(Routes.ORDERS, "অর্ডার", "Orders", Icons.Filled.ShoppingBag, Icons.Outlined.ShoppingBag, "nav_orders"),
+                BottomNavTab(Routes.PROFILE, "প্রোফাইল", "Profile", Icons.Filled.Person, Icons.Outlined.Person, "nav_profile")
+            )
+            null -> listOf(
+                BottomNavTab(Routes.HOME, "হোম", "Home", Icons.Filled.Home, Icons.Outlined.Home, "nav_home"),
+                BottomNavTab(Routes.browse(false), "ফসল খুঁজুন", "Browse", Icons.Filled.Search, Icons.Outlined.Search, "nav_browse"),
+                BottomNavTab(Routes.SELL, "বিক্রি করুন", "Sell", Icons.Filled.AddCircle, Icons.Outlined.AddCircleOutline, "nav_sell"),
+                BottomNavTab(Routes.ORDERS, "অর্ডার", "Orders", Icons.Filled.ShoppingBag, Icons.Outlined.ShoppingBag, "nav_orders"),
+                BottomNavTab(Routes.PROFILE, "প্রোফাইল", "Profile", Icons.Filled.Person, Icons.Outlined.Person, "nav_profile")
+            )
+        }
     }
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -108,6 +143,8 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         isOnline = uiState.isOnline,
                         cartCount = uiState.cartBadgeCount,
                         unreadNotifs = uiState.unreadNotificationCount,
+                        activeRole = uiState.activeRole,
+                        verificationStatus = uiState.activeUser?.verificationStatus ?: "",
                         onCartClick = { navController.navigate(Routes.CART) },
                         onNotificationsClick = { navController.navigate(Routes.NOTIFICATIONS) },
                         onLanguageToggle = { viewModel.toggleLanguage() }
@@ -121,7 +158,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         tonalElevation = 4.dp
                     ) {
                         tabs.forEach { tab ->
-                            val selected = currentRoute.startsWith(tab.route.substringBefore("?"))
+                            val selected = currentRoute.substringBefore("?") == tab.route.substringBefore("?")
                             NavigationBarItem(
                                 selected = selected,
                                 onClick = {
@@ -132,10 +169,18 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                     }
                                 },
                                 icon = {
-                                    Icon(
-                                        imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                        contentDescription = tab.labelBn
-                                    )
+                                    BadgedBox(
+                                        badge = {
+                                            if (tab.badgeCount > 0) {
+                                                Badge { Text(tab.badgeCount.toString()) }
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                            contentDescription = tab.labelBn
+                                        )
+                                    }
                                 },
                                 label = {
                                     Text(
@@ -161,7 +206,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                     NavigationRail(containerColor = MaterialTheme.colorScheme.surface) {
                         Spacer(modifier = Modifier.height(8.dp))
                         tabs.forEach { tab ->
-                            val selected = currentRoute.startsWith(tab.route.substringBefore("?"))
+                            val selected = currentRoute.substringBefore("?") == tab.route.substringBefore("?")
                             NavigationRailItem(
                                 selected = selected,
                                 onClick = {
@@ -172,10 +217,18 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                     }
                                 },
                                 icon = {
-                                    Icon(
-                                        imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                        contentDescription = tab.labelBn
-                                    )
+                                    BadgedBox(
+                                        badge = {
+                                            if (tab.badgeCount > 0) {
+                                                Badge { Text(tab.badgeCount.toString()) }
+                                            }
+                                        }
+                                    ) {
+                                        Icon(
+                                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                            contentDescription = tab.labelBn
+                                        )
+                                    }
                                 },
                                 label = {
                                     Text(
@@ -227,8 +280,18 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 }
                             },
                             onSearchTap = { navController.navigate(Routes.browse(false)) },
-                            onFindFarmersTap = { navController.navigate(Routes.browse(true)) },
-                            onStartSellingTap = { navController.navigate(Routes.SELL) }
+                            onFindFarmersTap = {
+                                if (uiState.activeRole == UserRole.BUYER || uiState.activeRole == UserRole.ADMIN) {
+                                    navController.navigate(Routes.FARMERS)
+                                } else {
+                                    navController.navigate(Routes.browse(true))
+                                }
+                            },
+                            onStartSellingTap = { navController.navigate(Routes.SELL) },
+                            onNavigateToOrders = { navController.navigate(Routes.ORDERS) },
+                            onOrderClick = { oid -> navController.navigate(Routes.orderDetail(oid)) },
+                            onOpenCart = { navController.navigate(Routes.CART) },
+                            onOpenAdminDashboard = { navController.navigate(Routes.ADMIN) }
                         )
                     }
 
@@ -243,6 +306,29 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         BrowseScreen(
                             uiState = uiState,
                             initialTabFarmers = farmersOnly,
+                            onSearchChange = viewModel::setSearchQuery,
+                            onCategorySelect = viewModel::setCategoryFilter,
+                            onDivisionSelect = viewModel::setDivisionFilter,
+                            onDistrictSelect = viewModel::setDistrictFilter,
+                            onUpazilaSelect = viewModel::setUpazilaFilter,
+                            onLocationAutoSelect = viewModel::setLocationFilters,
+                            onWholesaleSelect = viewModel::setWholesaleFilter,
+                            onSortSelect = viewModel::setPriceSort,
+                            onResetFilters = viewModel::resetFilters,
+                            onProductClick = { pid -> navController.navigate(Routes.productDetail(pid)) },
+                            onFarmerClick = { fid -> navController.navigate(Routes.farmerProfile(fid)) },
+                            onQuickAddToCart = { pid ->
+                                uiState.products.firstOrNull { it.id == pid }?.let {
+                                    viewModel.addToCart(it, 1.0)
+                                }
+                            }
+                        )
+                    }
+
+                    composable(Routes.FARMERS) {
+                        BrowseScreen(
+                            uiState = uiState,
+                            initialTabFarmers = true,
                             onSearchChange = viewModel::setSearchQuery,
                             onCategorySelect = viewModel::setCategoryFilter,
                             onDivisionSelect = viewModel::setDivisionFilter,
@@ -414,13 +500,21 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         LoginScreen(
                             onBack = { navController.popBackStack() },
                             onLogin = { identifier, pass ->
+                                val cameFromCart = navController.previousBackStackEntry?.destination?.route == Routes.CART
                                 viewModel.login(identifier, pass) { loggedInUser ->
-                                    if (loggedInUser.role == UserRole.ADMIN.name) {
-                                        navController.navigate(Routes.ADMIN) {
-                                            popUpTo(Routes.HOME)
+                                    when {
+                                        loggedInUser.role == UserRole.ADMIN.name -> {
+                                            navController.navigate(Routes.ADMIN) {
+                                                popUpTo(Routes.HOME)
+                                            }
                                         }
-                                    } else {
-                                        navController.popBackStack()
+                                        cameFromCart -> navController.popBackStack()
+                                        else -> {
+                                            navController.navigate(Routes.HOME) {
+                                                popUpTo(Routes.HOME) { inclusive = true }
+                                                launchSingleTop = true
+                                            }
+                                        }
                                     }
                                 }
                             },
@@ -445,7 +539,10 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onBack = { navController.popBackStack() },
                             onRegister = { name, phone, pass, role, division, dist, upazila, union, village, nid, bio ->
                                 viewModel.register(name, phone, pass, role, division, dist, upazila, union, village, nid, bio) {
-                                    navController.popBackStack()
+                                    navController.navigate(Routes.HOME) {
+                                        popUpTo(Routes.HOME) { inclusive = true }
+                                        launchSingleTop = true
+                                    }
                                 }
                             }
                         )

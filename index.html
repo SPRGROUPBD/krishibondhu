@@ -51,6 +51,7 @@
           <div class="flex items-center gap-1.5">
             <span class="font-bold text-lg text-[#105B34] leading-none">কৃষি বন্ধু</span>
             <span id="rtdb-status-dot" title="Firebase Realtime Sync" class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
+            <span id="role-mode-pill" class="hidden px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#EAF7EF] text-[#105B34] border border-emerald-200"></span>
           </div>
           <span class="text-[11px] text-emerald-700 font-medium hidden sm:block">০% দালাল • সারা বাংলাদেশ (৬৪ জেলা)</span>
         </div>
@@ -80,7 +81,7 @@
           <span id="notif-badge" class="hidden absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center">0</span>
         </button>
 
-        <button onclick="window.kbApp.navigate('cart')" class="relative p-2 rounded-xl hover:bg-[#EAF7EF] text-[#105B34]" aria-label="কার্ট">
+        <button id="nav-cart-btn" onclick="window.kbApp.navigate('cart')" class="relative p-2 rounded-xl hover:bg-[#EAF7EF] text-[#105B34]" aria-label="কার্ট">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"/>
           </svg>
@@ -92,7 +93,7 @@
     </div>
 
     <!-- Mobile Quick Bar -->
-    <div class="md:hidden border-t border-emerald-50 bg-white px-3 py-1.5 flex items-center gap-1 overflow-x-auto no-scrollbar text-xs font-medium">
+    <div id="mobile-quick-nav" class="md:hidden border-t border-emerald-50 bg-white px-3 py-1.5 flex items-center gap-1 overflow-x-auto no-scrollbar text-xs font-medium">
       <button onclick="window.kbApp.navigate('home')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">হোম</button>
       <button onclick="window.kbApp.navigate('browse')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">ফসল খুঁজুন</button>
       <button onclick="window.kbApp.navigate('farmers')" class="px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF]">কৃষক খুঁজুন</button>

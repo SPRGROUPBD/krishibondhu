@@ -41,6 +41,8 @@ fun KrishiTopBar(
     isOnline: Boolean = true,
     cartCount: Int,
     unreadNotifs: Int,
+    activeRole: UserRole? = null,
+    verificationStatus: String = "",
     onCartClick: () -> Unit,
     onNotificationsClick: () -> Unit,
     onLanguageToggle: () -> Unit
@@ -90,12 +92,51 @@ fun KrishiTopBar(
                                     .clip(CircleShape)
                                     .background(if (isOnline) Color(0xFF4ADE80) else Color(0xFFFBBF24))
                             )
+                            if (activeRole != null) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    color = Color.White.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.testTag("topbar_role_badge")
+                                ) {
+                                    val badgeText = when (activeRole) {
+                                        UserRole.FARMER -> if (language == AppLanguage.BENGALI) "কৃষক" else "Farmer"
+                                        UserRole.BUYER -> if (language == AppLanguage.BENGALI) "ক্রেতা" else "Buyer"
+                                        UserRole.ADMIN -> if (language == AppLanguage.BENGALI) "অ্যাডমিন" else "Admin"
+                                    }
+                                    Text(
+                                        text = badgeText,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = HarvestGoldLight,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
                         }
-                        Text(
-                            text = if (language == AppLanguage.BENGALI)
+                        val subtitleText = when (activeRole) {
+                            UserRole.FARMER -> {
+                                val verText = if (verificationStatus == "VERIFIED") "✓ যাচাইকৃত" else "যাচাই অপেক্ষমাণ"
+                                if (language == AppLanguage.BENGALI)
+                                    "কৃষক ওয়ার্কস্পেস • $verText"
+                                else
+                                    "Farmer Workspace • ${if (verificationStatus == "VERIFIED") "Verified" else "Pending"}"
+                            }
+                            UserRole.BUYER -> {
+                                val verText = if (verificationStatus == "VERIFIED") "✓ যাচাইকৃত" else "যাচাই অপেক্ষমাণ"
+                                if (language == AppLanguage.BENGALI)
+                                    "ক্রেতা মার্কেটপ্লেস • $verText"
+                                else
+                                    "Buyer Marketplace • ${if (verificationStatus == "VERIFIED") "Verified" else "Pending"}"
+                            }
+                            UserRole.ADMIN -> if (language == AppLanguage.BENGALI) "সুপার অ্যাডমিন প্যানেল" else "Super Admin Mode"
+                            null -> if (language == AppLanguage.BENGALI)
                                 if (isOnline) "অনলাইন • ০% দালাল • সারা বাংলাদেশ" else "অফলাইন • লোকাল ক্যাশ সক্রিয়"
                             else
-                                if (isOnline) "Online • 0% Commission • All BD" else "Offline • Local Cache Active",
+                                if (isOnline) "Online • 0% Commission • All BD" else "Offline • Local Cache Active"
+                        }
+                        Text(
+                            text = subtitleText,
                             style = MaterialTheme.typography.labelSmall,
                             color = LightGreen.copy(alpha = 0.92f),
                             maxLines = 1,
@@ -143,24 +184,26 @@ fun KrishiTopBar(
                         }
                     }
 
-                    IconButton(
-                        onClick = onCartClick,
-                        modifier = Modifier.testTag("cart_button")
-                    ) {
-                        BadgedBox(
-                            badge = {
-                                if (cartCount > 0) {
-                                    Badge(containerColor = HarvestGold, contentColor = TextCharcoal) {
-                                        Text(cartCount.toString())
+                    if (activeRole != UserRole.FARMER || cartCount > 0) {
+                        IconButton(
+                            onClick = onCartClick,
+                            modifier = Modifier.testTag("cart_button")
+                        ) {
+                            BadgedBox(
+                                badge = {
+                                    if (cartCount > 0) {
+                                        Badge(containerColor = HarvestGold, contentColor = TextCharcoal) {
+                                            Text(cartCount.toString())
+                                        }
                                     }
                                 }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.ShoppingCart,
+                                    contentDescription = "শপিং কার্ট",
+                                    tint = Color.White
+                                )
                             }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.ShoppingCart,
-                                contentDescription = "শপিং কার্ট",
-                                tint = Color.White
-                            )
                         }
                     }
                 }
@@ -301,7 +344,8 @@ fun ProductCard(
     language: AppLanguage,
     onClick: () -> Unit,
     onQuickAddToCart: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showQuickAdd: Boolean = true
 ) {
     Card(
         modifier = modifier
@@ -341,7 +385,7 @@ fun ProductCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "${product.pricePerUnit.formatBdt()}/${product.unit}",
                             style = MaterialTheme.typography.titleMedium,
@@ -358,22 +402,24 @@ fun ProductCard(
                         )
                     }
 
-                    FilledIconButton(
-                        onClick = onQuickAddToCart,
-                        enabled = product.availableQuantity > 0,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        ),
-                        modifier = Modifier
-                            .size(44.dp)
-                            .testTag("quick_add_${product.id}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.AddShoppingCart,
-                            contentDescription = "কার্টে যোগ করুন",
-                            modifier = Modifier.size(20.dp)
-                        )
+                    if (showQuickAdd) {
+                        FilledIconButton(
+                            onClick = onQuickAddToCart,
+                            enabled = product.availableQuantity > 0,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            ),
+                            modifier = Modifier
+                                .size(44.dp)
+                                .testTag("quick_add_${product.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.AddShoppingCart,
+                                contentDescription = "কার্টে যোগ করুন",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
             }

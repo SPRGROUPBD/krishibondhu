@@ -64,13 +64,18 @@ class MarketplaceRepository(
         prefs.setActiveUserId("")
     }
 
+    suspend fun syncNow() {
+        rtdbSync.pullAllFromRest(db, onAdConfigChanged = { _adConfig.value = it })
+    }
+
     /**
      * Authenticates users:
      * 1. Superadmin (`id = admin`, `password = bondhu`) works offline/locally even if not in Firebase.
-     * 2. Standard Farmers and Buyers check Room first, then Firebase Realtime Database.
+     * 2. Standard Farmers and Buyers check normalized phone in Room AND Firebase Realtime Database
+     *    (re-checking remote if cached password hash differs, e.g. after Website password reset).
      */
     suspend fun loginUser(identifier: String, rawPassword: String): Result<UserEntity> {
-        val cleanId = identifier.trim()
+        val cleanId = SecurityHashUtil.normalizePhone(identifier)
         if (cleanId.equals(SUPERADMIN_LOGIN_ID, ignoreCase = true)) {
             if (rawPassword != SUPERADMIN_PASSWORD) {
                 return Result.failure(IllegalArgumentException("সুপার অ্যাডমিন পাসওয়ার্ড সঠিক নয়।"))
@@ -100,9 +105,10 @@ class MarketplaceRepository(
         }
 
         val expectedHash = SecurityHashUtil.hashPassword(rawPassword)
-        var user = db.userDao().getUserByPhone(cleanId)
-        if (user == null) {
-            val remoteUser = rtdbSync.fetchUserByPhone(cleanId)
+        var user = db.userDao().getAllUsersOnce()
+            .firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == cleanId }
+        if (user == null || user.passwordHash != expectedHash) {
+            val remoteUser = rtdbSync.fetchUserByPhone(cleanId, db)
             if (remoteUser != null) {
                 db.userDao().upsertUser(remoteUser)
                 user = remoteUser
@@ -131,7 +137,7 @@ class MarketplaceRepository(
         nidLastFour: String,
         farmBio: String
     ): Result<UserEntity> {
-        val cleanPhone = phone.trim()
+        val cleanPhone = SecurityHashUtil.normalizePhone(phone)
         if (fullName.isBlank() || cleanPhone.length < 10 || rawPassword.length < 6) {
             return Result.failure(IllegalArgumentException("নাম, সঠিক মোবাইল নম্বর ও কমপক্ষে ৬ অক্ষরের পাসওয়ার্ড দিন।"))
         }
@@ -141,7 +147,9 @@ class MarketplaceRepository(
         if (role == UserRole.ADMIN) {
             return Result.failure(IllegalArgumentException("অ্যাডমিন হিসেবে সরাসরি নিবন্ধন করা যাবে না।"))
         }
-        if (db.userDao().getUserByPhone(cleanPhone) != null || rtdbSync.fetchUserByPhone(cleanPhone) != null) {
+        val existsLocally = db.userDao().getAllUsersOnce()
+            .any { SecurityHashUtil.normalizePhone(it.phone) == cleanPhone }
+        if (existsLocally || rtdbSync.fetchUserByPhone(cleanPhone, db) != null) {
             return Result.failure(IllegalArgumentException("এই মোবাইল নম্বরটি ইতোমধ্যে নিবন্ধিত।"))
         }
 
@@ -166,6 +174,7 @@ class MarketplaceRepository(
             village = village.trim(),
             farmBio = farmBio.trim(),
             nidMasked = maskedNid,
+            profileImageUri = "",
             verificationStatus = "PENDING",
             isMobileVerified = true,
             rating = 5.0,
@@ -188,6 +197,112 @@ class MarketplaceRepository(
         rtdbSync.pushAuditLog(audit)
         prefs.setActiveUserId(uid)
         return Result.success(user)
+    }
+
+    suspend fun resetPasswordByPhone(
+        phone: String,
+        newRawPassword: String
+    ): Result<Unit> {
+        val cleanPhone = SecurityHashUtil.normalizePhone(phone)
+        if (cleanPhone.equals(SUPERADMIN_LOGIN_ID, ignoreCase = true)) {
+            return Result.failure(IllegalArgumentException("সুপার অ্যাডমিন পাসওয়ার্ড এখান থেকে পরিবর্তন করা যাবে না।"))
+        }
+        if (cleanPhone.length < 10) {
+            return Result.failure(IllegalArgumentException("সঠিক নিবন্ধিত মোবাইল নম্বর দিন।"))
+        }
+        if (newRawPassword.length < 6) {
+            return Result.failure(IllegalArgumentException("নতুন পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।"))
+        }
+
+        val remoteUser = rtdbSync.fetchUserByPhone(cleanPhone, db)
+        val existingUser = remoteUser ?: db.userDao().getAllUsersOnce()
+            .firstOrNull { SecurityHashUtil.normalizePhone(it.phone) == cleanPhone }
+            ?: return Result.failure(IllegalArgumentException("এই মোবাইল নম্বরে কোনো অ্যাকাউন্ট পাওয়া যায়নি।"))
+
+        val updated = existingUser.copy(
+            passwordHash = SecurityHashUtil.hashPassword(newRawPassword)
+        )
+        db.userDao().upsertUser(updated)
+        rtdbSync.pushUser(updated)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = updated.id,
+            actorRole = updated.role,
+            actionBn = "পাসওয়ার্ড রিসেট (Forgot Password)",
+            targetEntity = "User",
+            targetId = updated.id,
+            detailsBn = "${updated.fullName} (${updated.phone}) পাসওয়ার্ড পরিবর্তন করেছেন"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(Unit)
+    }
+
+    suspend fun updateUserProfile(
+        userId: String,
+        fullName: String,
+        division: String,
+        district: String,
+        upazila: String,
+        unionName: String,
+        village: String,
+        farmBio: String,
+        nidLastFour: String,
+        profileImageUri: String
+    ): Result<UserEntity> {
+        val existing = db.userDao().getUserById(userId)
+            ?: return Result.failure(IllegalArgumentException("ব্যবহারকারী পাওয়া যায়নি।"))
+        if (fullName.isBlank()) {
+            return Result.failure(IllegalArgumentException("অনুগ্রহ করে পূর্ণ নাম লিখুন।"))
+        }
+        val resolvedDistrict = district.ifBlank { existing.district }
+        val resolvedDivision = division.ifBlank { BangladeshLocations.divisionForDistrict(resolvedDistrict) }
+        val resolvedUpazila = upazila.ifBlank { existing.upazila }
+        val resolvedNidMasked = if (nidLastFour.trim().length >= 4) {
+            "NID-****-${nidLastFour.trim().takeLast(4)}"
+        } else {
+            existing.nidMasked
+        }
+
+        val updated = existing.copy(
+            fullName = fullName.trim(),
+            division = resolvedDivision,
+            district = resolvedDistrict,
+            upazila = resolvedUpazila,
+            unionName = unionName.trim(),
+            village = village.trim(),
+            farmBio = farmBio.trim(),
+            nidMasked = resolvedNidMasked,
+            profileImageUri = profileImageUri.trim()
+        )
+        db.userDao().upsertUser(updated)
+        rtdbSync.pushUser(updated)
+
+        if (updated.role == UserRole.FARMER.name) {
+            db.productDao().updateFarmerMetadataOnProducts(
+                farmerId = updated.id,
+                farmerName = updated.fullName,
+                division = updated.division,
+                district = updated.district,
+                upazila = updated.upazila,
+                now = System.currentTimeMillis()
+            )
+            db.productDao().getProductsForFarmer(updated.id).forEach { rtdbSync.pushProduct(it) }
+        }
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = updated.id,
+            actorRole = updated.role,
+            actionBn = "প্রোফাইল তথ্য হালনাগাদ",
+            targetEntity = "User",
+            targetId = updated.id,
+            detailsBn = "${updated.fullName} — ${updated.upazila}, ${updated.district}, ${updated.division}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updated)
     }
 
     suspend fun addToCart(product: ProductEntity, requestedQty: Double): Result<Unit> {

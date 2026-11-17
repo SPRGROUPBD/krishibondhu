@@ -381,8 +381,14 @@ function closeModal() {
 
 function updateHeaderChrome() {
   const user = getActiveUser();
-  const isAdmin = user && user.role === "ADMIN";
+  const role = user?.role || "GUEST";
+  const isAdmin = role === "ADMIN";
+  const isFarmer = role === "FARMER";
+  const isBuyer = role === "BUYER";
   const unreadCount = getVisibleNotifications().filter((n) => !n.isRead).length;
+  const farmerPendingOrders = isFarmer
+    ? state.orders.filter((o) => o.farmerId === user.id && o.status === "PENDING").length
+    : 0;
 
   const dot = document.getElementById("rtdb-status-dot");
   if (dot) {
@@ -393,6 +399,26 @@ function updateHeaderChrome() {
       : state.isOnline
       ? "ইন্টারনেট সচল (Firebase রিয়েল-টাইম সংযোগ হচ্ছে...)"
       : "অফলাইন মোড";
+  }
+
+  const rolePill = document.getElementById("role-mode-pill");
+  if (rolePill) {
+    if (user) {
+      rolePill.classList.remove("hidden");
+      if (isFarmer) {
+        rolePill.textContent = "👨‍🌾 কৃষক মোড";
+        rolePill.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-[#105B34] border border-emerald-300";
+      } else if (isBuyer) {
+        rolePill.textContent = "🛍️ ক্রেতা মোড";
+        rolePill.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-100 text-sky-900 border border-sky-200";
+      } else {
+        rolePill.textContent = "🛡️ সুপার অ্যাডমিন";
+        rolePill.className = "px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300";
+      }
+    } else {
+      rolePill.classList.add("hidden");
+      rolePill.textContent = "";
+    }
   }
 
   const langBtn = document.getElementById("lang-btn");
@@ -410,19 +436,94 @@ function updateHeaderChrome() {
     cartBadge.classList.toggle("hidden", state.cart.length === 0);
   }
 
-  const adminDesktop = document.getElementById("nav-admin-btn");
-  const adminMobile = document.getElementById("mobile-admin-btn");
-  if (adminDesktop) adminDesktop.classList.toggle("hidden", !isAdmin);
-  if (adminMobile) adminMobile.classList.toggle("hidden", !isAdmin);
+  const cartBtn = document.getElementById("nav-cart-btn");
+  if (cartBtn) {
+    cartBtn.classList.toggle("hidden", isFarmer && state.cart.length === 0);
+  }
+
+  const navItems = isFarmer
+    ? [
+        { key: "home", label: "আমার খামার", action: "window.kbApp.navigate('home')", active: state.page === "home" },
+        {
+          key: "farmer-products",
+          label: "আমার ফসল",
+          action: "window.kbApp.navigate('farmer-dashboard', { tab: 'products' })",
+          active: state.page === "farmer-dashboard" && state.farmerTab === "products"
+        },
+        {
+          key: "farmer-add",
+          label: "+ ফসল যোগ",
+          action: "window.kbApp.navigate('farmer-dashboard', { tab: 'add' })",
+          active: state.page === "farmer-dashboard" && state.farmerTab === "add"
+        },
+        {
+          key: "farmer-orders",
+          label: farmerPendingOrders > 0 ? `প্রাপ্ত অর্ডার (${farmerPendingOrders})` : "প্রাপ্ত অর্ডার",
+          action: "window.kbApp.navigate('farmer-dashboard', { tab: 'orders' })",
+          active: (state.page === "farmer-dashboard" && state.farmerTab === "orders") || state.page === "orders"
+        },
+        { key: "browse", label: "বাজার দেখুন", action: "window.kbApp.navigate('browse')", active: state.page === "browse" },
+        { key: "info", label: "তথ্য ও নীতি", action: "window.kbApp.navigate('info')", active: state.page === "info" }
+      ]
+    : isBuyer
+    ? [
+        { key: "home", label: "হোম", action: "window.kbApp.navigate('home')", active: state.page === "home" },
+        { key: "browse", label: "ফসল খুঁজুন", action: "window.kbApp.navigate('browse')", active: state.page === "browse" },
+        { key: "farmers", label: "কৃষক খুঁজুন", action: "window.kbApp.navigate('farmers')", active: state.page === "farmers" },
+        { key: "orders", label: "আমার অর্ডার", action: "window.kbApp.navigate('orders')", active: state.page === "orders" },
+        { key: "info", label: "তথ্য ও নীতি", action: "window.kbApp.navigate('info')", active: state.page === "info" }
+      ]
+    : isAdmin
+    ? [
+        { key: "home", label: "হোম", action: "window.kbApp.navigate('home')", active: state.page === "home" },
+        { key: "browse", label: "ফসল খুঁজুন", action: "window.kbApp.navigate('browse')", active: state.page === "browse" },
+        { key: "farmers", label: "কৃষক খুঁজুন", action: "window.kbApp.navigate('farmers')", active: state.page === "farmers" },
+        { key: "orders", label: "অর্ডার", action: "window.kbApp.navigate('orders')", active: state.page === "orders" },
+        { key: "info", label: "তথ্য ও নীতি", action: "window.kbApp.navigate('info')", active: state.page === "info" },
+        { key: "admin", label: "অ্যাডমিন প্যানেল", action: "window.kbApp.navigate('admin')", active: state.page === "admin", isAdminBtn: true }
+      ]
+    : [
+        { key: "home", label: "হোম", action: "window.kbApp.navigate('home')", active: state.page === "home" },
+        { key: "browse", label: "ফসল খুঁজুন", action: "window.kbApp.navigate('browse')", active: state.page === "browse" },
+        { key: "farmers", label: "কৃষক খুঁজুন", action: "window.kbApp.navigate('farmers')", active: state.page === "farmers" },
+        { key: "sell", label: "বিক্রি করুন", action: "window.kbApp.goSell()", active: state.page === "farmer-dashboard" },
+        { key: "orders", label: "অর্ডার", action: "window.kbApp.navigate('orders')", active: state.page === "orders" },
+        { key: "info", label: "তথ্য ও নীতি", action: "window.kbApp.navigate('info')", active: state.page === "info" }
+      ];
+
+  const desktopNav = document.getElementById("desktop-nav");
+  if (desktopNav) {
+    desktopNav.innerHTML = navItems
+      .map((item) => {
+        const cls = item.isAdminBtn
+          ? `nav-btn px-3 py-2 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 ${item.active ? "font-bold ring-2 ring-amber-300" : ""}`
+          : `nav-btn px-3 py-2 rounded-lg hover:bg-[#EAF7EF] ${item.active ? "bg-[#EAF7EF] text-[#105B34] font-bold" : ""}`;
+        return `<button onclick="${item.action}" class="${cls}">${escapeHtml(item.label)}</button>`;
+      })
+      .join("");
+  }
+
+  const mobileNav = document.getElementById("mobile-quick-nav");
+  if (mobileNav) {
+    mobileNav.innerHTML = navItems
+      .map((item) => {
+        const cls = item.isAdminBtn
+          ? `px-2.5 py-1.5 rounded-lg whitespace-nowrap bg-amber-50 text-amber-800 border border-amber-200 ${item.active ? "font-bold" : ""}`
+          : `px-2.5 py-1.5 rounded-lg whitespace-nowrap hover:bg-[#EAF7EF] ${item.active ? "bg-[#EAF7EF] text-[#105B34] font-bold" : ""}`;
+        return `<button onclick="${item.action}" class="${cls}">${escapeHtml(item.label)}</button>`;
+      })
+      .join("");
+  }
 
   const authSlot = document.getElementById("auth-header-slot");
   if (authSlot) {
     if (user) {
-      const roleLabel = user.role === "ADMIN" ? "অ্যাডমিন" : user.role === "FARMER" ? "কৃষক" : "ক্রেতা";
+      const roleLabel = isAdmin ? "অ্যাডমিন" : isFarmer ? "কৃষক" : "ক্রেতা";
+      const targetPage = isAdmin ? "admin" : isFarmer ? "farmer-dashboard" : "orders";
       authSlot.innerHTML = `
         <div class="flex items-center gap-1.5">
-          <button onclick="window.kbApp.navigate('${user.role === "ADMIN" ? "admin" : user.role === "FARMER" ? "farmer-dashboard" : "orders"}')"
-            class="px-3 py-1.5 rounded-xl bg-[#EAF7EF] text-[#105B34] text-xs font-bold border border-emerald-200 hover:bg-emerald-100 max-w-[140px] truncate">
+          <button onclick="window.kbApp.navigate('${targetPage}')"
+            class="px-3 py-1.5 rounded-xl bg-[#EAF7EF] text-[#105B34] text-xs font-bold border border-emerald-200 hover:bg-emerald-100 max-w-[150px] truncate">
             ${escapeHtml(user.fullName)} (${roleLabel})
           </button>
           <button onclick="window.kbApp.logout()" class="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-red-600 hover:bg-red-50 border border-red-200">
@@ -436,20 +537,13 @@ function updateHeaderChrome() {
           <button onclick="window.kbApp.navigate('auth-login')" class="px-3 py-1.5 rounded-xl border border-emerald-200 text-xs font-semibold text-[#105B34] hover:bg-[#EAF7EF]">
             ${t("লগইন", "Login")}
           </button>
-          <button onclick="window.kbApp.navigate('auth-register-farmer')" class="hidden sm:inline-flex px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-semibold hover:bg-[#105B34]">
+          <button onclick="window.kbApp.navigate('auth-register-buyer')" class="hidden sm:inline-flex px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-semibold hover:bg-[#105B34]">
             ${t("নিবন্ধন", "Register")}
           </button>
         </div>
       `;
     }
   }
-
-  document.querySelectorAll(".nav-btn").forEach((btn) => {
-    const active = btn.dataset.nav === state.page;
-    btn.classList.toggle("bg-[#EAF7EF]", active);
-    btn.classList.toggle("text-[#105B34]", active);
-    btn.classList.toggle("font-bold", active);
-  });
 }
 
 function navigate(page, params = {}) {
@@ -524,7 +618,7 @@ async function login(identifier, rawPassword) {
   state.activeUserId = user.id;
   saveLocalSnapshot();
   showToast(`স্বাগতম, ${user.fullName}!`, "success");
-  navigate(user.role === "FARMER" ? "farmer-dashboard" : "home");
+  navigate("home");
   return true;
 }
 
@@ -594,7 +688,7 @@ async function registerUser(form) {
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
   showToast(`নিবন্ধন সফল হয়েছে! স্বাগতম, ${user.fullName} (অ্যাডমিন যাচাই অপেক্ষমাণ)`, "success");
-  navigate(role === "FARMER" ? "farmer-dashboard" : "home");
+  navigate("home");
   return true;
 }
 
@@ -1492,6 +1586,9 @@ function getFilteredFarmers() {
 }
 
 function renderProductCard(p) {
+  const user = getActiveUser();
+  const isFarmerViewer = user && user.role === "FARMER";
+  const isOwnProduct = isFarmerViewer && p.farmerId === user.id;
   const cat = state.categories.find((c) => c.id === p.categoryId);
   const emoji = cat?.emoji || "🌾";
   const imgHtml = p.imageUri
@@ -1517,9 +1614,13 @@ function renderProductCard(p) {
           </div>
         </div>
         <div class="flex gap-2">
-          <button onclick="window.kbApp.addToCart('${escapeHtml(p.id)}', 1)" class="flex-1 py-2.5 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white text-xs font-bold transition">
-            + কার্টে যোগ করুন
-          </button>
+          ${
+            isOwnProduct
+              ? `<button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'products' })" class="flex-1 py-2.5 rounded-xl bg-amber-50 text-amber-800 border border-amber-200 text-xs font-bold">দাম ও মজুত সম্পাদনা</button>`
+              : isFarmerViewer
+              ? `<button onclick="window.kbApp.navigate('product-detail', { id: '${escapeHtml(p.id)}' })" class="flex-1 py-2.5 rounded-xl bg-[#EAF7EF] text-[#105B34] border border-emerald-200 text-xs font-bold">বাজার দর দেখুন</button>`
+              : `<button onclick="window.kbApp.addToCart('${escapeHtml(p.id)}', 1)" class="flex-1 py-2.5 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white text-xs font-bold transition">+ কার্টে যোগ করুন</button>`
+          }
           <button onclick="window.kbApp.navigate('product-detail', { id: '${escapeHtml(p.id)}' })" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-xs font-semibold text-[#105B34] hover:bg-[#EAF7EF]">
             বিস্তারিত
           </button>
@@ -1531,13 +1632,146 @@ function renderProductCard(p) {
 
 // ---------------------- Page Views ----------------------
 
+function renderFarmerHomeWorkspace(user) {
+  const myProducts = state.products.filter((p) => p.farmerId === user.id);
+  const activeMyProducts = myProducts.filter((p) => p.status === "ACTIVE");
+  const myOrders = state.orders.filter((o) => o.farmerId === user.id);
+  const pendingOrders = myOrders.filter((o) => o.status === "PENDING");
+  const completedOrders = myOrders.filter((o) => o.status === "COMPLETED");
+  const totalSales = myOrders.filter((o) => !["CANCELLED", "REJECTED"].includes(o.status)).reduce((s, o) => s + Number(o.productTotal || 0), 0);
+
+  return `
+    <div class="space-y-7">
+      <!-- Farmer Studio Hero -->
+      <section class="rounded-3xl bg-gradient-to-br from-[#105B34] via-[#168447] to-emerald-600 text-white shadow-lg p-6 sm:p-8 space-y-6">
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="space-y-2">
+            <div class="inline-flex items-center gap-2">
+              <span class="px-3 py-1 rounded-full bg-white/15 text-xs font-bold">👨‍🌾 কৃষকের খামার ড্যাশবোর্ড</span>
+              <span class="px-3 py-1 rounded-full text-xs font-bold ${user.verificationStatus === "VERIFIED" ? "bg-emerald-300 text-[#105B34]" : "bg-amber-300 text-[#105B34]"}">
+                ${user.verificationStatus === "VERIFIED" ? "✓ যাচাইকৃত কৃষক" : "অ্যাডমিন যাচাই অপেক্ষমাণ"}
+              </span>
+            </div>
+            <h1 class="text-2xl sm:text-3xl font-extrabold">স্বাগতম, ${escapeHtml(user.fullName)}!</h1>
+            <p class="text-sm text-emerald-50/90">📍 ${escapeHtml(user.upazila)}, ${escapeHtml(user.district)}, ${escapeHtml(user.division)} • ০% দালাল কমিশন</p>
+          </div>
+          <div class="flex flex-wrap gap-2.5">
+            <button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'add' })" class="px-5 py-3 rounded-2xl bg-amber-400 text-[#105B34] font-bold text-sm shadow hover:bg-amber-300">
+              + নতুন ফসল যোগ করুন
+            </button>
+            <button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'orders' })" class="px-5 py-3 rounded-2xl bg-white text-[#105B34] font-bold text-sm shadow hover:bg-emerald-50">
+              📦 প্রাপ্ত অর্ডার (${pendingOrders.length})
+            </button>
+            <button onclick="window.kbApp.navigate('browse')" class="px-4 py-3 rounded-2xl border border-white/40 text-white font-semibold text-sm hover:bg-white/10">
+              📊 বাজার দর দেখুন
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/15">
+          <div class="bg-white/10 rounded-2xl p-4"><div class="text-2xl font-extrabold">${activeMyProducts.length}</div><div class="text-xs text-emerald-100">সক্রিয় ফসল</div></div>
+          <div class="bg-white/10 rounded-2xl p-4"><div class="text-2xl font-extrabold">${pendingOrders.length}</div><div class="text-xs text-emerald-100">নতুন অপেক্ষমাণ অর্ডার</div></div>
+          <div class="bg-white/10 rounded-2xl p-4"><div class="text-2xl font-extrabold">${completedOrders.length}</div><div class="text-xs text-emerald-100">সম্পন্ন অর্ডার</div></div>
+          <div class="bg-white/10 rounded-2xl p-4"><div class="text-2xl font-extrabold">${formatBdt(totalSales)}</div><div class="text-xs text-emerald-100">মোট বিক্রয়</div></div>
+        </div>
+      </section>
+
+      <!-- Pending Buyer Orders -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg sm:text-xl font-bold text-[#105B34]">📦 ক্রেতাদের নতুন অপেক্ষমাণ অর্ডার (${pendingOrders.length})</h2>
+          <button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'orders' })" class="text-sm font-semibold text-[#168447] hover:underline">সব অর্ডার ব্যবস্থাপনা →</button>
+        </div>
+        ${
+          !pendingOrders.length
+            ? `<div class="bg-white rounded-3xl p-6 border border-emerald-100 text-sm text-gray-600">বর্তমানে কোনো নতুন অপেক্ষমাণ অর্ডার নেই। ক্রেতারা অর্ডার করলে তাৎক্ষণিক এখানে ও নোটিফিকেশনে পাবেন।</div>`
+            : `<div class="grid md:grid-cols-2 gap-4">${pendingOrders.slice(0, 4).map((o) => `
+                <div class="bg-amber-50/70 rounded-3xl p-5 border border-amber-200 shadow-sm space-y-3">
+                  <div class="flex items-center justify-between">
+                    <span class="font-extrabold text-[#105B34]">${escapeHtml(o.orderCode)}</span>
+                    <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-200 text-amber-900">অপেক্ষমাণ</span>
+                  </div>
+                  <div class="text-sm font-bold">${escapeHtml(o.itemsSummary)}</div>
+                  <div class="text-xs text-gray-700 flex justify-between">
+                    <span>ক্রেতা: <strong>${escapeHtml(o.buyerName)}</strong> (${escapeHtml(o.upazila)})</span>
+                    <strong class="text-[#168447]">${formatBdt(o.grandTotal)}</strong>
+                  </div>
+                  <div class="flex gap-2">
+                    <button onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'ACCEPTED')" class="flex-1 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">✓ গ্রহণ করুন</button>
+                    <button onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'REJECTED')" class="px-4 py-2 rounded-xl bg-red-600 text-white text-xs font-bold">✕ প্রত্যাখ্যান</button>
+                  </div>
+                </div>`).join("")}</div>`
+        }
+      </section>
+
+      <!-- Farmer Listed Inventory -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg sm:text-xl font-bold text-[#105B34]">🌾 আমার তালিকাভুক্ত ফসল (${myProducts.length})</h2>
+          <button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'products' })" class="text-sm font-semibold text-[#168447] hover:underline">দাম ও মজুত সম্পাদনা →</button>
+        </div>
+        ${
+          !myProducts.length
+            ? `<div class="bg-white rounded-3xl p-8 text-center border border-dashed border-emerald-200 space-y-3">
+                <p class="text-sm text-gray-600">আপনার কোনো ফসল এখনো তালিকাভুক্ত করা হয়নি।</p>
+                <button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'add' })" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">+ প্রথম ফসল যোগ করুন</button>
+              </div>`
+            : `<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">${myProducts.slice(0, 4).map(renderProductCard).join("")}</div>`
+        }
+      </section>
+
+      ${renderAdPlacement("feed")}
+    </div>
+  `;
+}
+
 function renderHomePage() {
+  const user = getActiveUser();
+  if (user && user.role === "FARMER") {
+    return renderFarmerHomeWorkspace(user);
+  }
+
+  const isBuyer = user && user.role === "BUYER";
+  const isAdmin = user && user.role === "ADMIN";
   const activeProducts = state.products.filter((p) => p.status === "ACTIVE");
   const farmers = state.users.filter((u) => u.role === "FARMER");
   const topCats = state.categories.slice(0, 12);
+  const myBuyerOrders = isBuyer ? state.orders.filter((o) => o.buyerId === user.id) : [];
 
   return `
     <div class="space-y-8">
+      ${
+        isAdmin
+          ? `<div class="bg-amber-50 border border-amber-200 rounded-3xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 class="font-bold text-amber-900">🛡️ সুপার অ্যাডমিন নিয়ন্ত্রণ প্যানেল</h2>
+                <p class="text-xs text-amber-800">কৃষক ও ক্রেতা যাচাই, বিজ্ঞাপন নেটওয়ার্ক, অর্ডার ও অডিট লগ পরিচালনা করুন।</p>
+              </div>
+              <button onclick="window.kbApp.navigate('admin')" class="px-4 py-2 rounded-xl bg-amber-600 text-white text-xs font-bold hover:bg-amber-700">অ্যাডমিন প্যানেল খুলুন →</button>
+            </div>`
+          : ""
+      }
+
+      ${
+        isBuyer
+          ? `<div class="bg-[#EAF7EF] border border-emerald-200 rounded-3xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
+              <div class="space-y-0.5">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-[#105B34] text-base sm:text-lg">🛍️ স্বাগতম, ${escapeHtml(user.fullName)}!</span>
+                  <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${user.verificationStatus === "VERIFIED" ? "bg-emerald-600 text-white" : "bg-amber-200 text-amber-900"}">
+                    ${user.verificationStatus === "VERIFIED" ? "✓ যাচাইকৃত ক্রেতা" : "যাচাই অপেক্ষমাণ"}
+                  </span>
+                </div>
+                <p class="text-xs text-emerald-800">📍 ${escapeHtml(user.upazila)}, ${escapeHtml(user.district)} • সরাসরি কৃষকের কাছ থেকে বাজারমূল্যে কিনুন</p>
+              </div>
+              <div class="flex gap-2">
+                <button onclick="window.kbApp.navigate('cart')" class="px-3.5 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">🛒 কার্ট (${state.cart.length})</button>
+                <button onclick="window.kbApp.navigate('orders')" class="px-3.5 py-2 rounded-xl bg-white border border-emerald-300 text-[#105B34] text-xs font-bold">📦 আমার অর্ডার (${myBuyerOrders.length})</button>
+              </div>
+            </div>`
+          : ""
+      }
+
       <!-- Hero Banner -->
       <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#105B34] via-[#168447] to-emerald-600 text-white shadow-lg">
         <div class="grid md:grid-cols-2 gap-6 items-center p-6 sm:p-10">
@@ -1547,7 +1781,11 @@ function renderHomePage() {
               <span class="px-2 py-0.5 rounded-full bg-amber-400 text-[#105B34] font-bold">০% দালাল</span>
             </div>
             <h1 class="text-2xl sm:text-4xl font-extrabold leading-tight">
-              কৃষকের ফসল, কৃষকের ন্যায্য দাম — সরাসরি ক্রেতার হাতে।
+              ${
+                isBuyer
+                  ? "সরাসরি খামার থেকে তাজা কৃষিপণ্য কিনুন ন্যায্য দামে।"
+                  : "কৃষকের ফসল, কৃষকের ন্যায্য দাম — সরাসরি ক্রেতার হাতে।"
+              }
             </h1>
             <p class="text-sm sm:text-base text-emerald-50/90 leading-relaxed">
               কোনো মধ্যস্বত্বভোগী বা কমিশন ছাড়াই সরাসরি বাংলাদেশের কৃষকদের কাছ থেকে টাটকা ধান, চাল, আলু, পেঁয়াজ, ফল ও শাকসবজি কিনুন। অর্ডার করলে তাৎক্ষণিক রিয়েল-টাইম নোটিফিকেশন যায় কৃষকের কাছে।
@@ -1556,9 +1794,13 @@ function renderHomePage() {
               <button onclick="window.kbApp.navigate('browse')" class="px-5 py-3 rounded-2xl bg-white text-[#105B34] font-bold text-sm shadow hover:bg-emerald-50">
                 🌾 ফসল খুঁজুন
               </button>
-              <button onclick="window.kbApp.goSell()" class="px-5 py-3 rounded-2xl bg-amber-400 text-[#105B34] font-bold text-sm shadow hover:bg-amber-300">
-                👨‍🌾 কৃষক হিসেবে বিক্রি করুন
-              </button>
+              ${
+                !isBuyer && !isAdmin
+                  ? `<button onclick="window.kbApp.goSell()" class="px-5 py-3 rounded-2xl bg-amber-400 text-[#105B34] font-bold text-sm shadow hover:bg-amber-300">
+                      👨‍🌾 কৃষক হিসেবে বিক্রি করুন
+                    </button>`
+                  : ""
+              }
               <button onclick="window.kbApp.navigate('farmers')" class="px-4 py-3 rounded-2xl border border-white/40 text-white font-semibold text-sm hover:bg-white/10">
                 কৃষকদের দেখুন
               </button>
@@ -1624,8 +1866,13 @@ function renderHomePage() {
             ? `<div class="bg-white rounded-3xl p-10 text-center border border-dashed border-emerald-200 space-y-3">
                 <div class="text-4xl">🌱</div>
                 <h3 class="text-base font-bold text-[#105B34]">এখনো কোনো ফসল তালিকাভুক্ত হয়নি</h3>
-                <p class="text-sm text-gray-600 max-w-md mx-auto">কোনো ডেমো ডেটা রাখা হয়নি। কৃষক হিসেবে নিবন্ধন করে প্রথম তাজা ফসল যোগ করুন!</p>
-                <button onclick="window.kbApp.goSell()" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">ফসল যোগ করুন</button>
+                ${
+                  isBuyer
+                    ? `<p class="text-sm text-gray-600 max-w-md mx-auto">কৃষকরা নতুন ফসল প্রকাশ করলে এখানে দেখাবে। আপনি যাচাইকৃত কৃষক তালিকা দেখতে পারেন।</p>
+                       <button onclick="window.kbApp.navigate('farmers')" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">কৃষকদের দেখুন</button>`
+                    : `<p class="text-sm text-gray-600 max-w-md mx-auto">কোনো ডেমো ডেটা রাখা হয়নি। কৃষক হিসেবে নিবন্ধন করে প্রথম তাজা ফসল যোগ করুন!</p>
+                       <button onclick="window.kbApp.goSell()" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">ফসল যোগ করুন</button>`
+                }
               </div>`
             : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">${activeProducts.slice(0, 8).map(renderProductCard).join("")}</div>`
         }
@@ -1770,14 +2017,29 @@ function renderProductDetailPage() {
             <div><span class="text-gray-500 block">সংগ্রহ ও ডেলিভারি</span><strong>${prod.supportsDirectDelivery ? `হোম ডেলিভারি (${formatBdt(prod.deliveryChargeEstimate)})` : "খামার থেকে সংগ্রহ"}</strong></div>
           </div>
 
-          <div class="flex items-center gap-3 pt-2">
-            <input id="detail-qty" type="number" min="0.5" max="${maxQ}" step="0.5" value="${initialQ}"
-              class="w-28 px-3 py-3 rounded-xl border border-emerald-200 text-center font-bold" />
-            <button onclick="window.kbApp.addToCart('${escapeHtml(prod.id)}', document.getElementById('detail-qty').value)"
-              class="flex-1 py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm">
-              🛒 কার্টে যোগ করুন
-            </button>
-          </div>
+          ${
+            (() => {
+              const viewer = getActiveUser();
+              if (viewer && viewer.role === "FARMER" && viewer.id === prod.farmerId) {
+                return `<div class="bg-[#EAF7EF] border border-emerald-200 rounded-2xl p-4 text-xs sm:text-sm font-bold text-[#105B34]">
+                  ✓ এটি আপনার নিজস্ব তালিকাভুক্ত ফসল। <button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'products' })" class="underline ml-1">দাম বা মজুত পরিবর্তন করুন →</button>
+                </div>`;
+              }
+              if (viewer && viewer.role === "FARMER") {
+                return `<div class="bg-gray-50 border border-gray-200 rounded-2xl p-3.5 text-xs text-gray-700 font-semibold">
+                  📊 আপনি কৃষক অ্যাকাউন্ট থেকে বাজার দর পর্যবেক্ষণ করছেন।
+                </div>`;
+              }
+              return `<div class="flex items-center gap-3 pt-2">
+                <input id="detail-qty" type="number" min="0.5" max="${maxQ}" step="0.5" value="${initialQ}"
+                  class="w-28 px-3 py-3 rounded-xl border border-emerald-200 text-center font-bold" />
+                <button onclick="window.kbApp.addToCart('${escapeHtml(prod.id)}', document.getElementById('detail-qty').value)"
+                  class="flex-1 py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm">
+                  🛒 কার্টে যোগ করুন
+                </button>
+              </div>`;
+            })()
+          }
 
           <!-- Farmer card -->
           <div class="border-t border-emerald-100 pt-4 flex items-center justify-between gap-3">
@@ -2381,10 +2643,20 @@ function renderOrdersPage() {
     <div class="space-y-5">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="flex flex-wrap items-center gap-2">
-          <h1 class="text-2xl font-bold text-[#105B34]">📦 আমার অর্ডার ও ট্র্যাকিং (${myOrders.length})</h1>
+          <h1 class="text-2xl font-bold text-[#105B34]">${
+            user.role === "FARMER"
+              ? `👨‍🌾 আমার অর্ডার ও সরবরাহ (${myOrders.length})`
+              : user.role === "BUYER"
+              ? `🛍️ আমার ক্রয় অর্ডার ও ট্র্যাকিং (${myOrders.length})`
+              : `🛡️ সকল প্ল্যাটফর্ম অর্ডার (${myOrders.length})`
+          }</h1>
           ${verifyStatusBadge}
         </div>
-        <button onclick="window.kbApp.navigate('browse')" class="px-4 py-2 rounded-xl bg-[#EAF7EF] text-[#105B34] text-xs font-bold">+ আরও ফসল কিনুন</button>
+        ${
+          user.role === "FARMER"
+            ? `<button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'orders' })" class="px-4 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">প্রাপ্ত অর্ডার গ্রহণ/পরিচালনা →</button>`
+            : `<button onclick="window.kbApp.navigate('browse')" class="px-4 py-2 rounded-xl bg-[#EAF7EF] text-[#105B34] text-xs font-bold">+ আরও ফসল কিনুন</button>`
+        }
       </div>
       ${
         !myOrders.length

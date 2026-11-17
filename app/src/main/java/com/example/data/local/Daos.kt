@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -24,20 +25,26 @@ interface UserDao {
     @Query("SELECT * FROM users WHERE phone = :phone LIMIT 1")
     suspend fun getUserByPhone(phone: String): UserEntity?
 
+    @Query("SELECT * FROM users")
+    suspend fun getAllUsersOnce(): List<UserEntity>
+
     @Query("SELECT COUNT(*) FROM users")
     suspend fun countUsers(): Int
 
     @Query("DELETE FROM users WHERE isDemoRecord = 1")
     suspend fun deleteDemoUsers()
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertAll(users: List<UserEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertUser(user: UserEntity)
 
     @Query("UPDATE users SET verificationStatus = :status WHERE id = :userId")
     suspend fun updateVerificationStatus(userId: String, status: String)
+
+    @Query("UPDATE users SET passwordHash = :passwordHash WHERE id = :userId")
+    suspend fun updatePasswordHash(userId: String, passwordHash: String)
 
     @Query("UPDATE users SET rating = :rating, reviewCount = :reviewCount WHERE id = :userId")
     suspend fun updateRatingAndReviewCount(userId: String, rating: Double, reviewCount: Int)
@@ -51,10 +58,10 @@ interface CategoryDao {
     @Query("SELECT COUNT(*) FROM categories")
     suspend fun countCategories(): Int
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertAll(categories: List<CategoryEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertCategory(category: CategoryEntity)
 
     @Query("DELETE FROM categories WHERE id = :id")
@@ -69,10 +76,10 @@ interface LocationDao {
     @Query("SELECT COUNT(*) FROM locations")
     suspend fun countLocations(): Int
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertAll(locations: List<LocationEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertLocation(location: LocationEntity)
 }
 
@@ -87,10 +94,10 @@ interface ProductDao {
     @Query("DELETE FROM products WHERE isDemoRecord = 1")
     suspend fun deleteDemoProducts()
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertAll(products: List<ProductEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun upsertProduct(product: ProductEntity)
 
     @Update
@@ -110,6 +117,9 @@ interface ProductDao {
 
     @Query("UPDATE products SET farmerVerified = :verified WHERE farmerId = :farmerId")
     suspend fun updateFarmerVerifiedOnProducts(farmerId: String, verified: Boolean)
+
+    @Query("UPDATE products SET farmerName = :farmerName, division = :division, district = :district, upazila = :upazila, updatedAt = :now WHERE farmerId = :farmerId")
+    suspend fun updateFarmerMetadataOnProducts(farmerId: String, farmerName: String, division: String, district: String, upazila: String, now: Long)
 }
 
 @Dao
@@ -153,10 +163,10 @@ interface OrderDao {
     @Query("DELETE FROM orders WHERE isDemoRecord = 1")
     suspend fun deleteDemoOrders()
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertOrders(orders: List<OrderEntity>)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Upsert
     suspend fun insertOrderItems(items: List<OrderItemEntity>)
 
     @Query("UPDATE orders SET status = :status, updatedAt = :now WHERE id = :orderId")

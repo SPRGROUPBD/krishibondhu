@@ -2,7 +2,7 @@
     <string name="app_name">KrishiBondhu</string>
     <string name="splash_logo_description">KrishiBondhu app logo</string>
     <string name="splash_app_version">Version %1$s</string>
-    <string name="splash_build_version">Build %1$d</string>
+    <string name="splash_build_version">Build %1$s</string>
 
     <!-- Google AdMob Official Test IDs (Replace with your live AdMob App & Unit IDs before Play Store release) -->
     <string name="admob_app_id" translatable="false">ca-app-pub-3940256099942544~3347511713</string>

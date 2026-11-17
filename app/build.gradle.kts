@@ -16,8 +16,9 @@ android {
     applicationId = "com.krishibondhu.bd"
     minSdk = 26
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = 2
+    versionName = "v1.0.1"
+    buildConfigField("String", "BUILD_VERSION", "\"kbbd20261117-01\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

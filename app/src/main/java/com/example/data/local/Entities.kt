@@ -22,6 +22,7 @@ data class UserEntity(
     val village: String = "",
     val farmBio: String = "",
     val nidMasked: String = "", // Never expose raw NID publicly
+    val profileImageUri: String = "", // Compact Base64 data URL synced with RTDB
     val verificationStatus: String = "PENDING", // PENDING, VERIFIED, REJECTED
     val isMobileVerified: Boolean = false,
     val rating: Double = 4.8,

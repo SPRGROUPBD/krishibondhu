@@ -330,6 +330,57 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    fun syncNow() {
+        viewModelScope.launch {
+            repo.syncNow()
+        }
+    }
+
+    fun resetPassword(phone: String, newPassword: String, onSuccess: () -> Unit) {
+        viewModelScope.launch {
+            repo.resetPasswordByPhone(phone, newPassword)
+                .onSuccess {
+                    showToast("পাসওয়ার্ড সফলভাবে পরিবর্তন হয়েছে! নতুন পাসওয়ার্ড দিয়ে লগইন করুন।")
+                    onSuccess()
+                }
+                .onFailure { showToast(it.message ?: "পাসওয়ার্ড পরিবর্তন করা যায়নি") }
+        }
+    }
+
+    fun updateProfile(
+        fullName: String,
+        division: String,
+        district: String,
+        upazila: String,
+        unionName: String,
+        village: String,
+        farmBio: String,
+        nidLastFour: String,
+        profileImageUri: String,
+        onSuccess: () -> Unit
+    ) {
+        val currentUser = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.updateUserProfile(
+                userId = currentUser.id,
+                fullName = fullName,
+                division = division,
+                district = district,
+                upazila = upazila,
+                unionName = unionName,
+                village = village,
+                farmBio = farmBio,
+                nidLastFour = nidLastFour,
+                profileImageUri = profileImageUri
+            )
+                .onSuccess {
+                    showToast("আপনার প্রোফাইল সফলভাবে আপডেট হয়েছে ✓")
+                    onSuccess()
+                }
+                .onFailure { showToast(it.message ?: "প্রোফাইল আপডেট করা যায়নি") }
+        }
+    }
+
     fun register(
         fullName: String,
         phone: String,

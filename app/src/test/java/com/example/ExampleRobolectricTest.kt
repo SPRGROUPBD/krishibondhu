@@ -650,4 +650,54 @@ class ExampleRobolectricTest {
         assertTrue(dao.getNotificationById("not_fall")!!.isRead)
         assertFalse(dao.getNotificationById("not_b1")!!.isRead)
     }
+
+    @Test
+    fun roleBasedUiStateReflectsLoggedInFarmerBuyerAdminAndGuest() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+
+        val guestState = com.example.ui.viewmodel.MarketplaceUiState(isLoading = false, activeUser = null)
+        assertNull(guestState.activeRole)
+        assertFalse(guestState.isSuperAdmin)
+
+        val farmer = repo.registerUser(
+            fullName = "রোল টেস্ট কৃষক",
+            phone = "01788000001",
+            rawPassword = "pass1234",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "কুমারখালী",
+            unionName = "",
+            village = "",
+            nidLastFour = "1111",
+            farmBio = "ধান"
+        ).getOrThrow()
+
+        val farmerState = com.example.ui.viewmodel.MarketplaceUiState(isLoading = false, activeUser = farmer)
+        assertEquals(UserRole.FARMER, farmerState.activeRole)
+        assertFalse(farmerState.isSuperAdmin)
+
+        val buyer = repo.registerUser(
+            fullName = "রোল টেস্ট ক্রেতা",
+            phone = "01788000002",
+            rawPassword = "pass1234",
+            role = UserRole.BUYER,
+            division = "ঢাকা",
+            district = "ঢাকা",
+            upazila = "সাভার",
+            unionName = "",
+            village = "",
+            nidLastFour = "",
+            farmBio = ""
+        ).getOrThrow()
+
+        val buyerState = com.example.ui.viewmodel.MarketplaceUiState(isLoading = false, activeUser = buyer)
+        assertEquals(UserRole.BUYER, buyerState.activeRole)
+        assertFalse(buyerState.isSuperAdmin)
+
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val adminState = com.example.ui.viewmodel.MarketplaceUiState(isLoading = false, activeUser = admin)
+        assertEquals(UserRole.ADMIN, adminState.activeRole)
+        assertTrue(adminState.isSuperAdmin)
+    }
 }

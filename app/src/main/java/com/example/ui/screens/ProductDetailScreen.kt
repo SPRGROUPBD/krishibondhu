@@ -22,6 +22,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.example.data.model.AppLanguage
+import com.example.data.model.UserRole
 import com.example.data.model.formatBdt
 import com.example.data.model.formatQty
 import com.example.ui.components.AdBannerSection
@@ -61,8 +62,10 @@ fun ProductDetailScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onGoToCart) {
-                        Icon(Icons.Filled.ShoppingCart, contentDescription = "কার্ট")
+                    if (uiState.activeRole != UserRole.FARMER || uiState.cartBadgeCount > 0) {
+                        IconButton(onClick = onGoToCart) {
+                            Icon(Icons.Filled.ShoppingCart, contentDescription = "কার্ট")
+                        }
                     }
                 }
             )
@@ -259,54 +262,86 @@ fun ProductDetailScreen(
                     }
 
                     Spacer(modifier = Modifier.height(18.dp))
-                    // Quantity Picker + Add to Cart
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
+                    val isOwnerFarmer = uiState.activeUser?.id == product.farmerId
+                    val isFarmerViewer = uiState.activeRole == UserRole.FARMER
+                    if (isOwnerFarmer) {
                         Surface(
+                            color = LightGreen,
                             shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                            color = MaterialTheme.colorScheme.surface
+                            border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth().testTag("owner_farmer_notice")
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = { if (qty > 1.0) qty -= 1.0 },
-                                    modifier = Modifier.testTag("qty_minus")
-                                ) {
-                                    Icon(Icons.Filled.Remove, contentDescription = "কমান")
-                                }
-                                Text(
-                                    text = "${qty.formatQty()} ${product.unit}",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(horizontal = 8.dp)
-                                )
-                                IconButton(
-                                    onClick = { if (qty + 1.0 <= product.availableQuantity) qty += 1.0 },
-                                    modifier = Modifier.testTag("qty_plus")
-                                ) {
-                                    Icon(Icons.Filled.Add, contentDescription = "বাড়ান")
+                            Text(
+                                text = "✓ এটি আপনার নিজস্ব তালিকাভুক্ত ফসল। দাম বা মজুত পরিবর্তন করতে 'আমার ফসল' ট্যাবে যান।",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = DarkGreen,
+                                modifier = Modifier.padding(14.dp)
+                            )
+                        }
+                    } else if (isFarmerViewer) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth().testTag("farmer_market_viewer_notice")
+                        ) {
+                            Text(
+                                text = "📊 আপনি কৃষক অ্যাকাউন্ট থেকে বাজার দর পর্যবেক্ষণ করছেন।",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(14.dp)
+                            )
+                        }
+                    } else {
+                        // Quantity Picker + Add to Cart for Buyers & Guests
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                color = MaterialTheme.colorScheme.surface
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = { if (qty > 1.0) qty -= 1.0 },
+                                        modifier = Modifier.testTag("qty_minus")
+                                    ) {
+                                        Icon(Icons.Filled.Remove, contentDescription = "কমান")
+                                    }
+                                    Text(
+                                        text = "${qty.formatQty()} ${product.unit}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 8.dp)
+                                    )
+                                    IconButton(
+                                        onClick = { if (qty + 1.0 <= product.availableQuantity) qty += 1.0 },
+                                        modifier = Modifier.testTag("qty_plus")
+                                    ) {
+                                        Icon(Icons.Filled.Add, contentDescription = "বাড়ান")
+                                    }
                                 }
                             }
-                        }
 
-                        Button(
-                            onClick = { onAddToCart(qty) },
-                            enabled = product.availableQuantity >= qty && product.availableQuantity > 0,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(52.dp)
-                                .testTag("add_to_cart_button")
-                        ) {
-                            Icon(Icons.Filled.AddShoppingCart, contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "কার্টে যোগ (${(product.pricePerUnit * qty).formatBdt()})",
-                                fontWeight = FontWeight.Bold
-                            )
+                            Button(
+                                onClick = { onAddToCart(qty) },
+                                enabled = product.availableQuantity >= qty && product.availableQuantity > 0,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(52.dp)
+                                    .testTag("add_to_cart_button")
+                            ) {
+                                Icon(Icons.Filled.AddShoppingCart, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "কার্টে যোগ (${(product.pricePerUnit * qty).formatBdt()})",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }

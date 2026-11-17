@@ -18,10 +18,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.model.AppLanguage
+import com.example.data.model.OrderStatus
 import com.example.data.model.UserRole
 import com.example.data.model.formatBdt
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.OrderStatusChip
+import com.example.ui.theme.DarkGreen
+import com.example.ui.theme.HarvestGoldLight
 import com.example.ui.theme.LightGreen
 import com.example.ui.viewmodel.MarketplaceUiState
 
@@ -35,16 +38,36 @@ fun OrdersScreen(
     val lang = uiState.language
     val activeUser = uiState.activeUser
     val isFarmer = activeUser?.role == UserRole.FARMER.name
+    val isBuyer = activeUser?.role == UserRole.BUYER.name
     val isAdmin = activeUser?.role == UserRole.ADMIN.name
 
-    var showIncomingForFarmer by remember(isFarmer) { mutableStateOf(isFarmer) }
+    val farmerIncomingOrders = remember(uiState.orders, activeUser) {
+        if (activeUser == null) emptyList() else uiState.orders.filter { it.farmerId == activeUser.id }
+    }
+    val buyerPurchaseOrders = remember(uiState.orders, activeUser) {
+        if (activeUser == null) emptyList() else uiState.orders.filter { it.buyerId == activeUser.id }
+    }
 
-    val visibleOrders = remember(uiState.orders, activeUser, showIncomingForFarmer) {
+    var showIncomingForFarmer by remember(isFarmer) { mutableStateOf(isFarmer) }
+    var farmerPendingOnly by remember { mutableStateOf(false) }
+
+    val visibleOrders = remember(
+        uiState.orders,
+        activeUser,
+        showIncomingForFarmer,
+        farmerPendingOnly,
+        farmerIncomingOrders,
+        buyerPurchaseOrders
+    ) {
         when {
             activeUser == null -> emptyList()
             isAdmin -> uiState.orders
-            showIncomingForFarmer -> uiState.orders.filter { it.farmerId == activeUser.id }
-            else -> uiState.orders.filter { it.buyerId == activeUser.id }
+            isFarmer && showIncomingForFarmer -> if (farmerPendingOnly) {
+                farmerIncomingOrders.filter { it.status == OrderStatus.PENDING.name }
+            } else {
+                farmerIncomingOrders
+            }
+            else -> buyerPurchaseOrders
         }
     }
 
@@ -52,15 +75,65 @@ fun OrdersScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .testTag(
+                when {
+                    isFarmer -> "orders_screen_farmer"
+                    isBuyer -> "orders_screen_buyer"
+                    else -> "orders_screen_guest"
+                }
+            )
     ) {
-        // Cart Quick Entry Banner if items exist
-        if (uiState.cartItems.isNotEmpty()) {
+        // Role-specific Header Strip
+        Surface(
+            color = if (isFarmer) LightGreen else MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = when {
+                        isFarmer -> if (lang == AppLanguage.BENGALI)
+                            "👨‍🌾 কৃষকের প্রাপ্ত অর্ডার ব্যবস্থাপনা (${farmerIncomingOrders.size})"
+                        else
+                            "👨‍🌾 Incoming Buyer Orders (${farmerIncomingOrders.size})"
+                        isBuyer -> if (lang == AppLanguage.BENGALI)
+                            "🛍️ আমার ক্রয় অর্ডার ও ট্র্যাকিং (${buyerPurchaseOrders.size})"
+                        else
+                            "🛍️ My Purchase Orders (${buyerPurchaseOrders.size})"
+                        isAdmin -> "🛡️ সকল প্ল্যাটফর্ম অর্ডার (${uiState.orders.size})"
+                        else -> "📦 অর্ডার ট্র্যাকিং"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = DarkGreen
+                )
+                Text(
+                    text = when {
+                        isFarmer -> "ক্রেতার পাঠানো নতুন অর্ডার গ্রহণ, প্রস্তুত এবং ডেলিভারি স্ট্যাটাস আপডেট করুন।"
+                        isBuyer -> "আপনার ক্রয়কৃত ফসলের রিয়েল-টাইম ডেলিভারি ও পেমেন্ট অবস্থা দেখুন।"
+                        isAdmin -> "সারা বাংলাদেশের সকল অর্ডার তদারকি করুন।"
+                        else -> "আপনার অর্ডার দেখতে লগইন বা নিবন্ধন করুন।"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        // Cart Quick Entry Banner for Buyers & Guests (or Farmers only if they explicitly have cart items)
+        if (uiState.cartItems.isNotEmpty() && (!isFarmer || uiState.cartItems.isNotEmpty())) {
             Surface(
                 onClick = onGoToCart,
-                color = LightGreen,
+                color = HarvestGoldLight,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
                     .testTag("orders_cart_banner"),
                 shape = RoundedCornerShape(14.dp),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
@@ -85,24 +158,39 @@ fun OrdersScreen(
         }
 
         if (isFarmer) {
+            val pendingCount = farmerIncomingOrders.count { it.status == OrderStatus.PENDING.name }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilterChip(
-                    selected = showIncomingForFarmer,
-                    onClick = { showIncomingForFarmer = true },
-                    label = { Text("কৃষকের প্রাপ্ত অর্ডার") },
+                    selected = showIncomingForFarmer && !farmerPendingOnly,
+                    onClick = {
+                        showIncomingForFarmer = true
+                        farmerPendingOnly = false
+                    },
+                    label = { Text("সব প্রাপ্ত (${farmerIncomingOrders.size})") },
                     modifier = Modifier.weight(1f)
                 )
                 FilterChip(
-                    selected = !showIncomingForFarmer,
-                    onClick = { showIncomingForFarmer = false },
-                    label = { Text("আমার ক্রয় অর্ডার") },
+                    selected = showIncomingForFarmer && farmerPendingOnly,
+                    onClick = {
+                        showIncomingForFarmer = true
+                        farmerPendingOnly = true
+                    },
+                    label = { Text("অপেক্ষমাণ ($pendingCount)") },
                     modifier = Modifier.weight(1f)
                 )
+                if (buyerPurchaseOrders.isNotEmpty()) {
+                    FilterChip(
+                        selected = !showIncomingForFarmer,
+                        onClick = { showIncomingForFarmer = false },
+                        label = { Text("ক্রয় (${buyerPurchaseOrders.size})") },
+                        modifier = Modifier.weight(0.9f)
+                    )
+                }
             }
         }
 
@@ -110,12 +198,13 @@ fun OrdersScreen(
             EmptyStateView(
                 emoji = "📦",
                 title = if (lang == AppLanguage.BENGALI) "এখনো কোনো অর্ডার নেই" else "No orders yet",
-                subtitle = if (lang == AppLanguage.BENGALI)
-                    "সরাসরি কৃষকের কাছ থেকে ফসল কিনুন বা ফসল বিক্রি করুন।"
-                else
-                    "Browse fresh Kushtia crops to place your first direct order.",
-                actionText = if (lang == AppLanguage.BENGALI) "ফসল দেখুন" else "Browse Crops",
-                onAction = onBrowseClick
+                subtitle = when {
+                    isFarmer -> "ক্রেতারা আপনার ফসল অর্ডার করলে এখানে সাথে সাথে দেখাবে।"
+                    isBuyer -> "সরাসরি যাচাইকৃত কৃষকের কাছ থেকে তাজা ফসল অর্ডার করুন।"
+                    else -> "সরাসরি কৃষকের কাছ থেকে ফসল কিনুন বা ফসল বিক্রি করুন।"
+                },
+                actionText = if (isFarmer) null else if (lang == AppLanguage.BENGALI) "ফসল দেখুন" else "Browse Crops",
+                onAction = if (isFarmer) null else onBrowseClick
             )
         } else {
             LazyColumn(
@@ -163,7 +252,7 @@ fun OrdersScreen(
                                 fontWeight = FontWeight.Medium
                             )
                             Text(
-                                text = if (showIncomingForFarmer)
+                                text = if (isFarmer && showIncomingForFarmer)
                                     "ক্রেতা: ${order.buyerName} (${order.upazila})"
                                 else
                                     "কৃষক: ${order.farmerName} (${order.upazila})",

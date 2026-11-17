@@ -9,6 +9,24 @@ object SecurityHashUtil {
             .digest("$salt:$rawPassword".toByteArray(Charsets.UTF_8))
         return bytes.joinToString("") { "%02x".format(it) }
     }
+
+    fun normalizePhone(rawPhone: String): String {
+        val trimmed = rawPhone.trim()
+        if (trimmed.equals("admin", ignoreCase = true)) return "admin"
+        val ascii = buildString(trimmed.length) {
+            for (ch in trimmed) {
+                when (ch) {
+                    in '০'..'৯' -> append(('0'.code + (ch.code - '০'.code)).toChar())
+                    else -> append(ch)
+                }
+            }
+        }.replace(Regex("[\\s\\-()]"), "")
+        return when {
+            ascii.startsWith("+8801") && ascii.length >= 14 -> ascii.removePrefix("+88")
+            ascii.startsWith("8801") && ascii.length >= 13 -> ascii.removePrefix("88")
+            else -> ascii
+        }
+    }
 }
 
 /**
