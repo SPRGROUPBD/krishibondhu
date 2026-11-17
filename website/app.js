@@ -185,6 +185,15 @@ async function initFirebaseRealtime() {
         evaluateAccountExpiries(Date.now(), false);
         saveLocalSnapshot();
         renderCurrentView();
+      } else if (val === null) {
+        const localAdmin = state.users.find((u) => u.id === SUPERADMIN_CREDENTIALS.userId);
+        state.users = localAdmin ? [localAdmin] : [];
+        if (state.currentUserId && state.currentUserId !== SUPERADMIN_CREDENTIALS.userId) {
+          state.currentUserId = "";
+        }
+        saveLocalSnapshot();
+        updateHeaderChrome();
+        renderCurrentView();
       }
     });
 
@@ -291,6 +300,10 @@ async function initFirebaseRealtime() {
         state.adConfig = { ...DEFAULT_AD_CONFIG, ...val };
         saveLocalSnapshot();
         renderCurrentView();
+      } else if (val === null) {
+        state.adConfig = { ...DEFAULT_AD_CONFIG };
+        saveLocalSnapshot();
+        renderCurrentView();
       }
     });
 
@@ -307,6 +320,10 @@ async function initFirebaseRealtime() {
       const val = snap.val();
       if (val && typeof val === "object") {
         state.paymentSettings = { ...DEFAULT_PAYMENT_SETTINGS, ...val };
+        saveLocalSnapshot();
+        renderCurrentView();
+      } else if (val === null) {
+        state.paymentSettings = { ...DEFAULT_PAYMENT_SETTINGS };
         saveLocalSnapshot();
         renderCurrentView();
       }
