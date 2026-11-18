@@ -647,6 +647,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         val topic = backStack.arguments?.getString("topic") ?: "about"
                         InfoScreen(
                             topic = topic,
+                            adConfig = uiState.adConfig,
                             onBack = {
                                 navController.popBackStack()
                                 AdMonetizationManager.maybeShowInterstitial(

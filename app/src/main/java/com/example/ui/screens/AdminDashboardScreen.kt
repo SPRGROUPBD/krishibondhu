@@ -37,6 +37,7 @@ import com.example.data.local.PaymentSettingsEntity
 import com.example.data.local.ProductEntity
 import com.example.data.model.*
 import com.example.ui.components.AccountStatusBadge
+import com.example.ui.components.AdBannerSection
 import com.example.ui.components.OrderStatusChip
 import com.example.ui.components.UserAvatar
 import com.example.ui.components.formatDateBn
@@ -150,7 +151,7 @@ fun AdminDashboardScreen(
             }
 
             when (selectedTab) {
-                0 -> AdminOverviewTab(stats = stats)
+                0 -> AdminOverviewTab(stats = stats, adConfig = uiState.adConfig)
                 1 -> AdminActivationPaymentsTab(
                     uiState = uiState,
                     onApprove = onApproveActivationPayment,
@@ -187,7 +188,7 @@ fun AdminDashboardScreen(
 }
 
 @Composable
-private fun AdminOverviewTab(stats: AdminDashboardStats) {
+private fun AdminOverviewTab(stats: AdminDashboardStats, adConfig: AdConfig) {
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -274,6 +275,12 @@ private fun AdminOverviewTab(stats: AdminDashboardStats) {
                     }
                 }
             }
+        }
+        item {
+            AdBannerSection(
+                adConfig = adConfig,
+                placementTag = "admin_overview"
+            )
         }
     }
 }
@@ -1717,6 +1724,11 @@ private fun AdminAdMonetizationTab(
     var liftoffAppId by remember(adConfig) { mutableStateOf(adConfig.liftoffAppId) }
     var dtExchangeEnabled by remember(adConfig) { mutableStateOf(adConfig.dtExchangeEnabled) }
     var dtExchangeAppId by remember(adConfig) { mutableStateOf(adConfig.dtExchangeAppId) }
+    var chartboostEnabled by remember(adConfig) { mutableStateOf(adConfig.chartboostEnabled) }
+    var chartboostAppId by remember(adConfig) { mutableStateOf(adConfig.chartboostAppId) }
+    var startIoEnabled by remember(adConfig) { mutableStateOf(adConfig.startIoEnabled) }
+    var startIoAppId by remember(adConfig) { mutableStateOf(adConfig.startIoAppId) }
+    var consentGranted by remember(adConfig) { mutableStateOf(adConfig.consentGranted) }
 
     // Website & Hybrid Web Fallback
     var mobileWebAdsEnabled by remember(adConfig) { mutableStateOf(adConfig.mobileWebAdsEnabled) }
@@ -1789,6 +1801,11 @@ private fun AdminAdMonetizationTab(
         liftoffAppId = liftoffAppId.trim(),
         dtExchangeEnabled = dtExchangeEnabled,
         dtExchangeAppId = dtExchangeAppId.trim(),
+        chartboostEnabled = chartboostEnabled,
+        chartboostAppId = chartboostAppId.trim(),
+        startIoEnabled = startIoEnabled,
+        startIoAppId = startIoAppId.trim(),
+        consentGranted = consentGranted,
         mobileWebAdsEnabled = mobileWebAdsEnabled,
         mobileAdNetworkPriority = mobileAdNetworkPriority,
         mobileCustomAdHtml = mobileCustomAdHtml,
@@ -1821,6 +1838,7 @@ private fun AdminAdMonetizationTab(
         "ALL" to "সব নেটওয়ার্ক (All)",
         "LEVELPLAY" to "Unity LevelPlay Mediation",
         "UNITY" to "Unity Ads",
+        "STARTIO" to "Start.io",
         "APPLOVIN" to "AppLovin MAX",
         "ADSTERRA" to "Adsterra",
         "MONETAG" to "Monetag",
@@ -1866,7 +1884,7 @@ private fun AdminAdMonetizationTab(
                     ) {
                         val draft = buildDraftConfig()
                         Text(
-                            text = if (draft.usesDirectUnityAds()) {
+                            text = if (AdMonetizationManager.usesDirectUnityAds(draft)) {
                                 "Active Mode: Direct Unity Ads SDK 4.16.6 (Game ID: ${draft.unityGameId})"
                             } else {
                                 "Active Mode: Unity LevelPlay Mediation (App Key: ${telemetry.activeAppKeyMasked.ifBlank { "(not set)" }})"
@@ -1878,7 +1896,7 @@ private fun AdminAdMonetizationTab(
                         )
                     }
                     Text(
-                        text = "AdMob সম্পূর্ণ অপসারিত (Zero AdMob SDK) • প্ল্যাটফর্ম: ${telemetry.mediationPlatform} • Test Mode: ${if (telemetry.testModeEnabled) "ON" else "OFF"}",
+                        text = "AdMob সম্পূর্ণ অপসারিত (Zero AdMob SDK) • প্ল্যাটফর্ম: ${telemetry.mediationPlatform} • Test Mode: ${if (telemetry.testModeEnabled) "ON" else "OFF"} • Consent: ${if (telemetry.consentGranted) "GRANTED" else "DENIED"}",
                         style = MaterialTheme.typography.bodySmall
                     )
                     if (telemetry.lastInitError.isNotBlank()) {
@@ -1995,10 +2013,14 @@ private fun AdminAdMonetizationTab(
                         Text("বিজ্ঞাপন লেবেল (Sponsored) দেখান", modifier = Modifier.weight(1f))
                         Switch(checked = showAdsLabel, onCheckedChange = { showAdsLabel = it })
                     }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("গোপনীয়তা সম্মতি (GDPR/Consent Granted)", modifier = Modifier.weight(1f))
+                        Switch(checked = consentGranted, onCheckedChange = { consentGranted = it })
+                    }
                     OutlinedTextField(
                         value = mediationAppKey,
                         onValueChange = { mediationAppKey = it },
-                        label = { Text("Unity LevelPlay App Key") },
+                        label = { Text("Unity LevelPlay Android App Key (অথবা LEVELPLAY_APP_KEY Secret)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth().testTag("admin_levelplay_app_key_input")
                     )
@@ -2067,7 +2089,7 @@ private fun AdminAdMonetizationTab(
             }
         }
 
-        // 3. 8 Official Mediation Networks + App Keys
+        // 3. 10 Official Multi-Network Integrations + App Keys (Zero AdMob)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -2075,9 +2097,9 @@ private fun AdminAdMonetizationTab(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("৮টি অফিসিয়াল অ্যাড নেটওয়ার্ক কনফিগারেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text("১০টি অফিসিয়াল অ্যাড নেটওয়ার্ক কনফিগারেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
                     Text(
-                        text = "Unity Ads বাদে বাকি ৭টি নেটওয়ার্কের জন্য সংশ্লিষ্ট পাবলিশার অ্যাকাউন্টে পৃথক অনুমোদন ও App ID প্রয়োজন।",
+                        text = "Unity Ads বাদে বাকি ৯টি নেটওয়ার্কের জন্য সংশ্লিষ্ট পাবলিশার অ্যাকাউন্টে পৃথক অনুমোদন ও App ID প্রয়োজন।",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2096,7 +2118,7 @@ private fun AdminAdMonetizationTab(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(title, fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    text = if (approvalRequired) "পৃথক পাবলিশার অ্যাকাউন্ট ও অনুমোদন প্রয়োজন" else "সরাসরি LevelPlay-তে প্রস্তুত (Game ID দিন)",
+                                    text = if (approvalRequired) "পৃথক পাবলিশার অ্যাকাউন্ট ও অনুমোদন প্রয়োজন" else "সরাসরি SDK / LevelPlay-তে প্রস্তুত (Game ID দিন)",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (approvalRequired) Color(0xFFB45309) else PrimaryGreen
                                 )
@@ -2115,11 +2137,13 @@ private fun AdminAdMonetizationTab(
                     networkInput("1. Unity Ads", false, unityAdsEnabled, { unityAdsEnabled = it }, "Unity Game ID", unityGameId) { unityGameId = it }
                     networkInput("2. AppLovin MAX", true, appLovinEnabled, { appLovinEnabled = it }, "AppLovin SDK Key / App ID", appLovinSdkKey) { appLovinSdkKey = it }
                     networkInput("3. Meta Audience Network", true, metaAudienceEnabled, { metaAudienceEnabled = it }, "Meta Placement / App ID", metaPlacementId) { metaPlacementId = it }
-                    networkInput("4. Mintegral", true, mintegralEnabled, { mintegralAppId = mintegralAppId; mintegralEnabled = it }, "Mintegral App ID", mintegralAppId) { mintegralAppId = it }
+                    networkInput("4. Mintegral", true, mintegralEnabled, { mintegralEnabled = it }, "Mintegral App ID", mintegralAppId) { mintegralAppId = it }
                     networkInput("5. Pangle", true, pangleEnabled, { pangleEnabled = it }, "Pangle App ID", pangleAppId) { pangleAppId = it }
                     networkInput("6. InMobi", true, inMobiEnabled, { inMobiEnabled = it }, "InMobi Account / App ID", inMobiAccountId) { inMobiAccountId = it }
                     networkInput("7. Liftoff Monetize (Vungle)", true, liftoffEnabled, { liftoffEnabled = it }, "Liftoff App ID", liftoffAppId) { liftoffAppId = it }
                     networkInput("8. DT Exchange (Fyber)", true, dtExchangeEnabled, { dtExchangeEnabled = it }, "DT Exchange App ID", dtExchangeAppId) { dtExchangeAppId = it }
+                    networkInput("9. Chartboost (LevelPlay)", true, chartboostEnabled, { chartboostEnabled = it }, "Chartboost App ID", chartboostAppId) { chartboostAppId = it }
+                    networkInput("10. Start.io (Standalone SDK)", true, startIoEnabled, { startIoEnabled = it }, "Start.io App ID", startIoAppId) { startIoAppId = it }
                 }
             }
         }
@@ -2154,16 +2178,18 @@ private fun AdminAdMonetizationTab(
                         }
                     }
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text("ফরম্যাট মনিটরিং (Request / Loaded / No Fill)", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text("ফরম্যাট মনিটরিং (Fill Rate / Impressions / Clicks / Retries)", fontWeight = FontWeight.Bold, color = DarkGreen)
                     AdFormatType.entries.forEach { fmt ->
                         val fm = telemetry.formatMetrics[fmt] ?: AdFormatTelemetry(fmt)
+                        val fillPct = String.format(Locale.ENGLISH, "%.0f%%", fm.fillRatePercent)
+                        val ctrPct = String.format(Locale.ENGLISH, "%.1f%%", fm.ctrPercent)
                         Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text("${fmt.labelEn} (${if (fm.enabled) "ON" else "OFF"})", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
                                 Text("${fm.requestStatus} / ${fm.loadedStatus}", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
                             }
                             Text(
-                                text = "Req: ${fm.requestCount} • Load: ${fm.loadedCount} • Show: ${fm.displayedCount} • No Fill: ${fm.noFillCount} • Fail: ${fm.failedCount}",
+                                text = "Req: ${fm.requestCount} • Load: ${fm.loadedCount} ($fillPct) • Show: ${fm.displayedCount} • Click: ${fm.clickedCount} ($ctrPct) • Retry: ${fm.retryCount} • Fail: ${fm.failedCount}",
                                 style = MaterialTheme.typography.labelSmall
                             )
                             if (fm.lastError.isNotBlank()) {

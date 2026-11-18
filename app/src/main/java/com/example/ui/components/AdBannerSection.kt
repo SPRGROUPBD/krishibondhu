@@ -55,6 +55,8 @@ import com.ironsource.mediationsdk.ads.nativead.LevelPlayNativeAdListener
 import com.ironsource.mediationsdk.ads.nativead.NativeAdLayout
 import com.ironsource.mediationsdk.adunit.adapter.utility.AdInfo
 import com.ironsource.mediationsdk.logger.IronSourceError
+import com.startapp.sdk.ads.banner.Banner as StartIoBanner
+import com.startapp.sdk.ads.banner.BannerListener as StartIoBannerListener
 import com.unity3d.mediation.LevelPlayAdError
 import com.unity3d.mediation.LevelPlayAdInfo
 import com.unity3d.mediation.LevelPlayAdSize
@@ -75,7 +77,7 @@ fun AdBannerSection(
     modifier: Modifier = Modifier,
     placementTag: String = "banner"
 ) {
-    if (!adConfig.adsEnabled) return
+    if (!adConfig.adsEnabled || AdMonetizationManager.isCurrentRouteAdBlocked()) return
 
     val context = LocalContext.current
     val telemetry by AdMonetizationManager.telemetry.collectAsState()
@@ -85,6 +87,9 @@ fun AdBannerSection(
 
     val bannerUnitId = adConfig.resolvedBannerUnitId()
     val nativePlacement = adConfig.resolvedNativePlacement()
+    val mediationAppKey = AdMonetizationManager.resolveMediationAppKey(adConfig)
+    val startIoAppId = AdMonetizationManager.resolveStartIoAppId(adConfig)
+    val usesDirectUnity = AdMonetizationManager.usesDirectUnityAds(adConfig)
 
     val webNetworkAd = remember(adConfig, placementTag, priority) {
         buildMobileNetworkHtmlPayload(adConfig, placementTag, priority)
@@ -96,7 +101,7 @@ fun AdBannerSection(
     val sdkReadyOrTest = AdMonetizationManager.isTestEnvironment() ||
         telemetry.sdkInitStatus == com.example.ads.SdkInitStatus.SUCCESS
 
-    val showDirectUnityBanner = adConfig.usesDirectUnityAds() &&
+    val showDirectUnityBanner = usesDirectUnity &&
         adConfig.bannerEnabled &&
         bannerUnitId.isNotBlank() &&
         (allows("UNITY") || allows("LEVELPLAY") || allows("UNITY_LEVELPLAY")) &&
@@ -104,28 +109,35 @@ fun AdBannerSection(
 
     val showMediatedBanner = adConfig.androidAdsEnabled &&
         adConfig.bannerEnabled &&
-        adConfig.mediationAppKey.isNotBlank() &&
+        mediationAppKey.isNotBlank() &&
         bannerUnitId.isNotBlank() &&
         (allows("LEVELPLAY") || allows("UNITY_LEVELPLAY")) &&
         (AdMonetizationManager.isTestEnvironment() || (isOnline && sdkReadyOrTest))
 
+    val showStartIoBanner = adConfig.androidAdsEnabled &&
+        adConfig.bannerEnabled &&
+        adConfig.startIoEnabled &&
+        startIoAppId.isNotBlank() &&
+        allows("STARTIO") &&
+        (AdMonetizationManager.isTestEnvironment() || (isOnline && telemetry.startIoReady))
+
     val showMediatedNative = adConfig.androidAdsEnabled &&
         adConfig.nativeEnabled &&
-        adConfig.mediationAppKey.isNotBlank() &&
+        mediationAppKey.isNotBlank() &&
         nativePlacement.isNotBlank() &&
-        placementTag == "browse_feed" &&
+        (placementTag == "browse_feed" || placementTag == "browse_crops_row_3") &&
         (AdMonetizationManager.isTestEnvironment() || (isOnline && sdkReadyOrTest))
 
     val showMobileWebAd = adConfig.mobileWebAdsEnabled && webNetworkAd != null &&
         (AdMonetizationManager.isTestEnvironment() || isOnline)
     val showSponsor = adConfig.sponsorEnabled &&
         adConfig.sponsorTitle.isNotBlank() &&
-        (allows("SPONSOR") || (!showMediatedBanner && !showDirectUnityBanner && !showMobileWebAd))
+        (allows("SPONSOR") || (!showMediatedBanner && !showDirectUnityBanner && !showStartIoBanner && !showMobileWebAd))
 
     val directLink = adConfig.mobileDirectLinkUrl.trim()
         .takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
-    if (!showSponsor && !showDirectUnityBanner && !showMediatedBanner && !showMediatedNative && !showMobileWebAd && directLink == null) return
+    if (!showSponsor && !showDirectUnityBanner && !showMediatedBanner && !showStartIoBanner && !showMediatedNative && !showMobileWebAd && directLink == null) return
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -214,6 +226,7 @@ fun AdBannerSection(
                     if (targetUrl != null) {
                         OutlinedButton(
                             onClick = {
+                                AdMonetizationManager.trackFormatClicked(AdFormatType.BANNER, "Sponsor")
                                 runCatching {
                                     context.startActivity(Intent(Intent.ACTION_VIEW, targetUrl.toUri()))
                                 }
@@ -278,6 +291,12 @@ fun AdBannerSection(
                             key(webNetworkAd.html) {
                                 SandboxedAdWebView(
                                     htmlContent = webNetworkAd.html,
+                                    onAdClicked = {
+                                        AdMonetizationManager.trackFormatClicked(
+                                            AdFormatType.BANNER,
+                                            webNetworkAd.networkLabel
+                                        )
+                                    },
                                     onAdFailed = { webAdFailed = true },
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -392,7 +411,12 @@ fun AdBannerSection(
                                                     )
                                                 }
 
-                                                override fun onAdClicked(adInfo: LevelPlayAdInfo) = Unit
+                                                override fun onAdClicked(adInfo: LevelPlayAdInfo) {
+                                                    AdMonetizationManager.trackFormatClicked(
+                                                        AdFormatType.BANNER,
+                                                        adInfo.adNetwork
+                                                    )
+                                                }
                                                 override fun onAdLeftApplication(adInfo: LevelPlayAdInfo) = Unit
                                                 override fun onAdExpanded(adInfo: LevelPlayAdInfo) = Unit
                                                 override fun onAdCollapsed(adInfo: LevelPlayAdInfo) = Unit
@@ -411,6 +435,14 @@ fun AdBannerSection(
                     }
                 }
             }
+        }
+
+        // 3b. Start.io Standalone Banner (Multi-Network Supplement)
+        if (showStartIoBanner) {
+            StartIoBannerAdCard(
+                placementTag = placementTag,
+                showAdsLabel = adConfig.showAdsLabel
+            )
         }
 
         // 4. LevelPlay Native Ad Slot (for feed cards)
@@ -494,7 +526,9 @@ private fun DirectUnityBannerAdCard(
                                             AdMonetizationManager.trackFormatDisplayed(AdFormatType.BANNER, "Unity Ads")
                                         }
 
-                                        override fun onBannerClick(bannerAdView: BannerView?) = Unit
+                                        override fun onBannerClick(bannerAdView: BannerView?) {
+                                            AdMonetizationManager.trackFormatClicked(AdFormatType.BANNER, "Unity Ads")
+                                        }
 
                                         override fun onBannerFailedToLoad(
                                             bannerAdView: BannerView?,
@@ -535,14 +569,123 @@ private fun DirectUnityBannerAdCard(
 }
 
 @Composable
+private fun StartIoBannerAdCard(
+    placementTag: String,
+    showAdsLabel: Boolean
+) {
+    var bannerFailed by remember(placementTag) { mutableStateOf(false) }
+    if (bannerFailed) return
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (showAdsLabel) {
+                Text(
+                    text = "Sponsored Ad • Start.io Network",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+            if (AdMonetizationManager.isTestEnvironment()) {
+                Surface(
+                    color = LightGreen,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("startio_banner_$placementTag")
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "Start.io Banner ($placementTag)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = DarkGreen
+                        )
+                    }
+                }
+            } else {
+                key(placementTag) {
+                    var bannerViewHolder by remember { mutableStateOf<StartIoBanner?>(null) }
+                    DisposableEffect(placementTag) {
+                        onDispose {
+                            runCatching { bannerViewHolder?.hideBanner() }
+                            bannerViewHolder = null
+                        }
+                    }
+                    AndroidView(
+                        factory = { ctx ->
+                            val host = ctx.findActivity() ?: ctx
+                            runCatching {
+                                StartIoBanner(host, object : StartIoBannerListener {
+                                    override fun onReceiveAd(banner: View?) {
+                                        bannerFailed = false
+                                        AdMonetizationManager.trackFormatLoaded(AdFormatType.BANNER, "Start.io")
+                                    }
+
+                                    override fun onFailedToReceiveAd(banner: View?) {
+                                        bannerFailed = true
+                                        AdMonetizationManager.trackFormatFailed(
+                                            AdFormatType.BANNER,
+                                            -1,
+                                            "Start.io banner failed to load"
+                                        )
+                                    }
+
+                                    override fun onImpression(banner: View?) {
+                                        AdMonetizationManager.trackFormatDisplayed(AdFormatType.BANNER, "Start.io")
+                                    }
+
+                                    override fun onClick(banner: View?) {
+                                        AdMonetizationManager.trackFormatClicked(AdFormatType.BANNER, "Start.io")
+                                    }
+                                }).apply {
+                                    AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, "startio_$placementTag")
+                                    loadAd()
+                                }.also { bannerViewHolder = it }
+                            }.getOrElse { err ->
+                                bannerFailed = true
+                                AdMonetizationManager.trackFormatFailed(
+                                    AdFormatType.BANNER,
+                                    -1,
+                                    err.message ?: "Start.io banner error"
+                                )
+                                FrameLayout(ctx)
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 50.dp)
+                            .testTag("startio_banner_$placementTag")
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun RewardedMarketTipCard(
     adConfig: AdConfig,
     modifier: Modifier = Modifier
 ) {
     if (!adConfig.adsEnabled || !adConfig.androidAdsEnabled || !adConfig.rewardedEnabled) return
+    if (AdMonetizationManager.isCurrentRouteAdBlocked()) return
     val rewardedId = adConfig.resolvedRewardedUnitId()
-    if (rewardedId.isBlank()) return
-    val hasAdConfig = adConfig.usesDirectUnityAds() || adConfig.mediationAppKey.isNotBlank()
+    val startIoReady = adConfig.startIoEnabled && AdMonetizationManager.resolveStartIoAppId(adConfig).isNotBlank()
+    if (rewardedId.isBlank() && !startIoReady) return
+    val hasAdConfig = AdMonetizationManager.usesDirectUnityAds(adConfig) ||
+        AdMonetizationManager.resolveMediationAppKey(adConfig).isNotBlank() ||
+        startIoReady
     if (!hasAdConfig) return
 
     val context = LocalContext.current
@@ -750,7 +893,12 @@ private fun LevelPlayNativeAdCard(
                                 )
                             }
 
-                            override fun onAdClicked(ad: LevelPlayNativeAd?, adInfo: AdInfo?) = Unit
+                            override fun onAdClicked(ad: LevelPlayNativeAd?, adInfo: AdInfo?) {
+                                AdMonetizationManager.trackFormatClicked(
+                                    AdFormatType.NATIVE,
+                                    adInfo?.adNetwork ?: "LevelPlay"
+                                )
+                            }
                         })
                         .build()
 
@@ -864,10 +1012,12 @@ private fun buildMobileNetworkHtmlPayload(
 @Composable
 private fun SandboxedAdWebView(
     htmlContent: String,
+    onAdClicked: () -> Unit = {},
     onAdFailed: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val latestOnAdClicked by rememberUpdatedState(onAdClicked)
     val latestOnAdFailed by rememberUpdatedState(onAdFailed)
     var webViewHolder by remember(htmlContent) { mutableStateOf<WebView?>(null) }
     var verifyRunnableHolder by remember(htmlContent) { mutableStateOf<Runnable?>(null) }
@@ -915,6 +1065,7 @@ private fun SandboxedAdWebView(
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val url = request?.url?.toString() ?: return false
                             if (isSafeHttpsOrHttp(url)) {
+                                latestOnAdClicked()
                                 runCatching {
                                     context.startActivity(
                                         Intent(Intent.ACTION_VIEW, url.toUri()).apply {

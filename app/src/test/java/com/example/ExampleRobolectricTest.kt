@@ -486,10 +486,10 @@ class ExampleRobolectricTest {
         assertEquals(0.0, telemetry.dailyRevenueUsd, 0.00001)
         assertEquals(0.0, telemetry.monthlyRevenueUsd, 0.00001)
         assertEquals(0, telemetry.impressionCount)
-        assertEquals(8, telemetry.adapterStatuses.size)
+        assertEquals(10, telemetry.adapterStatuses.size)
         val unityStatus = telemetry.adapterStatuses.first { it.key == "unity_ads" }
         assertFalse(unityStatus.requiresSeparateApproval)
-        assertEquals(7, telemetry.adapterStatuses.count { it.requiresSeparateApproval })
+        assertEquals(9, telemetry.adapterStatuses.count { it.requiresSeparateApproval })
     }
 
     @Test
@@ -1828,6 +1828,60 @@ class ExampleRobolectricTest {
         assertTrue(repo.deleteProduct(admin, created.id).isSuccess)
         assertNull(db.productDao().getProductById(created.id))
         assertTrue(db.cartDao().observeCartItems().first().none { it.productId == created.id })
+    }
+
+    @Test
+    fun adMonetizationEnforcesBlockedRoutesSanitizesIosUnitsAndTracksClickRetryTelemetry() {
+        // Blocked routes (Sell, Checkout/Cart, Order payment, Login, Register, Activation, Splash)
+        listOf("sell", "cart", "activation", "login", "register", "register?role=BUYER", "order/o1", "splash").forEach { route ->
+            assertTrue("Expected blocked route: $route", com.example.ads.AdMonetizationManager.isAdBlockedRoute(route))
+        }
+        // Allowed mobile ad routes (including Home, Crops, Farmers, Orders, Profile, Details, Notifications, Info, Admin)
+        listOf("home", "browse?farmers=false", "farmers", "orders", "profile", "product/p1", "farmer/f1", "notifications", "info/about", "admin").forEach { route ->
+            assertFalse("Expected allowed route: $route", com.example.ads.AdMonetizationManager.isAdBlockedRoute(route))
+        }
+
+        // Reject any accidental iOS placement IDs and keep strict Android defaults
+        val dirtyConfig = com.example.data.model.AdConfig(
+            androidBannerId = "Banner_iOS",
+            androidInterstitialId = "Interstitial_iOS",
+            androidRewardedId = "Rewarded_iOS",
+            chartboostEnabled = true,
+            chartboostAppId = "cb_android_01",
+            startIoEnabled = true,
+            startIoAppId = "20261117",
+            consentGranted = false
+        ).hydratedWithDefaults()
+
+        assertEquals(com.example.data.model.AdConfig.DEFAULT_UNITY_BANNER_ID, dirtyConfig.resolvedBannerUnitId())
+        assertEquals(com.example.data.model.AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID, dirtyConfig.resolvedInterstitialUnitId())
+        assertEquals(com.example.data.model.AdConfig.DEFAULT_UNITY_REWARDED_ID, dirtyConfig.resolvedRewardedUnitId())
+
+        com.example.ads.AdMonetizationManager.resetForTest()
+        com.example.ads.AdMonetizationManager.syncConfig(context, dirtyConfig)
+        com.example.ads.AdMonetizationManager.trackFormatRequested(com.example.ads.AdFormatType.BANNER, "Banner_Android")
+        com.example.ads.AdMonetizationManager.trackFormatLoaded(com.example.ads.AdFormatType.BANNER, "Unity Ads")
+        com.example.ads.AdMonetizationManager.trackFormatDisplayed(com.example.ads.AdFormatType.BANNER, "Unity Ads")
+        com.example.ads.AdMonetizationManager.trackFormatClicked(com.example.ads.AdFormatType.BANNER, "Unity Ads")
+
+        val snap = com.example.ads.AdMonetizationManager.telemetry.value
+        val bannerMetrics = snap.formatMetrics.getValue(com.example.ads.AdFormatType.BANNER)
+        assertEquals(1, bannerMetrics.requestCount)
+        assertEquals(1, bannerMetrics.loadedCount)
+        assertEquals(1, bannerMetrics.displayedCount)
+        assertEquals(1, bannerMetrics.clickedCount)
+        assertEquals(100.0, bannerMetrics.fillRatePercent, 0.01)
+        assertEquals(100.0, bannerMetrics.ctrPercent, 0.01)
+        assertFalse(snap.consentGranted)
+        assertTrue(snap.debugLogs.any { it.code == com.example.ads.AdDebugEventCode.AD_CLICKED })
+        assertTrue(snap.adapterStatuses.any { it.key == "chartboost" && it.enabledInConfig && it.appKeyConfigured })
+        assertTrue(snap.adapterStatuses.any { it.key == "startio" && it.enabledInConfig && it.appKeyConfigured })
+
+        // Exponential retry cap (max 3 attempts: 5s, 15s, 30s, then stop)
+        assertEquals(5_000L, com.example.ads.AdMonetizationManager.nextRetryDelayMs(0))
+        assertEquals(15_000L, com.example.ads.AdMonetizationManager.nextRetryDelayMs(1))
+        assertEquals(30_000L, com.example.ads.AdMonetizationManager.nextRetryDelayMs(2))
+        assertNull(com.example.ads.AdMonetizationManager.nextRetryDelayMs(3))
     }
 }
 

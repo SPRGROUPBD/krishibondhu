@@ -206,6 +206,11 @@ data class AdConfig(
     val liftoffAppId: String = "",
     val dtExchangeEnabled: Boolean = false,
     val dtExchangeAppId: String = "",
+    val chartboostEnabled: Boolean = false,
+    val chartboostAppId: String = "",
+    val startIoEnabled: Boolean = false,
+    val startIoAppId: String = "",
+    val consentGranted: Boolean = true,
     // Website & Hybrid Mobile Web Networks (kept for website parity)
     val mobileWebAdsEnabled: Boolean = true,
     val mobileAdNetworkPriority: String = "ALL",
@@ -243,11 +248,19 @@ data class AdConfig(
         const val DEFAULT_UNITY_REWARDED_ID = "Rewarded_Android"
     }
 
-    fun resolvedBannerUnitId(): String = androidBannerId.trim()
-    fun resolvedNativePlacement(): String = androidNativePlacement.trim()
-    fun resolvedInterstitialUnitId(): String = androidInterstitialId.trim()
-    fun resolvedRewardedUnitId(): String = androidRewardedId.trim()
-    fun resolvedAppOpenUnitId(): String = androidAppOpenId.trim()
+    private fun sanitizeAndroidUnit(raw: String, fallback: String): String {
+        val clean = raw.trim()
+        if (clean.contains("_iOS", ignoreCase = true) || clean.equals("ios", ignoreCase = true)) {
+            return fallback
+        }
+        return clean
+    }
+
+    fun resolvedBannerUnitId(): String = sanitizeAndroidUnit(androidBannerId, DEFAULT_UNITY_BANNER_ID)
+    fun resolvedNativePlacement(): String = sanitizeAndroidUnit(androidNativePlacement, "")
+    fun resolvedInterstitialUnitId(): String = sanitizeAndroidUnit(androidInterstitialId, DEFAULT_UNITY_INTERSTITIAL_ID)
+    fun resolvedRewardedUnitId(): String = sanitizeAndroidUnit(androidRewardedId, DEFAULT_UNITY_REWARDED_ID)
+    fun resolvedAppOpenUnitId(): String = sanitizeAndroidUnit(androidAppOpenId, "")
 
     fun usesDirectUnityAds(): Boolean =
         adsEnabled &&
@@ -257,12 +270,21 @@ data class AdConfig(
             unityGameId.trim().isNotEmpty()
 
     fun hydratedWithDefaults(): AdConfig {
-        if (mediationAppKey.trim().isNotEmpty()) return this
+        val cleanBanner = sanitizeAndroidUnit(androidBannerId, DEFAULT_UNITY_BANNER_ID)
+        val cleanInterstitial = sanitizeAndroidUnit(androidInterstitialId, DEFAULT_UNITY_INTERSTITIAL_ID)
+        val cleanRewarded = sanitizeAndroidUnit(androidRewardedId, DEFAULT_UNITY_REWARDED_ID)
+        if (mediationAppKey.trim().isNotEmpty()) {
+            return copy(
+                androidBannerId = cleanBanner,
+                androidInterstitialId = cleanInterstitial,
+                androidRewardedId = cleanRewarded
+            )
+        }
         return copy(
             unityGameId = unityGameId.ifBlank { DEFAULT_UNITY_GAME_ID },
-            androidBannerId = androidBannerId.ifBlank { DEFAULT_UNITY_BANNER_ID },
-            androidInterstitialId = androidInterstitialId.ifBlank { DEFAULT_UNITY_INTERSTITIAL_ID },
-            androidRewardedId = androidRewardedId.ifBlank { DEFAULT_UNITY_REWARDED_ID }
+            androidBannerId = cleanBanner.ifBlank { DEFAULT_UNITY_BANNER_ID },
+            androidInterstitialId = cleanInterstitial.ifBlank { DEFAULT_UNITY_INTERSTITIAL_ID },
+            androidRewardedId = cleanRewarded.ifBlank { DEFAULT_UNITY_REWARDED_ID }
         )
     }
 }

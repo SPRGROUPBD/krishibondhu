@@ -19,6 +19,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.model.AdConfig
+import com.example.ui.components.AdBannerSection
 import com.example.ui.components.EmptyStateView
 import com.example.ui.theme.DarkGreen
 import com.example.ui.theme.LightGreen
@@ -52,12 +54,27 @@ fun NotificationsScreen(
     ) { padding ->
         val visibleNotifs = uiState.visibleNotifications
         if (visibleNotifs.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-                EmptyStateView(
-                    emoji = "🔔",
-                    title = "কোনো নোটিফিকেশন নেই",
-                    subtitle = "অর্ডার ও অ্যাডমিন বার্তা এখানে দেখা যাবে।"
-                )
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .background(MaterialTheme.colorScheme.background),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item {
+                    EmptyStateView(
+                        emoji = "🔔",
+                        title = "কোনো নোটিফিকেশন নেই",
+                        subtitle = "অর্ডার ও অ্যাডমিন বার্তা এখানে দেখা যাবে।"
+                    )
+                }
+                item {
+                    AdBannerSection(
+                        adConfig = uiState.adConfig,
+                        placementTag = "notifications"
+                    )
+                }
             }
         } else {
             LazyColumn(
@@ -85,6 +102,12 @@ fun NotificationsScreen(
                         }
                     }
                 }
+                item {
+                    AdBannerSection(
+                        adConfig = uiState.adConfig,
+                        placementTag = "notifications"
+                    )
+                }
             }
         }
     }
@@ -94,6 +117,7 @@ fun NotificationsScreen(
 @Composable
 fun InfoScreen(
     topic: String,
+    adConfig: AdConfig = AdConfig(),
     onBack: () -> Unit
 ) {
     val (title, body) = when (topic) {
@@ -184,6 +208,12 @@ fun InfoScreen(
                         modifier = Modifier.padding(16.dp)
                     )
                 }
+            }
+            item {
+                AdBannerSection(
+                    adConfig = adConfig,
+                    placementTag = "info_$topic"
+                )
             }
         }
     }

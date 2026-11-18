@@ -21,6 +21,7 @@ import com.example.data.model.AppLanguage
 import com.example.data.model.OrderStatus
 import com.example.data.model.UserRole
 import com.example.data.model.formatBdt
+import com.example.ui.components.AdBannerSection
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.OrderStatusChip
 import com.example.ui.theme.DarkGreen
@@ -195,17 +196,30 @@ fun OrdersScreen(
         }
 
         if (visibleOrders.isEmpty()) {
-            EmptyStateView(
-                emoji = "📦",
-                title = if (lang == AppLanguage.BENGALI) "এখনো কোনো অর্ডার নেই" else "No orders yet",
-                subtitle = when {
-                    isFarmer -> "ক্রেতারা আপনার ফসল অর্ডার করলে এখানে সাথে সাথে দেখাবে।"
-                    isBuyer -> "সরাসরি যাচাইকৃত কৃষকের কাছ থেকে তাজা ফসল অর্ডার করুন।"
-                    else -> "সরাসরি কৃষকের কাছ থেকে ফসল কিনুন বা ফসল বিক্রি করুন।"
-                },
-                actionText = if (isFarmer) null else if (lang == AppLanguage.BENGALI) "ফসল দেখুন" else "Browse Crops",
-                onAction = if (isFarmer) null else onBrowseClick
-            )
+            LazyColumn(
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item {
+                    EmptyStateView(
+                        emoji = "📦",
+                        title = if (lang == AppLanguage.BENGALI) "এখনো কোনো অর্ডার নেই" else "No orders yet",
+                        subtitle = when {
+                            isFarmer -> "ক্রেতারা আপনার ফসল অর্ডার করলে এখানে সাথে সাথে দেখাবে।"
+                            isBuyer -> "সরাসরি যাচাইকৃত কৃষকের কাছ থেকে তাজা ফসল অর্ডার করুন।"
+                            else -> "সরাসরি কৃষকের কাছ থেকে ফসল কিনুন বা ফসল বিক্রি করুন।"
+                        },
+                        actionText = if (isFarmer) null else if (lang == AppLanguage.BENGALI) "ফসল দেখুন" else "Browse Crops",
+                        onAction = if (isFarmer) null else onBrowseClick
+                    )
+                }
+                item {
+                    AdBannerSection(
+                        adConfig = uiState.adConfig,
+                        placementTag = "orders"
+                    )
+                }
+            }
         } else {
             LazyColumn(
                 contentPadding = PaddingValues(16.dp),
@@ -317,6 +331,12 @@ fun OrdersScreen(
                             }
                         }
                     }
+                }
+                item {
+                    AdBannerSection(
+                        adConfig = uiState.adConfig,
+                        placementTag = "orders"
+                    )
                 }
             }
         }

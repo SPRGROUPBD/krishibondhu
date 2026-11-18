@@ -5553,7 +5553,16 @@ function renderAdminDashboardPage() {
                 <label class="font-bold flex items-center gap-1"><input type="checkbox" name="dtExchangeEnabled" ${cfg.dtExchangeEnabled ? "checked" : ""} /> DT Exchange</label>
                 <input name="dtExchangeAppId" value="${escapeHtml(cfg.dtExchangeAppId || "")}" placeholder="DT Exchange App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
               </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="chartboostEnabled" ${cfg.chartboostEnabled ? "checked" : ""} /> Chartboost</label>
+                <input name="chartboostAppId" value="${escapeHtml(cfg.chartboostAppId || "")}" placeholder="Chartboost App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="startIoEnabled" ${cfg.startIoEnabled ? "checked" : ""} /> Start.io (Direct)</label>
+                <input name="startIoAppId" value="${escapeHtml(cfg.startIoAppId || "")}" placeholder="Start.io App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
             </div>
+            <label class="text-xs font-bold flex items-center gap-1.5 bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="consentGranted" ${cfg.consentGranted !== false ? "checked" : ""} /> ব্যবহারকারী বিজ্ঞাপন সম্মতি (GDPR / Privacy Consent)</label>
           </div>
 
           <!-- Google AdSense & Hybrid Web Fallback -->
@@ -6519,6 +6528,11 @@ window.kbApp = {
       liftoffAppId: String(fd.get("liftoffAppId") || "").trim(),
       dtExchangeEnabled: fd.get("dtExchangeEnabled") === "on",
       dtExchangeAppId: String(fd.get("dtExchangeAppId") || "").trim(),
+      chartboostEnabled: fd.get("chartboostEnabled") === "on",
+      chartboostAppId: String(fd.get("chartboostAppId") || "").trim(),
+      startIoEnabled: fd.get("startIoEnabled") === "on",
+      startIoAppId: String(fd.get("startIoAppId") || "").trim(),
+      consentGranted: fd.get("consentGranted") === "on",
       mobileWebAdsEnabled: fd.get("mobileWebAdsEnabled") === "on",
       mobileAdNetworkPriority: String(fd.get("mobileAdNetworkPriority") || "ALL").trim() || "ALL",
       mobileCustomAdHtml: String(fd.get("mobileCustomAdHtml") || ""),

@@ -368,6 +368,13 @@ private fun FarmerHomeWorkspace(
             }
         }
 
+        item {
+            AdBannerSection(
+                adConfig = uiState.adConfig,
+                placementTag = "farmer_home_mid"
+            )
+        }
+
         // 4. Farmer's Listed Crops Snapshot
         item {
             SectionHeader(
@@ -1033,6 +1040,14 @@ private fun MarketplaceHomeContent(
                     }
                 }
             }
+        }
+
+        item {
+            AdBannerSection(
+                adConfig = uiState.adConfig,
+                placementTag = "home_products_farmers_mid",
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
         }
 
         if (verifiedFarmers.isNotEmpty()) {

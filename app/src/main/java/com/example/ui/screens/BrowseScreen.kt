@@ -13,7 +13,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -695,15 +695,24 @@ fun BrowseScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(uiState.filteredProducts, key = { it.id }) { prod ->
-                            ProductBrowseRowCard(
-                                product = prod,
-                                categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
-                                language = lang,
-                                onClick = { onProductClick(prod.id) },
-                                onQuickAddToCart = { onQuickAddToCart(prod.id) },
-                                showQuickAdd = !isFarmerRole
-                            )
+                        itemsIndexed(uiState.filteredProducts, key = { _, prod -> prod.id }) { idx, prod ->
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                ProductBrowseRowCard(
+                                    product = prod,
+                                    categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
+                                    language = lang,
+                                    onClick = { onProductClick(prod.id) },
+                                    onQuickAddToCart = { onQuickAddToCart(prod.id) },
+                                    showQuickAdd = !isFarmerRole
+                                )
+                                if ((idx + 1) % 3 == 0 && idx < uiState.filteredProducts.lastIndex && idx < 9) {
+                                    AdBannerSection(
+                                        adConfig = uiState.adConfig,
+                                        placementTag = "browse_crops_row_${idx + 1}",
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                            }
                         }
                         item {
                             AdBannerSection(
@@ -721,15 +730,31 @@ fun BrowseScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(uiState.filteredProducts, key = { it.id }) { prod ->
-                            ProductCard(
-                                product = prod,
-                                categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
-                                language = lang,
-                                onClick = { onProductClick(prod.id) },
-                                onQuickAddToCart = { onQuickAddToCart(prod.id) },
-                                showQuickAdd = !isFarmerRole
-                            )
+                        val gridChunkSize = 4
+                        val productChunks = uiState.filteredProducts.chunked(gridChunkSize)
+                        productChunks.forEachIndexed { chunkIdx, chunk ->
+                            items(chunk, key = { it.id }) { prod ->
+                                ProductCard(
+                                    product = prod,
+                                    categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
+                                    language = lang,
+                                    onClick = { onProductClick(prod.id) },
+                                    onQuickAddToCart = { onQuickAddToCart(prod.id) },
+                                    showQuickAdd = !isFarmerRole
+                                )
+                            }
+                            if (chunkIdx < productChunks.lastIndex && chunkIdx < 3) {
+                                item(
+                                    key = "browse_crops_grid_ad_$chunkIdx",
+                                    span = { GridItemSpan(maxLineSpan) }
+                                ) {
+                                    AdBannerSection(
+                                        adConfig = uiState.adConfig,
+                                        placementTag = "browse_crops_row_${(chunkIdx + 1) * gridChunkSize}",
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                            }
                         }
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             AdBannerSection(
@@ -785,14 +810,23 @@ fun BrowseScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(uiState.filteredFarmers, key = { it.id }) { farmer ->
+                        itemsIndexed(uiState.filteredFarmers, key = { _, farmer -> farmer.id }) { idx, farmer ->
                             val count = uiState.products.count { it.farmerId == farmer.id && it.status == "ACTIVE" }
-                            FarmerCard(
-                                farmer = farmer,
-                                productCount = count,
-                                language = lang,
-                                onClick = { onFarmerClick(farmer.id) }
-                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                FarmerCard(
+                                    farmer = farmer,
+                                    productCount = count,
+                                    language = lang,
+                                    onClick = { onFarmerClick(farmer.id) }
+                                )
+                                if ((idx + 1) % 3 == 0 && idx < uiState.filteredFarmers.lastIndex && idx < 9) {
+                                    AdBannerSection(
+                                        adConfig = uiState.adConfig,
+                                        placementTag = "browse_farmers_row_${idx + 1}",
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
+                                }
+                            }
                         }
                         item {
                             AdBannerSection(

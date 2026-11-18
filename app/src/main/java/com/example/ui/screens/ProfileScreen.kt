@@ -41,6 +41,7 @@ import com.example.data.model.AppLanguage
 import com.example.data.model.BangladeshLocations
 import com.example.data.model.UserRole
 import com.example.ui.components.AccountStatusBadge
+import com.example.ui.components.AdBannerSection
 import com.example.ui.components.UserAvatar
 import com.example.ui.components.formatDateBn
 import com.example.ui.theme.*
@@ -498,6 +499,13 @@ fun ProfileScreen(
                     ProfileNavItem(Icons.Filled.Gavel, "শর্তাবলি (Terms & Conditions)") { onOpenInfo("terms") }
                 }
             }
+        }
+
+        item {
+            AdBannerSection(
+                adConfig = uiState.adConfig,
+                placementTag = "profile"
+            )
         }
 
         item {

@@ -3,13 +3,21 @@ package com.example.ads
 import android.app.Activity
 import android.content.Context
 import android.os.Build
+import com.example.BuildConfig
 import com.example.data.model.AdConfig
 import com.example.util.NetworkMonitor
+import com.startapp.sdk.adsbase.Ad
+import com.startapp.sdk.adsbase.StartAppAd
+import com.startapp.sdk.adsbase.StartAppSDK
+import com.startapp.sdk.adsbase.adlisteners.AdDisplayListener
+import com.startapp.sdk.adsbase.adlisteners.AdEventListener
+import com.startapp.sdk.adsbase.adlisteners.VideoListener
 import com.unity3d.ads.IUnityAdsInitializationListener
 import com.unity3d.ads.IUnityAdsLoadListener
 import com.unity3d.ads.IUnityAdsShowListener
 import com.unity3d.ads.UnityAds
 import com.unity3d.ads.UnityAdsShowOptions
+import com.unity3d.ads.metadata.MetaData
 import com.unity3d.mediation.LevelPlay
 import com.unity3d.mediation.LevelPlayAdError
 import com.unity3d.mediation.LevelPlayAdInfo
@@ -26,7 +34,9 @@ import com.unity3d.mediation.rewarded.LevelPlayRewardedAd
 import com.unity3d.mediation.rewarded.LevelPlayRewardedAdListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,9 +69,11 @@ object AdDebugEventCode {
     const val AD_REQUEST_STARTED = "AD_REQUEST_STARTED"
     const val AD_LOADED = "AD_LOADED"
     const val AD_DISPLAYED = "AD_DISPLAYED"
+    const val AD_CLICKED = "AD_CLICKED"
     const val AD_DISPLAY_FAILED = "AD_DISPLAY_FAILED"
     const val AD_CLOSED = "AD_CLOSED"
     const val AD_NO_FILL = "AD_NO_FILL"
+    const val AD_RETRY_SCHEDULED = "AD_RETRY_SCHEDULED"
     const val NETWORK_UNAVAILABLE = "NETWORK_UNAVAILABLE"
     const val INVALID_APP_KEY = "INVALID_APP_KEY"
     const val INVALID_PLACEMENT_ID = "INVALID_PLACEMENT_ID"
@@ -97,18 +109,28 @@ data class AdFormatTelemetry(
     val requestCount: Int = 0,
     val loadedCount: Int = 0,
     val displayedCount: Int = 0,
+    val clickedCount: Int = 0,
     val noFillCount: Int = 0,
     val failedCount: Int = 0,
+    val retryCount: Int = 0,
     val lastError: String = ""
-)
+) {
+    val fillRatePercent: Double
+        get() = if (requestCount > 0) (loadedCount * 100.0) / requestCount else 0.0
+
+    val ctrPercent: Double
+        get() = if (displayedCount > 0) (clickedCount * 100.0) / displayedCount else 0.0
+}
 
 data class AdRuntimeTelemetry(
     val sdkInitStatus: SdkInitStatus = SdkInitStatus.IDLE,
     val mediationPlatform: String = "Unity LevelPlay 9.2.0",
     val activeAppKeyMasked: String = "",
     val testModeEnabled: Boolean = false,
+    val consentGranted: Boolean = true,
+    val startIoReady: Boolean = false,
     val lastInitError: String = "",
-    val adapterStatuses: List<AdNetworkAdapterStatus> = defaultAdapterStatuses(AdConfig(), false),
+    val adapterStatuses: List<AdNetworkAdapterStatus> = defaultAdapterStatuses(AdConfig(), sdkInitialized = false, startIoInitialized = false),
     val formatMetrics: Map<AdFormatType, AdFormatTelemetry> = AdFormatType.entries.associateWith {
         AdFormatTelemetry(format = it)
     },
@@ -201,6 +223,24 @@ private val SUPPORTED_NETWORK_DESCRIPTORS = listOf(
         requiresSeparateApproval = true,
         enabledSelector = { it.dtExchangeEnabled },
         appIdSelector = { it.dtExchangeAppId }
+    ),
+    NetworkDescriptor(
+        key = "chartboost",
+        displayName = "Chartboost",
+        adapterClass = "com.ironsource.adapters.chartboost.ChartboostAdapter",
+        adapterVersion = "5.12.0",
+        requiresSeparateApproval = true,
+        enabledSelector = { it.chartboostEnabled },
+        appIdSelector = { it.chartboostAppId }
+    ),
+    NetworkDescriptor(
+        key = "startio",
+        displayName = "Start.io",
+        adapterClass = "com.startapp.sdk.adsbase.StartAppSDK",
+        adapterVersion = "5.4.0 (Standalone)",
+        requiresSeparateApproval = true,
+        enabledSelector = { it.startIoEnabled },
+        appIdSelector = { AdMonetizationManager.resolveStartIoAppId(it) }
     )
 )
 
@@ -209,24 +249,32 @@ private fun isAdapterClassPresent(className: String): Boolean =
 
 private fun defaultAdapterStatuses(
     config: AdConfig,
-    sdkInitialized: Boolean
+    sdkInitialized: Boolean,
+    startIoInitialized: Boolean
 ): List<AdNetworkAdapterStatus> =
     SUPPORTED_NETWORK_DESCRIPTORS.map { desc ->
-        val directUnityMode = desc.key == "unity_ads" && config.usesDirectUnityAds()
+        val resolvedLevelPlayKey = AdMonetizationManager.resolveMediationAppKey(config)
+        val directUnityMode = desc.key == "unity_ads" && AdMonetizationManager.usesDirectUnityAds(config)
+        val isStartIo = desc.key == "startio"
         val packaged = isAdapterClassPresent(desc.adapterClass) ||
             (desc.key == "unity_ads" && isAdapterClassPresent("com.unity3d.ads.UnityAds"))
         val enabled = desc.enabledSelector(config)
         val keyPresent = desc.appIdSelector(config).trim().isNotBlank()
-        val ready = sdkInitialized && packaged && enabled && keyPresent &&
-            (directUnityMode || config.mediationAppKey.trim().isNotEmpty())
+        val ready = when {
+            isStartIo -> startIoInitialized && packaged && enabled && keyPresent
+            else -> sdkInitialized && packaged && enabled && keyPresent &&
+                (directUnityMode || resolvedLevelPlayKey.isNotEmpty())
+        }
         val note = when {
-            !packaged -> "Adapter class missing from build"
+            !packaged -> "SDK/Adapter class missing from build"
             !enabled -> "Disabled in Admin Panel"
             !keyPresent -> if (desc.requiresSeparateApproval) {
                 "Account approval & Network App ID required"
             } else {
                 "Unity Game ID missing in Admin Panel"
             }
+            isStartIo && startIoInitialized -> "সক্রিয় (Start.io Standalone SDK)"
+            isStartIo -> "Waiting for Start.io SDK initialization"
             directUnityMode && sdkInitialized -> "সক্রিয় (Direct Unity Ads • Game ID: ${config.unityGameId.trim()})"
             directUnityMode -> "Waiting for Direct Unity Ads SDK initialization (${config.unityGameId.trim()})"
             !sdkInitialized -> "Waiting for LevelPlay SDK initialization"
@@ -249,7 +297,9 @@ private fun defaultAdapterStatuses(
 object AdMonetizationManager {
     private const val INTERSTITIAL_COOLDOWN_MS = 180_000L
     private const val APP_OPEN_COOLDOWN_MS = 240_000L
-    private const val MAX_LOG_ENTRIES = 80
+    private const val MAX_LOG_ENTRIES = 100
+    const val MAX_RETRY_ATTEMPTS = 3
+    private val RETRY_DELAYS_MS = longArrayOf(5_000L, 15_000L, 30_000L)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -263,17 +313,25 @@ object AdMonetizationManager {
     @Volatile
     private var initializedUnityGameId: String = ""
     @Volatile
+    private var initializedStartIoAppId: String = ""
+    @Volatile
     private var isDirectUnityMode: Boolean = false
     @Volatile
     private var sdkInitialized = false
     @Volatile
     private var sdkInitializing = false
     @Volatile
+    private var startIoInitialized = false
+    @Volatile
+    private var startIoInitializing = false
+    @Volatile
     private var impressionListenerRegistered = false
     @Volatile
     private var currentRoute: String = "splash"
     @Volatile
     private var currentActivityRef: WeakReference<Activity>? = null
+    @Volatile
+    private var isShowingFullscreenAd = false
 
     private var interstitialAd: LevelPlayInterstitialAd? = null
     private var loadedInterstitialUnitId: String = ""
@@ -293,6 +351,17 @@ object AdMonetizationManager {
     private var isLoadingAppOpen = false
     private var lastAppOpenShownAt = 0L
 
+    private var startIoInterstitial: StartAppAd? = null
+    private var startIoInterstitialReady = false
+    private var isLoadingStartIoInterstitial = false
+
+    private var startIoRewarded: StartAppAd? = null
+    private var startIoRewardedReady = false
+    private var isLoadingStartIoRewarded = false
+
+    private val retryAttempts = mutableMapOf<AdFormatType, Int>()
+    private val retryJobs = mutableMapOf<AdFormatType, Job>()
+
     private val impressionDataListener = object : LevelPlayImpressionDataListener {
         override fun onImpressionSuccess(impressionData: LevelPlayImpressionData) {
             recordRealImpressionRevenue(
@@ -305,6 +374,35 @@ object AdMonetizationManager {
 
     fun isTestEnvironment(): Boolean =
         Build.FINGERPRINT.contains("robolectric", ignoreCase = true) || Build.FINGERPRINT.isBlank()
+
+    fun resolveMediationAppKey(config: AdConfig = latestConfig): String {
+        val adminKey = config.mediationAppKey.trim()
+        if (adminKey.isNotEmpty()) return adminKey
+        val secretKey = runCatching { BuildConfig.LEVELPLAY_APP_KEY.trim() }.getOrDefault("")
+        return if (secretKey.isBlank() || secretKey.equals("UNSET", ignoreCase = true) || secretKey.startsWith("LEVELPLAY_APP_KEY")) {
+            ""
+        } else {
+            secretKey
+        }
+    }
+
+    fun resolveStartIoAppId(config: AdConfig = latestConfig): String {
+        val adminId = config.startIoAppId.trim()
+        if (adminId.isNotEmpty()) return adminId
+        val secretId = runCatching { BuildConfig.STARTIO_APP_ID.trim() }.getOrDefault("")
+        return if (secretId.isBlank() || secretId.equals("UNSET", ignoreCase = true) || secretId.startsWith("STARTIO_APP_ID")) {
+            ""
+        } else {
+            secretId
+        }
+    }
+
+    fun usesDirectUnityAds(config: AdConfig = latestConfig): Boolean =
+        config.adsEnabled &&
+            config.androidAdsEnabled &&
+            resolveMediationAppKey(config).isEmpty() &&
+            config.unityAdsEnabled &&
+            config.unityGameId.trim().isNotEmpty()
 
     fun setCurrentActivity(activity: Activity?) {
         currentActivityRef = activity?.let { WeakReference(it) }
@@ -320,29 +418,40 @@ object AdMonetizationManager {
         currentRoute = route
     }
 
+    fun isCurrentRouteAdBlocked(): Boolean = isAdBlockedRoute(currentRoute)
+
     fun isAdBlockedRoute(route: String): Boolean =
         route == "splash" ||
             route == "cart" ||
+            route == "sell" ||
+            route.startsWith("sell?") ||
             route == "activation" ||
             route.startsWith("order/") ||
             route == "login" ||
-            route == "register"
+            route == "register" ||
+            route.startsWith("register?")
 
     fun syncConfig(context: Context, config: AdConfig) {
         latestConfig = config
         refreshAdapterAndFormatConfig(config)
         if (!config.adsEnabled || !config.androidAdsEnabled) {
+            cancelAllRetryJobs()
             return
         }
-        val usesDirectUnity = config.usesDirectUnityAds()
-        val appKey = config.mediationAppKey.trim()
+        if (isTestEnvironment()) {
+            return
+        }
+        val usesDirectUnity = usesDirectUnityAds(config)
+        val appKey = resolveMediationAppKey(config)
+        val startIoId = resolveStartIoAppId(config)
+        if (config.startIoEnabled && startIoId.isNotEmpty()) {
+            initializeStartIo(context, config, startIoId)
+        }
         if (!usesDirectUnity && appKey.isEmpty()) {
             return
         }
-        if (!isTestEnvironment()) {
-            initialize(context, config) {
-                preloadAllFormats(context, config)
-            }
+        initialize(context, config) {
+            preloadAllFormats(context, config)
         }
     }
 
@@ -363,24 +472,29 @@ object AdMonetizationManager {
             return
         }
 
-        if (config.usesDirectUnityAds()) {
+        val startIoId = resolveStartIoAppId(config)
+        if (!isTestEnvironment() && config.startIoEnabled && startIoId.isNotEmpty()) {
+            initializeStartIo(context, config, startIoId)
+        }
+
+        if (usesDirectUnityAds(config)) {
             initializeDirectUnityAds(context, config, onReady)
             return
         }
 
-        val appKey = config.mediationAppKey.trim()
+        val appKey = resolveMediationAppKey(config)
         if (appKey.isEmpty()) {
             _telemetry.update {
                 it.copy(
-                    sdkInitStatus = SdkInitStatus.FAILED,
-                    lastInitError = "Unity Game ID বা LevelPlay App Key দেওয়া হয়নি",
+                    sdkInitStatus = if (startIoInitialized) SdkInitStatus.SUCCESS else SdkInitStatus.FAILED,
+                    lastInitError = if (startIoInitialized) "" else "Unity Game ID বা LevelPlay App Key দেওয়া হয়নি",
                     activeAppKeyMasked = "(empty)",
-                    adapterStatuses = defaultAdapterStatuses(config, false)
+                    adapterStatuses = defaultAdapterStatuses(config, sdkInitialized, startIoInitialized)
                 )
             }
             appendLog(
                 code = AdDebugEventCode.INVALID_APP_KEY,
-                message = "Ad initialization skipped: both Unity Game ID and LevelPlay App Key are unavailable"
+                message = "LevelPlay App Key missing (set LEVELPLAY_APP_KEY in AI Studio Secrets or Admin Panel)"
             )
             return
         }
@@ -398,6 +512,8 @@ object AdMonetizationManager {
             return
         }
 
+        applyPrivacyConsent(appContext, config)
+
         if (sdkInitialized && !isDirectUnityMode && initializedAppKey == appKey) {
             onReady?.invoke()
             return
@@ -413,12 +529,13 @@ object AdMonetizationManager {
                 mediationPlatform = "Unity LevelPlay 9.2.0",
                 activeAppKeyMasked = masked,
                 testModeEnabled = config.adTestMode,
+                consentGranted = config.consentGranted,
                 lastInitError = ""
             )
         }
         appendLog(
             code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
-            message = "Starting Unity LevelPlay initialization (appKey=$masked, testMode=${config.adTestMode})"
+            message = "Starting Unity LevelPlay initialization (appKey=$masked, testMode=${config.adTestMode}, consent=${config.consentGranted})"
         )
 
         runCatching {
@@ -426,6 +543,7 @@ object AdMonetizationManager {
                 LevelPlay.addImpressionDataListener(impressionDataListener)
                 impressionListenerRegistered = true
             }
+            LevelPlay.setConsent(config.consentGranted)
             if (config.adTestMode) {
                 LevelPlay.setMetaData("is_test_suite", "enable")
             } else {
@@ -451,16 +569,15 @@ object AdMonetizationManager {
                             lastInitError = "",
                             activeAppKeyMasked = masked,
                             testModeEnabled = config.adTestMode,
-                            adapterStatuses = defaultAdapterStatuses(latestConfig, true)
+                            consentGranted = config.consentGranted,
+                            adapterStatuses = defaultAdapterStatuses(latestConfig, true, startIoInitialized)
                         )
                     }
                     appendLog(
                         code = AdDebugEventCode.SDK_INITIALIZATION_SUCCESS,
                         message = "LevelPlay SDK initialized successfully"
                     )
-                    onReady?.let { cb ->
-                        scope.launch { cb() }
-                    }
+                    onReady?.let { cb -> scope.launch { cb() } }
                 }
 
                 override fun onInitFailed(error: LevelPlayInitError) {
@@ -471,7 +588,7 @@ object AdMonetizationManager {
                         it.copy(
                             sdkInitStatus = SdkInitStatus.FAILED,
                             lastInitError = msg,
-                            adapterStatuses = defaultAdapterStatuses(latestConfig, false)
+                            adapterStatuses = defaultAdapterStatuses(latestConfig, false, startIoInitialized)
                         )
                     }
                     appendLog(
@@ -488,7 +605,7 @@ object AdMonetizationManager {
                 it.copy(
                     sdkInitStatus = SdkInitStatus.FAILED,
                     lastInitError = msg,
-                    adapterStatuses = defaultAdapterStatuses(latestConfig, false)
+                    adapterStatuses = defaultAdapterStatuses(latestConfig, false, startIoInitialized)
                 )
             }
             appendLog(
@@ -517,6 +634,8 @@ object AdMonetizationManager {
             return
         }
 
+        applyPrivacyConsent(appContext, config)
+
         if ((sdkInitialized && isDirectUnityMode && initializedUnityGameId == gameId) ||
             (UnityAds.isInitialized && initializedUnityGameId == gameId)
         ) {
@@ -528,8 +647,9 @@ object AdMonetizationManager {
                     mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
                     activeAppKeyMasked = "Game ID: $gameId",
                     testModeEnabled = config.adTestMode,
+                    consentGranted = config.consentGranted,
                     lastInitError = "",
-                    adapterStatuses = defaultAdapterStatuses(latestConfig, true)
+                    adapterStatuses = defaultAdapterStatuses(latestConfig, true, startIoInitialized)
                 )
             }
             onReady?.let { cb -> scope.launch { cb() } }
@@ -545,13 +665,14 @@ object AdMonetizationManager {
                 mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
                 activeAppKeyMasked = "Game ID: $gameId",
                 testModeEnabled = config.adTestMode,
+                consentGranted = config.consentGranted,
                 lastInitError = ""
             )
         }
         appendLog(
             code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
             network = "Unity Ads",
-            message = "Initializing Unity Ads SDK (Game ID=$gameId, testMode=${config.adTestMode})"
+            message = "Initializing Unity Ads SDK (Game ID=$gameId, testMode=${config.adTestMode}, consent=${config.consentGranted})"
         )
 
         runCatching {
@@ -567,8 +688,9 @@ object AdMonetizationManager {
                             mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
                             activeAppKeyMasked = "Game ID: $gameId",
                             testModeEnabled = latestConfig.adTestMode,
+                            consentGranted = latestConfig.consentGranted,
                             lastInitError = "",
-                            adapterStatuses = defaultAdapterStatuses(latestConfig, true)
+                            adapterStatuses = defaultAdapterStatuses(latestConfig, true, startIoInitialized)
                         )
                     }
                     appendLog(
@@ -590,7 +712,7 @@ object AdMonetizationManager {
                         it.copy(
                             sdkInitStatus = SdkInitStatus.FAILED,
                             lastInitError = msg,
-                            adapterStatuses = defaultAdapterStatuses(latestConfig, false)
+                            adapterStatuses = defaultAdapterStatuses(latestConfig, false, startIoInitialized)
                         )
                     }
                     appendLog(
@@ -608,7 +730,7 @@ object AdMonetizationManager {
                 it.copy(
                     sdkInitStatus = SdkInitStatus.FAILED,
                     lastInitError = msg,
-                    adapterStatuses = defaultAdapterStatuses(latestConfig, false)
+                    adapterStatuses = defaultAdapterStatuses(latestConfig, false, startIoInitialized)
                 )
             }
             appendLog(
@@ -616,6 +738,131 @@ object AdMonetizationManager {
                 network = "Unity Ads",
                 message = msg
             )
+        }
+    }
+
+    private fun initializeStartIo(context: Context, config: AdConfig, appId: String) {
+        if (isTestEnvironment()) return
+        val appContext = context.applicationContext
+        if (!NetworkMonitor.isCurrentlyOnline(appContext)) return
+        if (startIoInitialized && initializedStartIoAppId == appId) {
+            runCatching {
+                StartAppSDK.setTestAdsEnabled(config.adTestMode)
+                StartAppSDK.setUserConsent(appContext, "pas", System.currentTimeMillis(), config.consentGranted)
+            }
+            return
+        }
+        if (startIoInitializing) return
+        startIoInitializing = true
+
+        appendLog(
+            code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
+            network = "Start.io",
+            message = "Initializing Start.io SDK 5.4.0 (appId=${maskKey(appId)}, testMode=${config.adTestMode})"
+        )
+
+        runCatching {
+            StartAppSDK.setTestAdsEnabled(config.adTestMode)
+            StartAppSDK.setUserConsent(appContext, "pas", System.currentTimeMillis(), config.consentGranted)
+            StartAppSDK.initParams(appContext, appId)
+                .setCallback {
+                    startIoInitializing = false
+                    startIoInitialized = true
+                    initializedStartIoAppId = appId
+                    _telemetry.update {
+                        it.copy(
+                            startIoReady = true,
+                            adapterStatuses = defaultAdapterStatuses(latestConfig, sdkInitialized, true)
+                        )
+                    }
+                    appendLog(
+                        code = AdDebugEventCode.SDK_INITIALIZATION_SUCCESS,
+                        network = "Start.io",
+                        message = "Start.io SDK initialized"
+                    )
+                    if (latestConfig.interstitialEnabled) {
+                        preloadStartIoInterstitial(appContext)
+                    }
+                    if (latestConfig.rewardedEnabled) {
+                        preloadStartIoRewarded(appContext)
+                    }
+                }
+                .init()
+        }.onFailure { err ->
+            startIoInitializing = false
+            startIoInitialized = false
+            appendLog(
+                code = AdDebugEventCode.SDK_INITIALIZATION_FAILED,
+                network = "Start.io",
+                message = err.message ?: "Start.io initialization failed"
+            )
+        }
+    }
+
+    private fun applyPrivacyConsent(context: Context, config: AdConfig) {
+        runCatching {
+            val gdpr = MetaData(context)
+            gdpr["gdpr.consent"] = config.consentGranted
+            gdpr["privacy.consent"] = config.consentGranted
+            gdpr.commit()
+        }
+        runCatching { LevelPlay.setConsent(config.consentGranted) }
+        runCatching {
+            if (config.startIoEnabled && resolveStartIoAppId(config).isNotEmpty()) {
+                StartAppSDK.setUserConsent(context, "pas", System.currentTimeMillis(), config.consentGranted)
+            }
+        }
+    }
+
+    private fun preloadStartIoInterstitial(context: Context) {
+        if (isTestEnvironment() || !startIoInitialized || isLoadingStartIoInterstitial || startIoInterstitialReady) return
+        if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || !latestConfig.interstitialEnabled) return
+        isLoadingStartIoInterstitial = true
+        runCatching {
+            val ad = StartAppAd(context.applicationContext)
+            startIoInterstitial = ad
+            ad.loadAd(StartAppAd.AdMode.AUTOMATIC, object : AdEventListener {
+                override fun onReceiveAd(adObj: Ad) {
+                    isLoadingStartIoInterstitial = false
+                    startIoInterstitialReady = true
+                    appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.INTERSTITIAL, "Start.io", "Start.io Interstitial ready")
+                }
+
+                override fun onFailedToReceiveAd(adObj: Ad?) {
+                    isLoadingStartIoInterstitial = false
+                    startIoInterstitialReady = false
+                    appendLog(AdDebugEventCode.AD_NO_FILL, AdFormatType.INTERSTITIAL, "Start.io", adObj?.errorMessage ?: "Start.io interstitial failed")
+                }
+            })
+        }.onFailure {
+            isLoadingStartIoInterstitial = false
+            startIoInterstitialReady = false
+        }
+    }
+
+    private fun preloadStartIoRewarded(context: Context) {
+        if (isTestEnvironment() || !startIoInitialized || isLoadingStartIoRewarded || startIoRewardedReady) return
+        if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || !latestConfig.rewardedEnabled) return
+        isLoadingStartIoRewarded = true
+        runCatching {
+            val ad = StartAppAd(context.applicationContext)
+            startIoRewarded = ad
+            ad.loadAd(StartAppAd.AdMode.REWARDED_VIDEO, object : AdEventListener {
+                override fun onReceiveAd(adObj: Ad) {
+                    isLoadingStartIoRewarded = false
+                    startIoRewardedReady = true
+                    appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.REWARDED, "Start.io", "Start.io Rewarded ready")
+                }
+
+                override fun onFailedToReceiveAd(adObj: Ad?) {
+                    isLoadingStartIoRewarded = false
+                    startIoRewardedReady = false
+                    appendLog(AdDebugEventCode.AD_NO_FILL, AdFormatType.REWARDED, "Start.io", adObj?.errorMessage ?: "Start.io rewarded failed")
+                }
+            })
+        }.onFailure {
+            isLoadingStartIoRewarded = false
+            startIoRewardedReady = false
         }
     }
 
@@ -630,6 +877,10 @@ object AdMonetizationManager {
         }
         if (config.appOpenEnabled) {
             preloadAppOpen(context, config.resolvedAppOpenUnitId(), true)
+        }
+        if (startIoInitialized) {
+            if (config.interstitialEnabled) preloadStartIoInterstitial(context)
+            if (config.rewardedEnabled) preloadStartIoRewarded(context)
         }
     }
 
@@ -651,7 +902,7 @@ object AdMonetizationManager {
             }
             return
         }
-        if (latestConfig.usesDirectUnityAds()) {
+        if (usesDirectUnityAds()) {
             if ((loadedDirectInterstitialId == cleanId) || isLoadingInterstitial) return
             isLoadingInterstitial = true
             updateFormatMetric(AdFormatType.INTERSTITIAL) {
@@ -672,6 +923,7 @@ object AdMonetizationManager {
                     override fun onUnityAdsAdLoaded(placementId: String) {
                         isLoadingInterstitial = false
                         loadedDirectInterstitialId = placementId
+                        resetRetryState(AdFormatType.INTERSTITIAL)
                         updateFormatMetric(AdFormatType.INTERSTITIAL) {
                             it.copy(
                                 requestStatus = "Completed",
@@ -712,6 +964,9 @@ object AdMonetizationManager {
                             network = "Unity Ads",
                             message = "${error.name}: $message"
                         )
+                        scheduleRetry(context.applicationContext, AdFormatType.INTERSTITIAL) {
+                            preloadInterstitial(context.applicationContext, cleanId, latestConfig.interstitialEnabled)
+                        }
                     }
                 })
             }.onFailure { err ->
@@ -742,6 +997,7 @@ object AdMonetizationManager {
                 override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
                     isLoadingInterstitial = false
                     loadedInterstitialUnitId = cleanId
+                    resetRetryState(AdFormatType.INTERSTITIAL)
                     updateFormatMetric(AdFormatType.INTERSTITIAL) {
                         it.copy(
                             requestStatus = "Completed",
@@ -762,21 +1018,17 @@ object AdMonetizationManager {
                     isLoadingInterstitial = false
                     interstitialAd = null
                     handleAdLoadFailure(AdFormatType.INTERSTITIAL, error)
+                    scheduleRetry(context.applicationContext, AdFormatType.INTERSTITIAL) {
+                        preloadInterstitial(context.applicationContext, cleanId, latestConfig.interstitialEnabled)
+                    }
                 }
 
                 override fun onAdDisplayed(adInfo: LevelPlayAdInfo) {
-                    updateFormatMetric(AdFormatType.INTERSTITIAL) {
-                        it.copy(displayedCount = it.displayedCount + 1)
-                    }
-                    appendLog(
-                        code = AdDebugEventCode.AD_DISPLAYED,
-                        format = AdFormatType.INTERSTITIAL,
-                        network = adInfo.adNetwork,
-                        message = "Interstitial shown (${adInfo.adNetwork})"
-                    )
+                    trackFormatDisplayed(AdFormatType.INTERSTITIAL, adInfo.adNetwork)
                 }
 
                 override fun onAdDisplayFailed(error: LevelPlayAdError, adInfo: LevelPlayAdInfo) {
+                    isShowingFullscreenAd = false
                     interstitialAd = null
                     updateFormatMetric(AdFormatType.INTERSTITIAL) {
                         it.copy(failedCount = it.failedCount + 1, lastError = error.errorMessage)
@@ -789,9 +1041,12 @@ object AdMonetizationManager {
                     )
                 }
 
-                override fun onAdClicked(adInfo: LevelPlayAdInfo) = Unit
+                override fun onAdClicked(adInfo: LevelPlayAdInfo) {
+                    trackFormatClicked(AdFormatType.INTERSTITIAL, adInfo.adNetwork)
+                }
 
                 override fun onAdClosed(adInfo: LevelPlayAdInfo) {
+                    isShowingFullscreenAd = false
                     interstitialAd = null
                     appendLog(
                         code = AdDebugEventCode.AD_CLOSED,
@@ -799,7 +1054,7 @@ object AdMonetizationManager {
                         network = adInfo.adNetwork,
                         message = "Interstitial closed"
                     )
-                    preloadInterstitial(context, cleanId, latestConfig.interstitialEnabled)
+                    preloadInterstitial(context.applicationContext, cleanId, latestConfig.interstitialEnabled)
                 }
 
                 override fun onAdInfoChanged(adInfo: LevelPlayAdInfo) = Unit
@@ -820,6 +1075,7 @@ object AdMonetizationManager {
         if (activity == null || activity.isFinishing || activity.isDestroyed) return
         if (isTestEnvironment() || !enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
         if (isAdBlockedRoute(currentRoute)) return
+        if (isShowingFullscreenAd) return
 
         val cleanId = overrideUnitId.trim()
         if (cleanId.isEmpty()) return
@@ -827,10 +1083,11 @@ object AdMonetizationManager {
         val now = System.currentTimeMillis()
         if (now - lastInterstitialShownAt < INTERSTITIAL_COOLDOWN_MS) return
 
-        if (latestConfig.usesDirectUnityAds()) {
+        if (usesDirectUnityAds()) {
             if (sdkInitialized && loadedDirectInterstitialId == cleanId) {
                 lastInterstitialShownAt = now
                 loadedDirectInterstitialId = ""
+                isShowingFullscreenAd = true
                 runCatching {
                     UnityAds.show(activity, cleanId, UnityAdsShowOptions(), object : IUnityAdsShowListener {
                         override fun onUnityAdsShowFailure(
@@ -838,6 +1095,7 @@ object AdMonetizationManager {
                             error: UnityAds.UnityAdsShowError,
                             message: String
                         ) {
+                            isShowingFullscreenAd = false
                             updateFormatMetric(AdFormatType.INTERSTITIAL) {
                                 it.copy(failedCount = it.failedCount + 1, lastError = "${error.name}: $message")
                             }
@@ -849,34 +1107,82 @@ object AdMonetizationManager {
                             trackFormatDisplayed(AdFormatType.INTERSTITIAL, "Unity Ads")
                         }
 
-                        override fun onUnityAdsShowClick(placementId: String) = Unit
+                        override fun onUnityAdsShowClick(placementId: String) {
+                            trackFormatClicked(AdFormatType.INTERSTITIAL, "Unity Ads")
+                        }
 
                         override fun onUnityAdsShowComplete(
                             placementId: String,
                             state: UnityAds.UnityAdsShowCompletionState
                         ) {
+                            isShowingFullscreenAd = false
                             appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.INTERSTITIAL, "Unity Ads", "Unity Interstitial closed (${state.name})")
                             preloadInterstitial(activity.applicationContext, cleanId, latestConfig.interstitialEnabled)
                         }
                     })
                 }.onFailure { err ->
+                    isShowingFullscreenAd = false
                     appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.INTERSTITIAL, "Unity Ads", err.message ?: "Unity show failed")
                 }
+                return
+            } else if (startIoInitialized && startIoInterstitialReady && startIoInterstitial != null) {
+                showStartIoInterstitial(activity, now)
+                preloadInterstitial(activity, cleanId, enabled)
+                return
             } else {
                 preloadInterstitial(activity, cleanId, enabled)
+                return
             }
-            return
         }
 
         val ad = interstitialAd
         if (sdkInitialized && ad != null && loadedInterstitialUnitId == cleanId && ad.isAdReady()) {
             lastInterstitialShownAt = now
+            isShowingFullscreenAd = true
             runCatching { ad.showAd(activity, currentRoute) }.onFailure { err ->
+                isShowingFullscreenAd = false
                 interstitialAd = null
                 appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.INTERSTITIAL, message = err.message ?: "showAd failed")
             }
+        } else if (startIoInitialized && startIoInterstitialReady && startIoInterstitial != null) {
+            showStartIoInterstitial(activity, now)
+            preloadInterstitial(activity, cleanId, enabled)
         } else {
             preloadInterstitial(activity, cleanId, enabled)
+        }
+    }
+
+    private fun showStartIoInterstitial(activity: Activity, now: Long) {
+        val ad = startIoInterstitial ?: return
+        lastInterstitialShownAt = now
+        startIoInterstitialReady = false
+        isShowingFullscreenAd = true
+        val shown = runCatching {
+            ad.showAd(object : AdDisplayListener {
+                override fun adHidden(adObj: Ad) {
+                    isShowingFullscreenAd = false
+                    appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.INTERSTITIAL, "Start.io", "Start.io Interstitial closed")
+                    preloadStartIoInterstitial(activity.applicationContext)
+                }
+
+                override fun adDisplayed(adObj: Ad) {
+                    trackFormatDisplayed(AdFormatType.INTERSTITIAL, "Start.io")
+                }
+
+                override fun adClicked(adObj: Ad) {
+                    trackFormatClicked(AdFormatType.INTERSTITIAL, "Start.io")
+                }
+
+                override fun adNotDisplayed(adObj: Ad) {
+                    isShowingFullscreenAd = false
+                    appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.INTERSTITIAL, "Start.io", "Start.io Interstitial not displayed")
+                    preloadStartIoInterstitial(activity.applicationContext)
+                }
+            })
+        }.getOrDefault(false)
+        if (!shown) {
+            isShowingFullscreenAd = false
+            preloadStartIoInterstitial(activity.applicationContext)
         }
     }
 
@@ -898,7 +1204,7 @@ object AdMonetizationManager {
             }
             return
         }
-        if (latestConfig.usesDirectUnityAds()) {
+        if (usesDirectUnityAds()) {
             if (loadedDirectRewardedId == cleanId || isLoadingRewarded) return
             isLoadingRewarded = true
             updateFormatMetric(AdFormatType.REWARDED) {
@@ -915,6 +1221,7 @@ object AdMonetizationManager {
                     override fun onUnityAdsAdLoaded(placementId: String) {
                         isLoadingRewarded = false
                         loadedDirectRewardedId = placementId
+                        resetRetryState(AdFormatType.REWARDED)
                         updateFormatMetric(AdFormatType.REWARDED) {
                             it.copy(
                                 requestStatus = "Completed",
@@ -927,7 +1234,7 @@ object AdMonetizationManager {
 
                         val waitingAct = pendingDirectRewardShowActivity?.get()
                         val waitingCb = pendingRewardCallback
-                        if (waitingAct != null && !waitingAct.isFinishing && !waitingAct.isDestroyed && waitingCb != null) {
+                        if (waitingAct != null && !waitingAct.isFinishing && !waitingAct.isDestroyed && waitingCb != null && !isShowingFullscreenAd) {
                             pendingDirectRewardShowActivity = null
                             scope.launch {
                                 showDirectUnityRewarded(waitingAct, placementId, waitingCb)
@@ -959,15 +1266,30 @@ object AdMonetizationManager {
                             network = "Unity Ads",
                             message = "${error.name}: $message"
                         )
-                        pendingDirectRewardShowActivity = null
-                        pendingRewardCallback?.invoke(false, "বিজ্ঞাপন লোড হয়নি (${error.name})")
-                        pendingRewardCallback = null
+                        val waitingAct = pendingDirectRewardShowActivity?.get()
+                        val waitingCb = pendingRewardCallback
+                        if (waitingAct != null && !waitingAct.isFinishing && !waitingAct.isDestroyed && waitingCb != null &&
+                            startIoInitialized && startIoRewardedReady && startIoRewarded != null
+                        ) {
+                            pendingDirectRewardShowActivity = null
+                            pendingRewardCallback = null
+                            showStartIoRewarded(waitingAct, waitingCb)
+                        } else {
+                            pendingDirectRewardShowActivity = null
+                            pendingRewardCallback?.invoke(false, "বিজ্ঞাপন লোড হয়নি (${error.name})")
+                            pendingRewardCallback = null
+                        }
+                        scheduleRetry(context.applicationContext, AdFormatType.REWARDED) {
+                            preloadRewarded(context.applicationContext, cleanId, latestConfig.rewardedEnabled)
+                        }
                     }
                 })
             }.onFailure { err ->
                 isLoadingRewarded = false
                 loadedDirectRewardedId = ""
                 pendingDirectRewardShowActivity = null
+                pendingRewardCallback?.invoke(false, err.message ?: "Unity Rewarded load error")
+                pendingRewardCallback = null
                 appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.REWARDED, "Unity Ads", err.message ?: "Unity Rewarded load error")
             }
             return
@@ -991,6 +1313,7 @@ object AdMonetizationManager {
                 override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
                     isLoadingRewarded = false
                     loadedRewardedUnitId = cleanId
+                    resetRetryState(AdFormatType.REWARDED)
                     updateFormatMetric(AdFormatType.REWARDED) {
                         it.copy(
                             requestStatus = "Completed",
@@ -1006,23 +1329,26 @@ object AdMonetizationManager {
                     isLoadingRewarded = false
                     rewardedAd = null
                     handleAdLoadFailure(AdFormatType.REWARDED, error)
+                    scheduleRetry(context.applicationContext, AdFormatType.REWARDED) {
+                        preloadRewarded(context.applicationContext, cleanId, latestConfig.rewardedEnabled)
+                    }
                 }
 
                 override fun onAdDisplayed(adInfo: LevelPlayAdInfo) {
-                    updateFormatMetric(AdFormatType.REWARDED) {
-                        it.copy(displayedCount = it.displayedCount + 1)
-                    }
-                    appendLog(AdDebugEventCode.AD_DISPLAYED, AdFormatType.REWARDED, adInfo.adNetwork, "Rewarded displayed")
+                    trackFormatDisplayed(AdFormatType.REWARDED, adInfo.adNetwork)
                 }
 
                 override fun onAdDisplayFailed(error: LevelPlayAdError, adInfo: LevelPlayAdInfo) {
+                    isShowingFullscreenAd = false
                     rewardedAd = null
                     pendingRewardCallback?.invoke(false, error.errorMessage)
                     pendingRewardCallback = null
                     appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.REWARDED, adInfo.adNetwork, error.errorMessage)
                 }
 
-                override fun onAdClicked(adInfo: LevelPlayAdInfo) = Unit
+                override fun onAdClicked(adInfo: LevelPlayAdInfo) {
+                    trackFormatClicked(AdFormatType.REWARDED, adInfo.adNetwork)
+                }
 
                 override fun onAdRewarded(reward: LevelPlayReward, adInfo: LevelPlayAdInfo) {
                     pendingRewardCallback?.invoke(true, "${reward.amount} ${reward.name}".trim())
@@ -1031,10 +1357,12 @@ object AdMonetizationManager {
                 }
 
                 override fun onAdClosed(adInfo: LevelPlayAdInfo) {
+                    isShowingFullscreenAd = false
                     rewardedAd = null
+                    pendingRewardCallback?.invoke(false, "ভিডিও সম্পূর্ণ দেখা হয়নি")
                     pendingRewardCallback = null
                     appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.REWARDED, adInfo.adNetwork, "Rewarded closed")
-                    preloadRewarded(context, cleanId, latestConfig.rewardedEnabled)
+                    preloadRewarded(context.applicationContext, cleanId, latestConfig.rewardedEnabled)
                 }
 
                 override fun onAdInfoChanged(adInfo: LevelPlayAdInfo) = Unit
@@ -1053,8 +1381,13 @@ object AdMonetizationManager {
         placementId: String,
         onResult: (Boolean, String) -> Unit
     ) {
+        if (isShowingFullscreenAd) {
+            onResult(false, "অন্য একটি বিজ্ঞাপন প্রদর্শিত হচ্ছে")
+            return
+        }
         loadedDirectRewardedId = ""
         pendingRewardCallback = onResult
+        isShowingFullscreenAd = true
         runCatching {
             UnityAds.show(activity, placementId, UnityAdsShowOptions(), object : IUnityAdsShowListener {
                 override fun onUnityAdsShowFailure(
@@ -1062,6 +1395,7 @@ object AdMonetizationManager {
                     error: UnityAds.UnityAdsShowError,
                     message: String
                 ) {
+                    isShowingFullscreenAd = false
                     updateFormatMetric(AdFormatType.REWARDED) {
                         it.copy(failedCount = it.failedCount + 1, lastError = "${error.name}: $message")
                     }
@@ -1075,12 +1409,15 @@ object AdMonetizationManager {
                     trackFormatDisplayed(AdFormatType.REWARDED, "Unity Ads")
                 }
 
-                override fun onUnityAdsShowClick(placementId: String) = Unit
+                override fun onUnityAdsShowClick(placementId: String) {
+                    trackFormatClicked(AdFormatType.REWARDED, "Unity Ads")
+                }
 
                 override fun onUnityAdsShowComplete(
                     placementId: String,
                     state: UnityAds.UnityAdsShowCompletionState
                 ) {
+                    isShowingFullscreenAd = false
                     val completed = state == UnityAds.UnityAdsShowCompletionState.COMPLETED
                     appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.REWARDED, "Unity Ads", "Unity Rewarded ${state.name}")
                     pendingRewardCallback?.invoke(
@@ -1092,8 +1429,63 @@ object AdMonetizationManager {
                 }
             })
         }.onFailure { err ->
+            isShowingFullscreenAd = false
             pendingRewardCallback = null
             onResult(false, err.message ?: "Failed to show Unity Rewarded ad")
+        }
+    }
+
+    private fun showStartIoRewarded(
+        activity: Activity,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        val ad = startIoRewarded ?: run {
+            onResult(false, "Start.io Rewarded unavailable")
+            return
+        }
+        if (isShowingFullscreenAd) {
+            onResult(false, "অন্য একটি বিজ্ঞাপন প্রদর্শিত হচ্ছে")
+            return
+        }
+        startIoRewardedReady = false
+        isShowingFullscreenAd = true
+        var rewardEarned = false
+        ad.setVideoListener(object : VideoListener {
+            override fun onVideoCompleted() {
+                rewardEarned = true
+            }
+        })
+        val shown = runCatching {
+            ad.showAd(object : AdDisplayListener {
+                override fun adHidden(adObj: Ad) {
+                    isShowingFullscreenAd = false
+                    if (rewardEarned) {
+                        onResult(true, "Start.io Rewarded Video সম্পন্ন ✓")
+                    } else {
+                        onResult(false, "ভিডিও সম্পূর্ণ দেখা হয়নি")
+                    }
+                    preloadStartIoRewarded(activity.applicationContext)
+                }
+
+                override fun adDisplayed(adObj: Ad) {
+                    trackFormatDisplayed(AdFormatType.REWARDED, "Start.io")
+                }
+
+                override fun adClicked(adObj: Ad) {
+                    trackFormatClicked(AdFormatType.REWARDED, "Start.io")
+                }
+
+                override fun adNotDisplayed(adObj: Ad) {
+                    isShowingFullscreenAd = false
+                    onResult(false, "Start.io Rewarded দেখানো যায়নি")
+                    preloadStartIoRewarded(activity.applicationContext)
+                }
+            })
+        }.getOrDefault(false)
+        if (!shown) {
+            isShowingFullscreenAd = false
+            onResult(false, "Start.io Rewarded লোড হচ্ছে — কিছুক্ষণ পরে চেষ্টা করুন")
+            preloadStartIoRewarded(activity.applicationContext)
         }
     }
 
@@ -1111,8 +1503,12 @@ object AdMonetizationManager {
             onResult(false, "Rewarded ads are currently disabled")
             return
         }
+        if (isShowingFullscreenAd) {
+            onResult(false, "অন্য একটি বিজ্ঞাপন চলছে — অনুগ্রহ করে অপেক্ষা করুন")
+            return
+        }
         val cleanId = cfg.resolvedRewardedUnitId()
-        if (cleanId.isEmpty()) {
+        if (cleanId.isEmpty() && !(startIoInitialized && startIoRewardedReady)) {
             markInvalidPlacement(AdFormatType.REWARDED, "Rewarded Ad Unit ID missing")
             onResult(false, "Rewarded Ad Unit ID missing")
             return
@@ -1122,9 +1518,12 @@ object AdMonetizationManager {
             return
         }
 
-        if (cfg.usesDirectUnityAds()) {
+        if (usesDirectUnityAds(cfg)) {
             if (sdkInitialized && loadedDirectRewardedId == cleanId) {
                 showDirectUnityRewarded(activity, cleanId, onResult)
+            } else if (startIoInitialized && startIoRewardedReady && startIoRewarded != null) {
+                showStartIoRewarded(activity, onResult)
+                if (cleanId.isNotEmpty()) preloadRewarded(activity, cleanId, true)
             } else {
                 pendingRewardCallback = onResult
                 pendingDirectRewardShowActivity = WeakReference(activity)
@@ -1136,10 +1535,15 @@ object AdMonetizationManager {
         val ad = rewardedAd
         if (sdkInitialized && ad != null && loadedRewardedUnitId == cleanId && ad.isAdReady()) {
             pendingRewardCallback = onResult
+            isShowingFullscreenAd = true
             runCatching { ad.showAd(activity, placementName) }.onFailure { err ->
+                isShowingFullscreenAd = false
                 pendingRewardCallback = null
                 onResult(false, err.message ?: "Failed to show rewarded ad")
             }
+        } else if (startIoInitialized && startIoRewardedReady && startIoRewarded != null) {
+            showStartIoRewarded(activity, onResult)
+            if (cleanId.isNotEmpty()) preloadRewarded(activity, cleanId, true)
         } else {
             preloadRewarded(activity, cleanId, true)
             onResult(false, "Rewarded video loading — please try again shortly")
@@ -1158,10 +1562,8 @@ object AdMonetizationManager {
             appendLog(AdDebugEventCode.NETWORK_UNAVAILABLE, AdFormatType.APP_OPEN, message = "Offline: skipped app open preload")
             return
         }
-        if (!sdkInitialized) {
-            initialize(context, latestConfig) {
-                preloadAppOpen(context, cleanId, enabled)
-            }
+        if (!sdkInitialized || usesDirectUnityAds()) {
+            // LevelPlay App Open uses LevelPlayInterstitialAd; skip initialization loop if using Direct Unity mode
             return
         }
         if ((appOpenAd?.isAdReady() == true && loadedAppOpenUnitId == cleanId) || isLoadingAppOpen) return
@@ -1182,6 +1584,7 @@ object AdMonetizationManager {
                 override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
                     isLoadingAppOpen = false
                     loadedAppOpenUnitId = cleanId
+                    resetRetryState(AdFormatType.APP_OPEN)
                     updateFormatMetric(AdFormatType.APP_OPEN) {
                         it.copy(
                             requestStatus = "Completed",
@@ -1197,26 +1600,30 @@ object AdMonetizationManager {
                     isLoadingAppOpen = false
                     appOpenAd = null
                     handleAdLoadFailure(AdFormatType.APP_OPEN, error)
+                    scheduleRetry(context.applicationContext, AdFormatType.APP_OPEN) {
+                        preloadAppOpen(context.applicationContext, cleanId, latestConfig.appOpenEnabled)
+                    }
                 }
 
                 override fun onAdDisplayed(adInfo: LevelPlayAdInfo) {
-                    updateFormatMetric(AdFormatType.APP_OPEN) {
-                        it.copy(displayedCount = it.displayedCount + 1)
-                    }
-                    appendLog(AdDebugEventCode.AD_DISPLAYED, AdFormatType.APP_OPEN, adInfo.adNetwork, "App Open displayed")
+                    trackFormatDisplayed(AdFormatType.APP_OPEN, adInfo.adNetwork)
                 }
 
                 override fun onAdDisplayFailed(error: LevelPlayAdError, adInfo: LevelPlayAdInfo) {
+                    isShowingFullscreenAd = false
                     appOpenAd = null
                     appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.APP_OPEN, adInfo.adNetwork, error.errorMessage)
                 }
 
-                override fun onAdClicked(adInfo: LevelPlayAdInfo) = Unit
+                override fun onAdClicked(adInfo: LevelPlayAdInfo) {
+                    trackFormatClicked(AdFormatType.APP_OPEN, adInfo.adNetwork)
+                }
 
                 override fun onAdClosed(adInfo: LevelPlayAdInfo) {
+                    isShowingFullscreenAd = false
                     appOpenAd = null
                     appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.APP_OPEN, adInfo.adNetwork, "App Open closed")
-                    preloadAppOpen(context, cleanId, latestConfig.appOpenEnabled)
+                    preloadAppOpen(context.applicationContext, cleanId, latestConfig.appOpenEnabled)
                 }
 
                 override fun onAdInfoChanged(adInfo: LevelPlayAdInfo) = Unit
@@ -1234,7 +1641,7 @@ object AdMonetizationManager {
         val cfg = latestConfig
         if (activity == null || activity.isFinishing || activity.isDestroyed) return
         if (isTestEnvironment() || !cfg.adsEnabled || !cfg.androidAdsEnabled || !cfg.appOpenEnabled) return
-        if (isAdBlockedRoute(currentRoute)) return
+        if (isAdBlockedRoute(currentRoute) || isShowingFullscreenAd) return
         val cleanId = cfg.resolvedAppOpenUnitId()
         if (cleanId.isEmpty()) return
 
@@ -1244,7 +1651,10 @@ object AdMonetizationManager {
         val ad = appOpenAd
         if (sdkInitialized && ad != null && loadedAppOpenUnitId == cleanId && ad.isAdReady()) {
             lastAppOpenShownAt = now
-            runCatching { ad.showAd(activity, "app_open") }
+            isShowingFullscreenAd = true
+            runCatching { ad.showAd(activity, "app_open") }.onFailure {
+                isShowingFullscreenAd = false
+            }
         } else {
             preloadAppOpen(activity, cleanId, true)
         }
@@ -1262,6 +1672,7 @@ object AdMonetizationManager {
     }
 
     fun trackFormatLoaded(format: AdFormatType, network: String = "LevelPlay") {
+        resetRetryState(format)
         updateFormatMetric(format) {
             it.copy(
                 requestStatus = "Completed",
@@ -1278,6 +1689,13 @@ object AdMonetizationManager {
             it.copy(displayedCount = it.displayedCount + 1)
         }
         appendLog(AdDebugEventCode.AD_DISPLAYED, format, network, "${format.labelEn} displayed ($network)")
+    }
+
+    fun trackFormatClicked(format: AdFormatType, network: String = "LevelPlay") {
+        updateFormatMetric(format) {
+            it.copy(clickedCount = it.clickedCount + 1)
+        }
+        appendLog(AdDebugEventCode.AD_CLICKED, format, network, "${format.labelEn} clicked ($network)")
     }
 
     fun trackFormatFailed(format: AdFormatType, errorCode: Int, errorMessage: String) {
@@ -1330,11 +1748,11 @@ object AdMonetizationManager {
         )
     }
 
-    fun isSdkReady(): Boolean = sdkInitialized
+    fun isSdkReady(): Boolean = sdkInitialized || startIoInitialized
 
     fun canRequestSdkAd(context: Context, config: AdConfig, unitOrPlacementId: String, format: AdFormatType): Boolean {
         if (!config.adsEnabled || !config.androidAdsEnabled) return false
-        if (!config.usesDirectUnityAds() && config.mediationAppKey.trim().isEmpty()) {
+        if (!usesDirectUnityAds(config) && resolveMediationAppKey(config).isEmpty()) {
             appendLog(AdDebugEventCode.INVALID_APP_KEY, format, message = "Unity Game ID or Mediation App Key is missing")
             return false
         }
@@ -1354,12 +1772,18 @@ object AdMonetizationManager {
     }
 
     fun resetForTest() {
+        cancelAllRetryJobs()
         latestConfig = AdConfig()
         initializedAppKey = ""
         initializedUnityGameId = ""
+        initializedStartIoAppId = ""
         isDirectUnityMode = false
         sdkInitialized = false
         sdkInitializing = false
+        startIoInitialized = false
+        startIoInitializing = false
+        isShowingFullscreenAd = false
+        currentRoute = "splash"
         interstitialAd = null
         loadedInterstitialUnitId = ""
         loadedDirectInterstitialId = ""
@@ -1375,7 +1799,52 @@ object AdMonetizationManager {
         loadedAppOpenUnitId = ""
         isLoadingAppOpen = false
         lastAppOpenShownAt = 0L
+        startIoInterstitial = null
+        startIoInterstitialReady = false
+        isLoadingStartIoInterstitial = false
+        startIoRewarded = null
+        startIoRewardedReady = false
+        isLoadingStartIoRewarded = false
         _telemetry.value = AdRuntimeTelemetry()
+    }
+
+    internal fun nextRetryDelayMs(attemptIndex: Int): Long? {
+        if (attemptIndex < 0 || attemptIndex >= MAX_RETRY_ATTEMPTS) return null
+        return RETRY_DELAYS_MS[attemptIndex]
+    }
+
+    private fun scheduleRetry(context: Context, format: AdFormatType, block: () -> Unit) {
+        if (isTestEnvironment()) return
+        if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
+        if (!NetworkMonitor.isCurrentlyOnline(context)) return
+        val attempt = retryAttempts[format] ?: 0
+        val delayMs = nextRetryDelayMs(attempt) ?: return
+        if (retryJobs[format]?.isActive == true) return
+        retryAttempts[format] = attempt + 1
+        updateFormatMetric(format) { it.copy(retryCount = it.retryCount + 1) }
+        appendLog(
+            code = AdDebugEventCode.AD_RETRY_SCHEDULED,
+            format = format,
+            message = "Scheduling retry ${attempt + 1}/$MAX_RETRY_ATTEMPTS in ${delayMs / 1000}s"
+        )
+        retryJobs[format] = scope.launch {
+            delay(delayMs)
+            retryJobs.remove(format)
+            if (NetworkMonitor.isCurrentlyOnline(context) && latestConfig.adsEnabled && latestConfig.androidAdsEnabled) {
+                block()
+            }
+        }
+    }
+
+    private fun resetRetryState(format: AdFormatType) {
+        retryAttempts[format] = 0
+        retryJobs.remove(format)?.cancel()
+    }
+
+    private fun cancelAllRetryJobs() {
+        retryAttempts.clear()
+        retryJobs.values.forEach { it.cancel() }
+        retryJobs.clear()
     }
 
     private fun handleAdLoadFailure(format: AdFormatType, error: LevelPlayAdError) {
@@ -1406,12 +1875,15 @@ object AdMonetizationManager {
             updatedFormats[AdFormatType.APP_OPEN] = (updatedFormats[AdFormatType.APP_OPEN] ?: AdFormatTelemetry(AdFormatType.APP_OPEN))
                 .copy(enabled = config.appOpenEnabled, unitOrPlacementId = config.resolvedAppOpenUnitId())
 
-            val directMode = config.usesDirectUnityAds()
+            val directMode = usesDirectUnityAds(config)
+            val resolvedAppKey = resolveMediationAppKey(config)
             state.copy(
                 mediationPlatform = if (directMode) "Unity Ads 4.16.6 (Direct)" else "Unity LevelPlay 9.2.0",
-                activeAppKeyMasked = if (directMode) "Game ID: ${config.unityGameId.trim()}" else maskKey(config.mediationAppKey.trim()),
+                activeAppKeyMasked = if (directMode) "Game ID: ${config.unityGameId.trim()}" else maskKey(resolvedAppKey),
                 testModeEnabled = config.adTestMode,
-                adapterStatuses = defaultAdapterStatuses(config, sdkInitialized),
+                consentGranted = config.consentGranted,
+                startIoReady = startIoInitialized,
+                adapterStatuses = defaultAdapterStatuses(config, sdkInitialized, startIoInitialized),
                 formatMetrics = updatedFormats
             )
         }

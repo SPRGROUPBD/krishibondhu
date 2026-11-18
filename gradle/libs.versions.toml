@@ -38,6 +38,8 @@ levelplayPangleAdapter = "5.2.0"
 levelplayInMobiAdapter = "5.12.0"
 levelplayVungleAdapter = "5.12.0"
 levelplayFyberAdapter = "5.3.0"
+levelplayChartboostAdapter = "5.12.0"
+startIoSdk = "5.4.0"
 cameraCamera2 = "1.5.0"
 cameraLifecycle = "1.5.0"
 cameraView = "1.5.0"
@@ -101,6 +103,8 @@ levelplay-pangle-adapter = { group = "com.unity3d.ads-mediation", name = "pangle
 levelplay-inmobi-adapter = { group = "com.unity3d.ads-mediation", name = "inmobi-adapter", version.ref = "levelplayInMobiAdapter" }
 levelplay-vungle-adapter = { group = "com.unity3d.ads-mediation", name = "vungle-adapter", version.ref = "levelplayVungleAdapter" }
 levelplay-fyber-adapter = { group = "com.unity3d.ads-mediation", name = "fyber-adapter", version.ref = "levelplayFyberAdapter" }
+levelplay-chartboost-adapter = { group = "com.unity3d.ads-mediation", name = "chartboost-adapter", version.ref = "levelplayChartboostAdapter" }
+startio-sdk = { group = "com.startapp", name = "inapp-sdk", version.ref = "startIoSdk" }
 androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraCamera2" }
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraLifecycle" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraView" }

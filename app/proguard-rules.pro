@@ -32,7 +32,7 @@
 -dontwarn com.unity3d.mediation.**
 -dontwarn com.ironsource.**
 
-# Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff Vungle, DT Exchange
+# Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff Vungle, DT Exchange, Chartboost, Start.io
 -keep class com.unity3d.ads.** { *; }
 -keep class com.applovin.** { *; }
 -keep class com.facebook.ads.** { *; }
@@ -41,6 +41,10 @@
 -keep class com.inmobi.** { *; }
 -keep class com.vungle.ads.** { *; }
 -keep class com.fyber.inneractive.sdk.** { *; }
+-keep class com.chartboost.** { *; }
+-dontwarn com.chartboost.**
+-keep class com.startapp.** { *; }
+-dontwarn com.startapp.**
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }

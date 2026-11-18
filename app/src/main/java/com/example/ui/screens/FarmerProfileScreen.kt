@@ -4,7 +4,7 @@ import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -24,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
+import com.example.ui.components.AdBannerSection
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.ProductCard
 import com.example.ui.theme.DarkGreen
@@ -215,14 +216,34 @@ fun FarmerProfileScreen(
                         subtitle = "কৃষক নতুন ফসল যুক্ত করলে এখানে দেখা যাবে।"
                     )
                 }
+                item {
+                    AdBannerSection(
+                        adConfig = uiState.adConfig,
+                        placementTag = "farmer_profile"
+                    )
+                }
             } else {
-                items(farmerProducts, key = { it.id }) { prod ->
-                    ProductCard(
-                        product = prod,
-                        categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
-                        language = uiState.language,
-                        onClick = { onProductClick(prod.id) },
-                        onQuickAddToCart = { onQuickAddToCart(prod.id) }
+                itemsIndexed(farmerProducts, key = { _, prod -> prod.id }) { idx, prod ->
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ProductCard(
+                            product = prod,
+                            categoryEmoji = categoryEmojiMap[prod.categoryId] ?: "🌾",
+                            language = uiState.language,
+                            onClick = { onProductClick(prod.id) },
+                            onQuickAddToCart = { onQuickAddToCart(prod.id) }
+                        )
+                        if ((idx + 1) % 3 == 0 && idx < farmerProducts.lastIndex && idx < 9) {
+                            AdBannerSection(
+                                adConfig = uiState.adConfig,
+                                placementTag = "farmer_profile_row_${idx + 1}"
+                            )
+                        }
+                    }
+                }
+                item {
+                    AdBannerSection(
+                        adConfig = uiState.adConfig,
+                        placementTag = "farmer_profile"
                     )
                 }
             }

@@ -130,6 +130,8 @@ dependencies {
   implementation(libs.levelplay.inmobi.adapter)
   implementation(libs.levelplay.vungle.adapter)
   implementation(libs.levelplay.fyber.adapter)
+  implementation(libs.levelplay.chartboost.adapter)
+  implementation(libs.startio.sdk)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
