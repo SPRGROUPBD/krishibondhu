@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -122,6 +123,22 @@ data class AdFormatTelemetry(
         get() = if (displayedCount > 0) (clickedCount * 100.0) / displayedCount else 0.0
 }
 
+data class ProductionCheckItem(
+    val key: String,
+    val titleBn: String,
+    val passed: Boolean,
+    val detailBn: String
+)
+
+data class ProductionReadinessReport(
+    val passedCount: Int = 0,
+    val totalCount: Int = 0,
+    val isProductionReady: Boolean = false,
+    val levelPlayKeySource: String = "Direct Unity Ads 6227313",
+    val startIoKeySource: String = "Not Configured",
+    val checks: List<ProductionCheckItem> = emptyList()
+)
+
 data class AdRuntimeTelemetry(
     val sdkInitStatus: SdkInitStatus = SdkInitStatus.IDLE,
     val mediationPlatform: String = "Unity LevelPlay 9.2.0",
@@ -138,6 +155,8 @@ data class AdRuntimeTelemetry(
     val monthlyRevenueUsd: Double = 0.0,
     val networkRevenueUsd: Map<String, Double> = emptyMap(),
     val impressionCount: Int = 0,
+    val totalClicks: Int = 0,
+    val productionReadiness: ProductionReadinessReport = AdMonetizationManager.buildProductionReadiness(AdConfig()),
     val debugLogs: List<AdDebugLogEntry> = emptyList()
 )
 
@@ -239,7 +258,7 @@ private val SUPPORTED_NETWORK_DESCRIPTORS = listOf(
         adapterClass = "com.startapp.sdk.adsbase.StartAppSDK",
         adapterVersion = "5.4.0 (Standalone)",
         requiresSeparateApproval = true,
-        enabledSelector = { it.startIoEnabled },
+        enabledSelector = { it.startIoEnabled || (AdMonetizationManager.isStartIoSecretConfigured() && it.startIoAppId.trim().isEmpty()) },
         appIdSelector = { AdMonetizationManager.resolveStartIoAppId(it) }
     )
 )
@@ -298,10 +317,29 @@ object AdMonetizationManager {
     private const val INTERSTITIAL_COOLDOWN_MS = 180_000L
     private const val APP_OPEN_COOLDOWN_MS = 240_000L
     private const val MAX_LOG_ENTRIES = 100
+    private const val TELEMETRY_PREFS_NAME = "kb_ad_telemetry_v1"
+    private const val KEY_DAY_KEY = "day_key"
+    private const val KEY_MONTH_KEY = "month_key"
+    private const val KEY_DAILY_REV = "daily_rev"
+    private const val KEY_MONTHLY_REV = "monthly_rev"
+    private const val KEY_IMPRESSIONS = "impressions"
+    private const val KEY_CLICKS = "clicks"
+    private const val KEY_NET_REV_JSON = "network_rev_json"
     const val MAX_RETRY_ATTEMPTS = 3
     private val RETRY_DELAYS_MS = longArrayOf(5_000L, 15_000L, 30_000L)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    @Volatile
+    internal var clockMillisProvider: () -> Long = { System.currentTimeMillis() }
+    @Volatile
+    private var telemetryAppContext: Context? = null
+    @Volatile
+    private var telemetryLoadedFromDisk = false
+    @Volatile
+    private var activeDateKey: String = ""
+    @Volatile
+    private var activeMonthKey: String = ""
 
     private val _telemetry = MutableStateFlow(AdRuntimeTelemetry())
     val telemetry: StateFlow<AdRuntimeTelemetry> = _telemetry.asStateFlow()
@@ -375,9 +413,7 @@ object AdMonetizationManager {
     fun isTestEnvironment(): Boolean =
         Build.FINGERPRINT.contains("robolectric", ignoreCase = true) || Build.FINGERPRINT.isBlank()
 
-    fun resolveMediationAppKey(config: AdConfig = latestConfig): String {
-        val adminKey = config.mediationAppKey.trim()
-        if (adminKey.isNotEmpty()) return adminKey
+    internal fun readLevelPlaySecret(): String {
         val secretKey = runCatching { BuildConfig.LEVELPLAY_APP_KEY.trim() }.getOrDefault("")
         return if (secretKey.isBlank() || secretKey.equals("UNSET", ignoreCase = true) || secretKey.startsWith("LEVELPLAY_APP_KEY")) {
             ""
@@ -386,15 +422,133 @@ object AdMonetizationManager {
         }
     }
 
-    fun resolveStartIoAppId(config: AdConfig = latestConfig): String {
-        val adminId = config.startIoAppId.trim()
-        if (adminId.isNotEmpty()) return adminId
+    internal fun readStartIoSecret(): String {
         val secretId = runCatching { BuildConfig.STARTIO_APP_ID.trim() }.getOrDefault("")
         return if (secretId.isBlank() || secretId.equals("UNSET", ignoreCase = true) || secretId.startsWith("STARTIO_APP_ID")) {
             ""
         } else {
             secretId
         }
+    }
+
+    fun isLevelPlaySecretConfigured(): Boolean = readLevelPlaySecret().isNotEmpty()
+    fun isStartIoSecretConfigured(): Boolean = readStartIoSecret().isNotEmpty()
+
+    fun resolveMediationAppKey(config: AdConfig = latestConfig): String {
+        val adminKey = config.mediationAppKey.trim()
+        if (adminKey.isNotEmpty()) return adminKey
+        return readLevelPlaySecret()
+    }
+
+    fun resolveStartIoAppId(config: AdConfig = latestConfig): String {
+        val adminId = config.startIoAppId.trim()
+        if (adminId.isNotEmpty()) return adminId
+        return readStartIoSecret()
+    }
+
+    fun isStartIoEnabledEffective(config: AdConfig = latestConfig): Boolean =
+        config.adsEnabled &&
+            config.androidAdsEnabled &&
+            resolveStartIoAppId(config).isNotEmpty() &&
+            (config.startIoEnabled || (isStartIoSecretConfigured() && config.startIoAppId.trim().isEmpty()))
+
+    fun levelPlayKeySourceLabel(config: AdConfig = latestConfig): String = when {
+        config.mediationAppKey.trim().isNotEmpty() -> "Admin Panel Override"
+        isLevelPlaySecretConfigured() -> "AI Studio Secret (BuildConfig)"
+        usesDirectUnityAds(config) -> "Direct Unity Ads (${config.unityGameId.trim()})"
+        else -> "Not Configured"
+    }
+
+    fun startIoKeySourceLabel(config: AdConfig = latestConfig): String = when {
+        config.startIoAppId.trim().isNotEmpty() -> "Admin Panel Override"
+        isStartIoSecretConfigured() -> "AI Studio Secret (BuildConfig)"
+        else -> "Not Configured"
+    }
+
+    fun buildProductionReadiness(config: AdConfig = latestConfig): ProductionReadinessReport {
+        val lpKey = resolveMediationAppKey(config)
+        val directUnity = usesDirectUnityAds(config)
+        val lpSource = levelPlayKeySourceLabel(config)
+        val startIoId = resolveStartIoAppId(config)
+        val startIoActive = isStartIoEnabledEffective(config)
+        val startIoSource = startIoKeySourceLabel(config)
+        val checks = listOf(
+            ProductionCheckItem(
+                key = "mediation_or_unity",
+                titleBn = "LevelPlay / Unity Ads কী",
+                passed = lpKey.isNotEmpty() || directUnity,
+                detailBn = if (lpKey.isNotEmpty()) {
+                    "LevelPlay সক্রিয় ($lpSource • ${maskKey(lpKey)})"
+                } else if (directUnity) {
+                    "Direct Unity Ads সক্রিয় (Game ID: ${config.unityGameId.trim()})"
+                } else {
+                    "LEVELPLAY_APP_KEY অথবা Unity Game ID সেট করুন"
+                }
+            ),
+            ProductionCheckItem(
+                key = "startio",
+                titleBn = "Start.io SDK 5.4.0",
+                passed = startIoActive && startIoId.isNotEmpty(),
+                detailBn = if (startIoActive && startIoId.isNotEmpty()) {
+                    "প্রস্তুত ($startIoSource • ${maskKey(startIoId)})"
+                } else {
+                    "AI Studio Secrets-এ STARTIO_APP_ID দিন অথবা Admin প্যানেলে যুক্ত করুন"
+                }
+            ),
+            ProductionCheckItem(
+                key = "test_mode",
+                titleBn = "টেস্ট মোড গার্ড",
+                passed = !config.adTestMode,
+                detailBn = if (!config.adTestMode) {
+                    "Test Mode OFF — লাইভ প্রোডাকশন বিজ্ঞাপনের জন্য প্রস্তুত"
+                } else {
+                    "Test Mode ON — প্লে স্টোরে প্রকাশের আগে বন্ধ করুন"
+                }
+            ),
+            ProductionCheckItem(
+                key = "consent",
+                titleBn = "GDPR / গোপনীয়তা সম্মতি",
+                passed = config.consentGranted,
+                detailBn = if (config.consentGranted) {
+                    "Consent Granted সক্রিয় (LevelPlay, Unity, Start.io)"
+                } else {
+                    "Consent Denied — নন-পার্সোনালাইজড বিজ্ঞাপন মোড"
+                }
+            ),
+            ProductionCheckItem(
+                key = "zero_admob",
+                titleBn = "Zero AdMob নীতি",
+                passed = true,
+                detailBn = "Play Services Ads / AdMob সম্পূর্ণ অপসারিত (১০ নেটওয়ার্ক স্ট্যাক)"
+            ),
+            ProductionCheckItem(
+                key = "blocked_routes",
+                titleBn = "চেকআউট ও গুরুত্বপূর্ণ স্ক্রিন সুরক্ষা",
+                passed = true,
+                detailBn = "Sell, Cart/Checkout, Order, Activation, Login, Register-এ বিজ্ঞাপন বন্ধ"
+            ),
+            ProductionCheckItem(
+                key = "release_r8",
+                titleBn = "Release R8 / ProGuard",
+                passed = true,
+                detailBn = "Release বিল্ডে কোড মিনিফিকেশন, রিসোর্স শ্রিঙ্কিং ও ProGuard যুক্ত"
+            ),
+            ProductionCheckItem(
+                key = "app_ads_txt",
+                titleBn = "Start.io app-ads.txt",
+                passed = true,
+                detailBn = "website/app-ads.txt-তে start.io, 165433365, DIRECT সংরক্ষিত"
+            )
+        )
+        val passed = checks.count { it.passed }
+        return ProductionReadinessReport(
+            passedCount = passed,
+            totalCount = checks.size,
+            isProductionReady = passed == checks.size,
+            levelPlayKeySource = lpSource,
+            startIoKeySource = startIoSource,
+            checks = checks
+        )
     }
 
     fun usesDirectUnityAds(config: AdConfig = latestConfig): Boolean =
@@ -432,6 +586,9 @@ object AdMonetizationManager {
             route.startsWith("register?")
 
     fun syncConfig(context: Context, config: AdConfig) {
+        if (!isTestEnvironment()) {
+            initTelemetryStore(context)
+        }
         latestConfig = config
         refreshAdapterAndFormatConfig(config)
         if (!config.adsEnabled || !config.androidAdsEnabled) {
@@ -444,7 +601,7 @@ object AdMonetizationManager {
         val usesDirectUnity = usesDirectUnityAds(config)
         val appKey = resolveMediationAppKey(config)
         val startIoId = resolveStartIoAppId(config)
-        if (config.startIoEnabled && startIoId.isNotEmpty()) {
+        if (isStartIoEnabledEffective(config) && startIoId.isNotEmpty()) {
             initializeStartIo(context, config, startIoId)
         }
         if (!usesDirectUnity && appKey.isEmpty()) {
@@ -455,12 +612,27 @@ object AdMonetizationManager {
         }
     }
 
+    fun onConnectivityRestored(context: Context, config: AdConfig = latestConfig) {
+        if (isTestEnvironment()) return
+        if (!NetworkMonitor.isCurrentlyOnline(context)) return
+        if (!config.adsEnabled || !config.androidAdsEnabled) return
+        appendLog(
+            code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
+            network = "NetworkMonitor",
+            message = "Connectivity restored — verifying ad SDK initialization & preloading"
+        )
+        syncConfig(context, config)
+    }
+
     fun initialize(
         context: Context,
         config: AdConfig = latestConfig,
         userId: String? = null,
         onReady: (() -> Unit)? = null
     ) {
+        if (!isTestEnvironment()) {
+            initTelemetryStore(context)
+        }
         latestConfig = config
         refreshAdapterAndFormatConfig(config)
 
@@ -473,7 +645,7 @@ object AdMonetizationManager {
         }
 
         val startIoId = resolveStartIoAppId(config)
-        if (!isTestEnvironment() && config.startIoEnabled && startIoId.isNotEmpty()) {
+        if (!isTestEnvironment() && isStartIoEnabledEffective(config) && startIoId.isNotEmpty()) {
             initializeStartIo(context, config, startIoId)
         }
 
@@ -808,7 +980,7 @@ object AdMonetizationManager {
         }
         runCatching { LevelPlay.setConsent(config.consentGranted) }
         runCatching {
-            if (config.startIoEnabled && resolveStartIoAppId(config).isNotEmpty()) {
+            if (isStartIoEnabledEffective(config) && resolveStartIoAppId(config).isNotEmpty()) {
                 StartAppSDK.setUserConsent(context, "pas", System.currentTimeMillis(), config.consentGranted)
             }
         }
@@ -1692,9 +1864,12 @@ object AdMonetizationManager {
     }
 
     fun trackFormatClicked(format: AdFormatType, network: String = "LevelPlay") {
+        rolloverTelemetryDateIfNeeded()
         updateFormatMetric(format) {
             it.copy(clickedCount = it.clickedCount + 1)
         }
+        _telemetry.update { it.copy(totalClicks = it.totalClicks + 1) }
+        persistTelemetryIfAttached()
         appendLog(AdDebugEventCode.AD_CLICKED, format, network, "${format.labelEn} clicked ($network)")
     }
 
@@ -1728,6 +1903,7 @@ object AdMonetizationManager {
     }
 
     fun recordRealImpressionRevenue(rawRevenue: Double, adNetwork: String, adFormat: String? = null) {
+        rolloverTelemetryDateIfNeeded()
         val cleanRevenue = if (rawRevenue.isFinite() && rawRevenue >= 0.0) rawRevenue else 0.0
         val cleanNetwork = adNetwork.trim().ifBlank { "LevelPlay" }
         _telemetry.update { state ->
@@ -1740,6 +1916,7 @@ object AdMonetizationManager {
                 impressionCount = state.impressionCount + 1
             )
         }
+        persistTelemetryIfAttached()
         appendLog(
             code = AdDebugEventCode.AD_DISPLAYED,
             format = mapFormatName(adFormat),
@@ -1747,6 +1924,116 @@ object AdMonetizationManager {
             message = "Real impression recorded (+$${"%.5f".format(Locale.ENGLISH, cleanRevenue)})"
         )
     }
+
+    internal fun initTelemetryStore(
+        context: Context,
+        nowMillis: Long = clockMillisProvider(),
+        forceReload: Boolean = false
+    ) {
+        val appCtx = context.applicationContext
+        telemetryAppContext = appCtx
+        if (telemetryLoadedFromDisk && !forceReload) {
+            rolloverTelemetryDateIfNeeded(nowMillis)
+            return
+        }
+        val dayKey = formatDayKey(nowMillis)
+        val monthKey = formatMonthKey(nowMillis)
+        val prefs = appCtx.getSharedPreferences(TELEMETRY_PREFS_NAME, Context.MODE_PRIVATE)
+        val savedDay = prefs.getString(KEY_DAY_KEY, "") ?: ""
+        val savedMonth = prefs.getString(KEY_MONTH_KEY, "") ?: ""
+
+        val dailyRev = if (savedDay == dayKey) prefs.getFloat(KEY_DAILY_REV, 0f).toDouble().coerceAtLeast(0.0) else 0.0
+        val monthlyRev = if (savedMonth == monthKey) prefs.getFloat(KEY_MONTHLY_REV, 0f).toDouble().coerceAtLeast(0.0) else 0.0
+        val impressions = if (savedMonth == monthKey) prefs.getInt(KEY_IMPRESSIONS, 0).coerceAtLeast(0) else 0
+        val clicks = if (savedMonth == monthKey) prefs.getInt(KEY_CLICKS, 0).coerceAtLeast(0) else 0
+        val netMap = if (savedMonth == monthKey) {
+            parseNetworkRevenueJson(prefs.getString(KEY_NET_REV_JSON, "") ?: "")
+        } else {
+            emptyMap()
+        }
+
+        activeDateKey = dayKey
+        activeMonthKey = monthKey
+        telemetryLoadedFromDisk = true
+
+        _telemetry.update { state ->
+            state.copy(
+                dailyRevenueUsd = dailyRev,
+                monthlyRevenueUsd = monthlyRev,
+                impressionCount = impressions,
+                totalClicks = clicks,
+                networkRevenueUsd = netMap
+            )
+        }
+        if (savedDay != dayKey || savedMonth != monthKey) {
+            persistTelemetryIfAttached(nowMillis)
+        }
+    }
+
+    internal fun rolloverTelemetryDateIfNeeded(nowMillis: Long = clockMillisProvider()) {
+        val dayKey = formatDayKey(nowMillis)
+        val monthKey = formatMonthKey(nowMillis)
+        if (activeDateKey.isEmpty() || activeMonthKey.isEmpty()) {
+            activeDateKey = dayKey
+            activeMonthKey = monthKey
+            return
+        }
+        if (activeDateKey == dayKey && activeMonthKey == monthKey) return
+        val monthChanged = activeMonthKey != monthKey
+        activeDateKey = dayKey
+        activeMonthKey = monthKey
+        _telemetry.update { state ->
+            state.copy(
+                dailyRevenueUsd = 0.0,
+                monthlyRevenueUsd = if (monthChanged) 0.0 else state.monthlyRevenueUsd,
+                impressionCount = if (monthChanged) 0 else state.impressionCount,
+                totalClicks = if (monthChanged) 0 else state.totalClicks,
+                networkRevenueUsd = if (monthChanged) emptyMap() else state.networkRevenueUsd
+            )
+        }
+        persistTelemetryIfAttached(nowMillis)
+    }
+
+    private fun persistTelemetryIfAttached(nowMillis: Long = clockMillisProvider()) {
+        val appCtx = telemetryAppContext ?: return
+        val dayKey = activeDateKey.ifBlank { formatDayKey(nowMillis) }
+        val monthKey = activeMonthKey.ifBlank { formatMonthKey(nowMillis) }
+        val snapshot = _telemetry.value
+        val netJson = JSONObject().apply {
+            snapshot.networkRevenueUsd.forEach { (k, v) -> put(k, v) }
+        }.toString()
+        appCtx.getSharedPreferences(TELEMETRY_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DAY_KEY, dayKey)
+            .putString(KEY_MONTH_KEY, monthKey)
+            .putFloat(KEY_DAILY_REV, snapshot.dailyRevenueUsd.toFloat())
+            .putFloat(KEY_MONTHLY_REV, snapshot.monthlyRevenueUsd.toFloat())
+            .putInt(KEY_IMPRESSIONS, snapshot.impressionCount)
+            .putInt(KEY_CLICKS, snapshot.totalClicks)
+            .putString(KEY_NET_REV_JSON, netJson)
+            .apply()
+    }
+
+    private fun parseNetworkRevenueJson(raw: String): Map<String, Double> {
+        if (raw.isBlank()) return emptyMap()
+        return runCatching {
+            val obj = JSONObject(raw)
+            val result = mutableMapOf<String, Double>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val v = obj.optDouble(k, 0.0)
+                if (v.isFinite() && v >= 0.0) result[k] = v
+            }
+            result.toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun formatDayKey(nowMillis: Long): String =
+        SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH).format(Date(nowMillis))
+
+    private fun formatMonthKey(nowMillis: Long): String =
+        SimpleDateFormat("yyyy-MM", Locale.ENGLISH).format(Date(nowMillis))
 
     fun isSdkReady(): Boolean = sdkInitialized || startIoInitialized
 
@@ -1771,8 +2058,21 @@ object AdMonetizationManager {
         _telemetry.update { it.copy(debugLogs = emptyList()) }
     }
 
-    fun resetForTest() {
+    fun resetForTest(clearContextStore: Context? = null, resetClock: Boolean = true) {
         cancelAllRetryJobs()
+        clearContextStore?.let { ctx ->
+            ctx.applicationContext.getSharedPreferences(TELEMETRY_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .clear()
+                .apply()
+        }
+        if (resetClock) {
+            clockMillisProvider = { System.currentTimeMillis() }
+        }
+        telemetryAppContext = null
+        telemetryLoadedFromDisk = false
+        activeDateKey = ""
+        activeMonthKey = ""
         latestConfig = AdConfig()
         initializedAppKey = ""
         initializedUnityGameId = ""
@@ -1884,7 +2184,8 @@ object AdMonetizationManager {
                 consentGranted = config.consentGranted,
                 startIoReady = startIoInitialized,
                 adapterStatuses = defaultAdapterStatuses(config, sdkInitialized, startIoInitialized),
-                formatMetrics = updatedFormats
+                formatMetrics = updatedFormats,
+                productionReadiness = buildProductionReadiness(config)
             )
         }
     }

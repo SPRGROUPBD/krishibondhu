@@ -44,8 +44,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            LaunchedEffect(uiState.adConfig) {
-                AdMonetizationManager.syncConfig(this@MainActivity, uiState.adConfig)
+            LaunchedEffect(uiState.adConfig, uiState.isOnline) {
+                if (uiState.isOnline && uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled && !AdMonetizationManager.isTestEnvironment()) {
+                    AdMonetizationManager.onConnectivityRestored(this@MainActivity, uiState.adConfig)
+                } else {
+                    AdMonetizationManager.syncConfig(this@MainActivity, uiState.adConfig)
+                }
             }
 
             KrishiBondhuTheme(darkTheme = uiState.darkMode) {

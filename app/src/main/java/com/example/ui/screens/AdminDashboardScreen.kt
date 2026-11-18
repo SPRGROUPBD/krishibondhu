@@ -1,6 +1,10 @@
 package com.example.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -1858,6 +1862,132 @@ private fun AdminAdMonetizationTab(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // 0. Production Readiness Checklist & Start.io app-ads.txt Management
+        item {
+            val draftConfig = buildDraftConfig()
+            val readiness = remember(draftConfig, telemetry.productionReadiness) {
+                AdMonetizationManager.buildProductionReadiness(draftConfig)
+            }
+            val readyTint = if (readiness.isProductionReady) PrimaryGreen else Color(0xFFB45309)
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, readyTint.copy(alpha = 0.55f)),
+                modifier = Modifier.testTag("admin_production_readiness_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "প্রোডাকশন রেডিনেস ও app-ads.txt ব্যবস্থাপনা",
+                            fontWeight = FontWeight.Bold,
+                            color = DarkGreen,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = readyTint.copy(alpha = 0.14f)
+                        ) {
+                            Text(
+                                text = "${readiness.passedCount}/${readiness.totalCount} প্রস্তুত",
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = readyTint
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "LevelPlay/Unity উৎস: ${readiness.levelPlayKeySource} • Start.io উৎস: ${readiness.startIoKeySource}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    readiness.checks.forEach { check ->
+                        val itemTint = if (check.passed) PrimaryGreen else Color(0xFFB45309)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Top,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (check.passed) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                                contentDescription = check.titleBn,
+                                tint = itemTint,
+                                modifier = Modifier.size(16.dp).padding(top = 2.dp)
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = check.titleBn,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (check.passed) DarkGreen else Color(0xFFB45309)
+                                )
+                                Text(
+                                    text = check.detailBn,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    if (adTestMode) {
+                        Button(
+                            onClick = {
+                                adTestMode = false
+                                onSaveAdConfig(buildDraftConfig())
+                                Toast.makeText(context, "Test Mode বন্ধ করে প্রোডাকশন মোড সেভ হয়েছে", Toast.LENGTH_SHORT).show()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = PrimaryGreen),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin_disable_test_mode_button")
+                        ) {
+                            Text("টেস্ট মোড বন্ধ করুন (Live Prod)", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                AdMonetizationManager.preloadAllFormats(context, draftConfig)
+                                Toast.makeText(context, "সব বিজ্ঞাপন ফরম্যাট প্রিলোড শুরু হয়েছে", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("admin_preload_all_ads_button")
+                        ) {
+                            Text("সব ফরম্যাট প্রিলোড", maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(
+                                    ClipData.newPlainText("Start.io app-ads.txt", "start.io, 165433365, DIRECT")
+                                )
+                                Toast.makeText(context, "Start.io app-ads.txt লাইন কপি হয়েছে", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("admin_copy_app_ads_txt_button")
+                        ) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("app-ads.txt কপি", maxLines = 1)
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Live SDK Status, Real Impression Revenue & Diagnostic Telemetry
         item {
             Card(
@@ -1929,10 +2059,18 @@ private fun AdminAdMonetizationTab(
                                 )
                             }
                         }
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = LightGreen)) {
                             Column(modifier = Modifier.padding(10.dp)) {
-                                Text("ইম্প্রেশন", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
+                                Text("ইম্প্রেশন (Real)", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
                                 Text("${telemetry.impressionCount}", fontWeight = FontWeight.Bold, color = DarkGreen)
+                            }
+                        }
+                        Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = LightGreen)) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("মোট ক্লিক (Real)", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
+                                Text("${telemetry.totalClicks}", fontWeight = FontWeight.Bold, color = DarkGreen)
                             }
                         }
                     }

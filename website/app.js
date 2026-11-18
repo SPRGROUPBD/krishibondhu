@@ -5466,12 +5466,45 @@ function renderAdminDashboardPage() {
     bodyHtml = `<div class="space-y-3">${state.complaints.length ? state.complaints.map((c) => `<div class="bg-white rounded-2xl p-4 border border-emerald-100 flex justify-between items-center text-xs"><div><strong>${escapeHtml(c.subjectBn)}</strong> (${escapeHtml(c.reporterName)})<p class="text-gray-600">${escapeHtml(c.descriptionBn)}</p></div><button onclick="window.kbApp.adminResolveComplaint('${escapeHtml(c.id)}')" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white font-bold">${c.status === "RESOLVED" ? "✓ নিষ্পত্তি" : "সমাধান করুন"}</button></div>`).join("") : `<div class="bg-white rounded-2xl p-8 text-center">কোনো অভিযোগ নেই।</div>`}</div>`;
   } else if (tab === "ads") {
     const cfg = state.adConfig || DEFAULT_AD_CONFIG;
+    const isLevelPlayActive = Boolean((cfg.mediationAppKey || "").trim());
+    const hasStartIoId = Boolean((cfg.startIoAppId || "").trim());
     bodyHtml = `
+      <div class="bg-white border border-emerald-200 rounded-3xl p-5 shadow-sm space-y-3 mb-5">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 class="text-base font-bold text-[#105B34]">🛡️ প্রোডাকশন ব্যবস্থাপনা ও app-ads.txt স্ট্যাটাস</h3>
+            <p class="text-xs text-gray-600">প্লে স্টোর ও বিজ্ঞাপন নেটওয়ার্ক ভেরিফিকেশনের জন্য রিয়েল-টাইম প্রোডাকশন অবস্থা।</p>
+          </div>
+          <div class="flex flex-wrap gap-2 text-xs font-bold">
+            <a href="./app-ads.txt" target="_blank" rel="noopener noreferrer" class="px-3 py-1.5 rounded-xl bg-[#EAF7EF] text-[#105B34] border border-emerald-200 hover:bg-emerald-100">📄 app-ads.txt দেখুন ↗</a>
+            <button type="button" onclick="navigator.clipboard?.writeText('start.io, 165433365, DIRECT'); window.kbApp && window.kbApp.showToast && window.kbApp.showToast('Start.io DIRECT লাইন কপি হয়েছে', 'success')" class="px-3 py-1.5 rounded-xl bg-amber-50 text-amber-900 border border-amber-200 hover:bg-amber-100">📋 Start.io লাইন কপি</button>
+          </div>
+        </div>
+        <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+          <div class="p-3 rounded-2xl border ${cfg.adTestMode ? "bg-red-50 border-red-200 text-red-900" : "bg-emerald-50 border-emerald-200 text-emerald-900"}">
+            <div class="font-bold">${cfg.adTestMode ? "⚠️ টেস্ট মোড চালু" : "✅ লাইভ প্রোডাকশন মোড"}</div>
+            <div class="text-[11px] opacity-80">${cfg.adTestMode ? "রিলিজের আগে টেস্ট মোড বন্ধ করুন" : "Test Mode OFF (রিলিজের জন্য প্রস্তুত)"}</div>
+          </div>
+          <div class="p-3 rounded-2xl border bg-emerald-50 border-emerald-200 text-emerald-900">
+            <div class="font-bold">🔑 ${isLevelPlayActive ? "LevelPlay Mediation" : "Direct Unity 6227313"}</div>
+            <div class="text-[11px] opacity-80">${isLevelPlayActive ? "Admin App Key সক্রিয় (অথবা Android Secret)" : "Android Secret বা Admin Key দিয়ে LevelPlay সক্রিয় হয়"}</div>
+          </div>
+          <div class="p-3 rounded-2xl border ${hasStartIoId || cfg.startIoEnabled ? "bg-emerald-50 border-emerald-200 text-emerald-900" : "bg-sky-50 border-sky-200 text-sky-900"}">
+            <div class="font-bold">🚀 Start.io (SDK 5.4.0)</div>
+            <div class="text-[11px] opacity-80">${hasStartIoId ? "Admin ID সক্রিয়" : "AI Studio Secret (STARTIO_APP_ID) সমর্থিত"}</div>
+          </div>
+          <div class="p-3 rounded-2xl border bg-emerald-50 border-emerald-200 text-emerald-900">
+            <div class="font-bold">📄 Start.io app-ads.txt</div>
+            <div class="text-[11px] opacity-80">start.io, 165433365, DIRECT হোস্টেড</div>
+          </div>
+        </div>
+      </div>
+
       <form onsubmit="window.kbApp.handleAdminSaveAdConfig(event)" class="space-y-5">
         <div class="bg-emerald-50 border border-emerald-200 rounded-3xl p-5 flex flex-wrap items-center justify-between gap-3">
           <div class="space-y-1">
-            <h3 class="text-lg font-bold text-[#105B34]">💰 Direct Unity Ads (Game ID: 6227313) + LevelPlay (৮ নেটওয়ার্ক)</h3>
-            <p class="text-xs text-gray-700">Android অ্যাপ থেকে AdMob সম্পূর্ণভাবে অপসারণ করা হয়েছে। Unity Ads Game ID <strong>6227313</strong> (Banner_Android, Interstitial_Android, Rewarded_Android) সরাসরি সক্রিয় থাকে; চাইলে LevelPlay App Key যুক্ত করে বাকি ৭টি নেটওয়ার্কও চালাতে পারবেন।</p>
+            <h3 class="text-lg font-bold text-[#105B34]">💰 Direct Unity Ads (Game ID: 6227313) + LevelPlay (১০ নেটওয়ার্ক)</h3>
+            <p class="text-xs text-gray-700">Android অ্যাপ থেকে AdMob সম্পূর্ণভাবে অপসারণ করা হয়েছে। Unity Ads Game ID <strong>6227313</strong> (Banner_Android, Interstitial_Android, Rewarded_Android) সরাসরি সক্রিয় থাকে; LevelPlay App Key ও Start.io App ID AI Studio Secrets অথবা এখান থেকে চালাতে পারবেন।</p>
           </div>
           <div class="flex flex-wrap gap-2 text-xs font-bold">
             <button type="button" onclick="window.kbApp.applyUnityDefaultPreset()" class="px-3 py-2 rounded-xl bg-[#105B34] text-white shadow hover:bg-[#168447]">⚡ Unity Ads 6227313 ডিফল্ট সেট</button>

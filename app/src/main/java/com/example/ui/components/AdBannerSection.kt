@@ -65,6 +65,9 @@ import com.unity3d.mediation.banner.LevelPlayBannerAdViewListener
 import com.unity3d.services.banners.BannerErrorInfo
 import com.unity3d.services.banners.BannerView
 import com.unity3d.services.banners.UnityBannerSize
+import kotlinx.coroutines.delay
+
+private const val MAX_BANNER_RETRY = 2
 
 private fun Context.findActivity(): Activity? =
     generateSequence(this) { (it as? ContextWrapper)?.baseContext }
@@ -94,9 +97,13 @@ fun AdBannerSection(
     val webNetworkAd = remember(adConfig, placementTag, priority) {
         buildMobileNetworkHtmlPayload(adConfig, placementTag, priority)
     }
-    val isOnline = remember(context) {
-        AdMonetizationManager.isTestEnvironment() || NetworkMonitor.isCurrentlyOnline(context)
+    val observedOnline by if (AdMonetizationManager.isTestEnvironment()) {
+        remember { mutableStateOf(true) }
+    } else {
+        remember(context) { NetworkMonitor.observeIsOnline(context) }
+            .collectAsState(initial = NetworkMonitor.isCurrentlyOnline(context))
     }
+    val isOnline = AdMonetizationManager.isTestEnvironment() || observedOnline
 
     val sdkReadyOrTest = AdMonetizationManager.isTestEnvironment() ||
         telemetry.sdkInitStatus == com.example.ads.SdkInitStatus.SUCCESS
@@ -116,7 +123,7 @@ fun AdBannerSection(
 
     val showStartIoBanner = adConfig.androidAdsEnabled &&
         adConfig.bannerEnabled &&
-        adConfig.startIoEnabled &&
+        AdMonetizationManager.isStartIoEnabledEffective(adConfig) &&
         startIoAppId.isNotBlank() &&
         allows("STARTIO") &&
         (AdMonetizationManager.isTestEnvironment() || (isOnline && telemetry.startIoReady))
@@ -315,13 +322,22 @@ fun AdBannerSection(
             DirectUnityBannerAdCard(
                 placementId = bannerUnitId,
                 placementTag = placementTag,
-                showAdsLabel = adConfig.showAdsLabel
+                showAdsLabel = adConfig.showAdsLabel,
+                isOnline = isOnline
             )
         }
 
         // 3. Unity LevelPlay Adaptive Banner (Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff, DT Exchange — Zero AdMob)
         if (showMediatedBanner) {
             var bannerFailed by remember(bannerUnitId, placementTag) { mutableStateOf(false) }
+            var retryCount by remember(bannerUnitId, placementTag) { mutableIntStateOf(0) }
+            LaunchedEffect(bannerFailed, retryCount, isOnline) {
+                if (bannerFailed && !AdMonetizationManager.isTestEnvironment() && isOnline && retryCount < MAX_BANNER_RETRY) {
+                    delay((retryCount + 1) * 15_000L)
+                    retryCount += 1
+                    bannerFailed = false
+                }
+            }
             if (!bannerFailed) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
@@ -361,9 +377,9 @@ fun AdBannerSection(
                                 }
                             }
                         } else {
-                            key(bannerUnitId, placementTag) {
+                            key(bannerUnitId, placementTag, retryCount) {
                                 var bannerViewHolder by remember { mutableStateOf<LevelPlayBannerAdView?>(null) }
-                                DisposableEffect(bannerUnitId, placementTag) {
+                                DisposableEffect(bannerUnitId, placementTag, retryCount) {
                                     onDispose {
                                         bannerViewHolder?.destroy()
                                         bannerViewHolder = null
@@ -381,6 +397,7 @@ fun AdBannerSection(
                                             setBannerListener(object : LevelPlayBannerAdViewListener {
                                                 override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
                                                     bannerFailed = false
+                                                    retryCount = 0
                                                     AdMonetizationManager.trackFormatLoaded(
                                                         AdFormatType.BANNER,
                                                         adInfo.adNetwork
@@ -441,7 +458,8 @@ fun AdBannerSection(
         if (showStartIoBanner) {
             StartIoBannerAdCard(
                 placementTag = placementTag,
-                showAdsLabel = adConfig.showAdsLabel
+                showAdsLabel = adConfig.showAdsLabel,
+                isOnline = isOnline
             )
         }
 
@@ -459,9 +477,18 @@ fun AdBannerSection(
 private fun DirectUnityBannerAdCard(
     placementId: String,
     placementTag: String,
-    showAdsLabel: Boolean
+    showAdsLabel: Boolean,
+    isOnline: Boolean
 ) {
     var bannerFailed by remember(placementId, placementTag) { mutableStateOf(false) }
+    var retryCount by remember(placementId, placementTag) { mutableIntStateOf(0) }
+    LaunchedEffect(bannerFailed, retryCount, isOnline) {
+        if (bannerFailed && !AdMonetizationManager.isTestEnvironment() && isOnline && retryCount < MAX_BANNER_RETRY) {
+            delay((retryCount + 1) * 15_000L)
+            retryCount += 1
+            bannerFailed = false
+        }
+    }
     if (bannerFailed) return
 
     Surface(
@@ -502,9 +529,9 @@ private fun DirectUnityBannerAdCard(
                     }
                 }
             } else {
-                key(placementId, placementTag) {
+                key(placementId, placementTag, retryCount) {
                     var bannerViewHolder by remember { mutableStateOf<BannerView?>(null) }
-                    DisposableEffect(placementId, placementTag) {
+                    DisposableEffect(placementId, placementTag, retryCount) {
                         onDispose {
                             runCatching { bannerViewHolder?.destroy() }
                             bannerViewHolder = null
@@ -519,6 +546,7 @@ private fun DirectUnityBannerAdCard(
                                     listener = object : BannerView.IListener {
                                         override fun onBannerLoaded(bannerAdView: BannerView?) {
                                             bannerFailed = false
+                                            retryCount = 0
                                             AdMonetizationManager.trackFormatLoaded(AdFormatType.BANNER, "Unity Ads")
                                         }
 
@@ -571,9 +599,18 @@ private fun DirectUnityBannerAdCard(
 @Composable
 private fun StartIoBannerAdCard(
     placementTag: String,
-    showAdsLabel: Boolean
+    showAdsLabel: Boolean,
+    isOnline: Boolean
 ) {
     var bannerFailed by remember(placementTag) { mutableStateOf(false) }
+    var retryCount by remember(placementTag) { mutableIntStateOf(0) }
+    LaunchedEffect(bannerFailed, retryCount, isOnline) {
+        if (bannerFailed && !AdMonetizationManager.isTestEnvironment() && isOnline && retryCount < MAX_BANNER_RETRY) {
+            delay((retryCount + 1) * 15_000L)
+            retryCount += 1
+            bannerFailed = false
+        }
+    }
     if (bannerFailed) return
 
     Surface(
@@ -614,9 +651,9 @@ private fun StartIoBannerAdCard(
                     }
                 }
             } else {
-                key(placementTag) {
+                key(placementTag, retryCount) {
                     var bannerViewHolder by remember { mutableStateOf<StartIoBanner?>(null) }
-                    DisposableEffect(placementTag) {
+                    DisposableEffect(placementTag, retryCount) {
                         onDispose {
                             runCatching { bannerViewHolder?.hideBanner() }
                             bannerViewHolder = null
@@ -629,6 +666,7 @@ private fun StartIoBannerAdCard(
                                 StartIoBanner(host, object : StartIoBannerListener {
                                     override fun onReceiveAd(banner: View?) {
                                         bannerFailed = false
+                                        retryCount = 0
                                         AdMonetizationManager.trackFormatLoaded(AdFormatType.BANNER, "Start.io")
                                     }
 
@@ -681,7 +719,7 @@ fun RewardedMarketTipCard(
     if (!adConfig.adsEnabled || !adConfig.androidAdsEnabled || !adConfig.rewardedEnabled) return
     if (AdMonetizationManager.isCurrentRouteAdBlocked()) return
     val rewardedId = adConfig.resolvedRewardedUnitId()
-    val startIoReady = adConfig.startIoEnabled && AdMonetizationManager.resolveStartIoAppId(adConfig).isNotBlank()
+    val startIoReady = AdMonetizationManager.isStartIoEnabledEffective(adConfig)
     if (rewardedId.isBlank() && !startIoReady) return
     val hasAdConfig = AdMonetizationManager.usesDirectUnityAds(adConfig) ||
         AdMonetizationManager.resolveMediationAppKey(adConfig).isNotBlank() ||

@@ -48,10 +48,12 @@ class ExampleRobolectricTest {
             prefs = UserPreferences(context),
             rtdbSync = FirebaseRealtimeSyncManager(enableRemoteSync = false)
         )
+        com.example.ads.AdMonetizationManager.resetForTest(context)
     }
 
     @After
     fun teardown() {
+        com.example.ads.AdMonetizationManager.resetForTest(context)
         db.close()
     }
 
@@ -1882,6 +1884,86 @@ class ExampleRobolectricTest {
         assertEquals(15_000L, com.example.ads.AdMonetizationManager.nextRetryDelayMs(1))
         assertEquals(30_000L, com.example.ads.AdMonetizationManager.nextRetryDelayMs(2))
         assertNull(com.example.ads.AdMonetizationManager.nextRetryDelayMs(3))
+    }
+
+    @Test
+    fun productionReadinessReportsLiveTestConsentZeroAdMobAndBlockedRoutes() {
+        val testModeConfig = com.example.data.model.AdConfig(
+            adTestMode = true,
+            consentGranted = false,
+            startIoEnabled = true,
+            startIoAppId = "startio_test_app"
+        ).hydratedWithDefaults()
+        val testReport = com.example.ads.AdMonetizationManager.buildProductionReadiness(testModeConfig)
+        assertFalse(testReport.isProductionReady)
+        assertFalse(testReport.checks.first { it.key == "test_mode" }.passed)
+        assertFalse(testReport.checks.first { it.key == "consent" }.passed)
+        assertTrue(testReport.checks.first { it.key == "zero_admob" }.passed)
+        assertTrue(testReport.checks.first { it.key == "blocked_routes" }.passed)
+        assertTrue(testReport.checks.first { it.key == "release_r8" }.passed)
+        assertTrue(testReport.checks.first { it.key == "app_ads_txt" }.passed)
+
+        val liveReadyConfig = testModeConfig.copy(adTestMode = false, consentGranted = true)
+        com.example.ads.AdMonetizationManager.syncConfig(context, liveReadyConfig)
+        val liveReport = com.example.ads.AdMonetizationManager.telemetry.value.productionReadiness
+        assertTrue(liveReport.isProductionReady)
+        assertEquals(liveReport.totalCount, liveReport.passedCount)
+        assertTrue(liveReport.checks.all { it.passed })
+        assertTrue(liveReport.startIoKeySource.contains("Admin Panel"))
+    }
+
+    @Test
+    fun persistentAdTelemetrySurvivesReloadAndRollsOverDailyAndMonthly() {
+        val day1Ms = Calendar.getInstance().apply {
+            set(2026, Calendar.NOVEMBER, 17, 10, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val day2Ms = Calendar.getInstance().apply {
+            set(2026, Calendar.NOVEMBER, 18, 10, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val nextMonthMs = Calendar.getInstance().apply {
+            set(2026, Calendar.DECEMBER, 1, 10, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+        var currentClockMs = day1Ms
+        com.example.ads.AdMonetizationManager.clockMillisProvider = { currentClockMs }
+
+        com.example.ads.AdMonetizationManager.initTelemetryStore(context, forceReload = true)
+        com.example.ads.AdMonetizationManager.recordRealImpressionRevenue(0.0125, "Unity Ads", "banner")
+        com.example.ads.AdMonetizationManager.recordRealImpressionRevenue(0.0075, "Start.io", "banner")
+        com.example.ads.AdMonetizationManager.trackFormatClicked(com.example.ads.AdFormatType.BANNER, "Unity Ads")
+
+        // Simulate fresh app process restart on same day without wiping SharedPreferences
+        com.example.ads.AdMonetizationManager.resetForTest(clearContextStore = null, resetClock = false)
+        com.example.ads.AdMonetizationManager.initTelemetryStore(context, forceReload = true)
+        val reloadedSameDay = com.example.ads.AdMonetizationManager.telemetry.value
+        assertEquals(0.02, reloadedSameDay.dailyRevenueUsd, 0.0001)
+        assertEquals(0.02, reloadedSameDay.monthlyRevenueUsd, 0.0001)
+        assertEquals(2, reloadedSameDay.impressionCount)
+        assertEquals(1, reloadedSameDay.totalClicks)
+        assertEquals(0.0125, reloadedSameDay.networkRevenueUsd["Unity Ads"] ?: 0.0, 0.0001)
+        assertEquals(0.0075, reloadedSameDay.networkRevenueUsd["Start.io"] ?: 0.0, 0.0001)
+
+        // Next day in same month -> dailyRevenueUsd resets, monthly totals stay intact
+        currentClockMs = day2Ms
+        com.example.ads.AdMonetizationManager.rolloverTelemetryDateIfNeeded()
+        val nextDaySnap = com.example.ads.AdMonetizationManager.telemetry.value
+        assertEquals(0.0, nextDaySnap.dailyRevenueUsd, 0.0001)
+        assertEquals(0.02, nextDaySnap.monthlyRevenueUsd, 0.0001)
+        assertEquals(2, nextDaySnap.impressionCount)
+        assertEquals(1, nextDaySnap.totalClicks)
+
+        // New month -> monthly totals & network revenue reset cleanly
+        currentClockMs = nextMonthMs
+        com.example.ads.AdMonetizationManager.rolloverTelemetryDateIfNeeded()
+        val nextMonthSnap = com.example.ads.AdMonetizationManager.telemetry.value
+        assertEquals(0.0, nextMonthSnap.dailyRevenueUsd, 0.0001)
+        assertEquals(0.0, nextMonthSnap.monthlyRevenueUsd, 0.0001)
+        assertEquals(0, nextMonthSnap.impressionCount)
+        assertEquals(0, nextMonthSnap.totalClicks)
+        assertTrue(nextMonthSnap.networkRevenueUsd.isEmpty())
     }
 }
 

@@ -34,6 +34,7 @@
 
 # Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff Vungle, DT Exchange, Chartboost, Start.io
 -keep class com.unity3d.ads.** { *; }
+-keep class com.unity3d.services.** { *; }
 -keep class com.applovin.** { *; }
 -keep class com.facebook.ads.** { *; }
 -keep class com.mbridge.msdk.** { *; }
@@ -48,6 +49,17 @@
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }
+
+# BuildConfig, Advertising ID, AppSet, Coroutines & DataStore
+-keep class com.example.BuildConfig { *; }
+-keep class com.google.android.gms.ads.identifier.** { *; }
+-keep class com.google.android.gms.appset.** { *; }
+-keep class com.google.firebase.database.** { *; }
+-dontwarn com.google.firebase.**
+-keepclassnames class kotlinx.coroutines.android.AndroidExceptionPreHandler
+-keepclassnames class kotlinx.coroutines.android.AndroidDispatcherFactory
+-dontwarn kotlinx.coroutines.**
+-keepclassmembers class androidx.datastore.** { *; }
 
 # Room Database
 -keep class * extends androidx.room.RoomDatabase
