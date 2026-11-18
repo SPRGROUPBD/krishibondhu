@@ -122,6 +122,8 @@ dependencies {
   implementation(libs.play.services.ads.identifier)
   implementation(libs.levelplay.mediation.sdk)
   implementation(libs.levelplay.unityads.adapter)
+  // Adapter 5.13.0 supports Unity Ads SDK 4.20.1; adapters >=5.15 bundle this SDK.
+  implementation(libs.unity.ads.sdk)
   implementation(libs.levelplay.applovin.adapter)
   implementation(libs.levelplay.facebook.adapter)
   implementation(libs.levelplay.mintegral.adapter)
