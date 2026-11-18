@@ -18,6 +18,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.view.Gravity
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -146,7 +147,18 @@ fun AdBannerSection(
     val directLink = adConfig.mobileDirectLinkUrl.trim()
         .takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
-    if (!showSponsor && !showDirectUnityBanner && !showMediatedBanner && !showStartIoBanner && !showMediatedNative && !showMobileWebAd && directLink == null) return
+    var primaryBannerFailed by remember(placementTag, bannerUnitId, priority) { mutableStateOf(false) }
+    val hasPrimarySdkBanner = showDirectUnityBanner || showMediatedBanner
+    val shouldMountStartIoBanner = showStartIoBanner &&
+        AdMonetizationManager.canRequestStartIoBanner() &&
+        (priority.equals("STARTIO", ignoreCase = true) ||
+            !hasPrimarySdkBanner ||
+            primaryBannerFailed ||
+            placementTag == "home_top" ||
+            placementTag == "farmer_home_top" ||
+            placementTag == "banner")
+
+    if (!showSponsor && !showDirectUnityBanner && !showMediatedBanner && !shouldMountStartIoBanner && !showMediatedNative && !showMobileWebAd && directLink == null) return
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -325,7 +337,8 @@ fun AdBannerSection(
                 placementId = bannerUnitId,
                 placementTag = placementTag,
                 showAdsLabel = adConfig.showAdsLabel,
-                isOnline = isOnline
+                isOnline = isOnline,
+                onFailureStateChanged = { failed -> primaryBannerFailed = failed }
             )
         }
 
@@ -399,6 +412,7 @@ fun AdBannerSection(
                                             setBannerListener(object : LevelPlayBannerAdViewListener {
                                                 override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
                                                     bannerFailed = false
+                                                    primaryBannerFailed = false
                                                     retryCount = 0
                                                     AdMonetizationManager.trackFormatLoaded(
                                                         AdFormatType.BANNER,
@@ -408,6 +422,7 @@ fun AdBannerSection(
 
                                                 override fun onAdLoadFailed(error: LevelPlayAdError) {
                                                     bannerFailed = true
+                                                    primaryBannerFailed = true
                                                     AdMonetizationManager.trackFormatFailed(
                                                         AdFormatType.BANNER,
                                                         error.errorCode,
@@ -456,8 +471,8 @@ fun AdBannerSection(
             }
         }
 
-        // 3b. Start.io Standalone Banner (Multi-Network Supplement)
-        if (showStartIoBanner) {
+        // 3b. Start.io Standalone Banner (Waterfall / Multi-Network Supplement with Cooldown)
+        if (shouldMountStartIoBanner) {
             StartIoBannerAdCard(
                 placementTag = placementTag,
                 showAdsLabel = adConfig.showAdsLabel,
@@ -480,7 +495,8 @@ private fun DirectUnityBannerAdCard(
     placementId: String,
     placementTag: String,
     showAdsLabel: Boolean,
-    isOnline: Boolean
+    isOnline: Boolean,
+    onFailureStateChanged: (Boolean) -> Unit = {}
 ) {
     var bannerFailed by remember(placementId, placementTag) { mutableStateOf(false) }
     var retryCount by remember(placementId, placementTag) { mutableIntStateOf(0) }
@@ -548,6 +564,7 @@ private fun DirectUnityBannerAdCard(
                                     listener = object : BannerView.IListener {
                                         override fun onBannerLoaded(bannerAdView: BannerView?) {
                                             bannerFailed = false
+                                            onFailureStateChanged(false)
                                             retryCount = 0
                                             AdMonetizationManager.trackFormatLoaded(AdFormatType.BANNER, "Unity Ads")
                                         }
@@ -565,6 +582,7 @@ private fun DirectUnityBannerAdCard(
                                             errorInfo: BannerErrorInfo?
                                         ) {
                                             bannerFailed = true
+                                            onFailureStateChanged(true)
                                             AdMonetizationManager.trackFormatFailed(
                                                 AdFormatType.BANNER,
                                                 errorInfo?.errorCode?.ordinal ?: -1,
@@ -579,6 +597,7 @@ private fun DirectUnityBannerAdCard(
                                 }.also { bannerViewHolder = it }
                             }.getOrElse { err ->
                                 bannerFailed = true
+                                onFailureStateChanged(true)
                                 AdMonetizationManager.trackFormatFailed(
                                     AdFormatType.BANNER,
                                     -1,
@@ -604,16 +623,10 @@ private fun StartIoBannerAdCard(
     showAdsLabel: Boolean,
     isOnline: Boolean
 ) {
-    var bannerFailed by remember(placementTag) { mutableStateOf(false) }
-    var retryCount by remember(placementTag) { mutableIntStateOf(0) }
-    LaunchedEffect(bannerFailed, retryCount, isOnline) {
-        if (bannerFailed && !AdMonetizationManager.isTestEnvironment() && isOnline && retryCount < MAX_BANNER_RETRY) {
-            delay((retryCount + 1) * 15_000L)
-            retryCount += 1
-            bannerFailed = false
-        }
+    var bannerFailed by remember(placementTag) {
+        mutableStateOf(!AdMonetizationManager.canRequestStartIoBanner())
     }
-    if (bannerFailed) return
+    if (bannerFailed || !isOnline || !AdMonetizationManager.canRequestStartIoBanner()) return
 
     Surface(
         shape = RoundedCornerShape(14.dp),
@@ -653,9 +666,9 @@ private fun StartIoBannerAdCard(
                     }
                 }
             } else {
-                key(placementTag, retryCount) {
+                key(placementTag) {
                     var bannerViewHolder by remember { mutableStateOf<StartIoBanner?>(null) }
-                    DisposableEffect(placementTag, retryCount) {
+                    DisposableEffect(placementTag) {
                         onDispose {
                             runCatching { bannerViewHolder?.hideBanner() }
                             bannerViewHolder = null
@@ -664,20 +677,30 @@ private fun StartIoBannerAdCard(
                     AndroidView(
                         factory = { ctx ->
                             val host = ctx.findActivity() ?: ctx
+                            val container = FrameLayout(host).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                                )
+                            }
                             runCatching {
-                                StartIoBanner(host, object : StartIoBannerListener {
+                                val dm = host.resources.displayMetrics
+                                val widthDp = ((dm.widthPixels / dm.density).toInt() - 32).coerceIn(300, 360)
+                                val bannerView = StartIoBanner(host, object : StartIoBannerListener {
                                     override fun onReceiveAd(banner: View?) {
                                         bannerFailed = false
-                                        retryCount = 0
+                                        AdMonetizationManager.recordStartIoBannerLoaded()
                                         AdMonetizationManager.trackFormatLoaded(AdFormatType.BANNER, "Start.io")
                                     }
 
                                     override fun onFailedToReceiveAd(banner: View?) {
                                         bannerFailed = true
+                                        runCatching { bannerViewHolder?.hideBanner() }
+                                        AdMonetizationManager.recordStartIoBannerNoFill()
                                         AdMonetizationManager.trackFormatFailed(
                                             AdFormatType.BANNER,
                                             -1,
-                                            "Start.io banner failed to load"
+                                            "Start.io banner NO FILL (paused)"
                                         )
                                     }
 
@@ -688,18 +711,32 @@ private fun StartIoBannerAdCard(
                                     override fun onClick(banner: View?) {
                                         AdMonetizationManager.trackFormatClicked(AdFormatType.BANNER, "Start.io")
                                     }
-                                }).apply {
-                                    AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, "startio_$placementTag")
-                                    loadAd()
-                                }.also { bannerViewHolder = it }
+                                })
+                                bannerViewHolder = bannerView
+                                container.addView(
+                                    bannerView,
+                                    FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                                        Gravity.CENTER
+                                    )
+                                )
+                                container.post {
+                                    if (container.isAttachedToWindow && !bannerFailed) {
+                                        AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, "startio_$placementTag")
+                                        runCatching { bannerView.loadAd(widthDp, 50) }
+                                    }
+                                }
+                                container
                             }.getOrElse { err ->
                                 bannerFailed = true
+                                AdMonetizationManager.recordStartIoBannerNoFill()
                                 AdMonetizationManager.trackFormatFailed(
                                     AdFormatType.BANNER,
                                     -1,
                                     err.message ?: "Start.io banner error"
                                 )
-                                FrameLayout(ctx)
+                                container
                             }
                         },
                         modifier = Modifier

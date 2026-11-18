@@ -2081,4 +2081,36 @@ class ExampleRobolectricTest {
                 assertFalse("Route $route should allow ads", com.example.ads.AdMonetizationManager.isCurrentRouteAdBlocked())
             }
     }
+
+    @Test
+    fun startIoTestAdsAndNoFillCooldownPreventsRetryStorms() {
+        var fakeNow = 1_000_000L
+        com.example.ads.AdMonetizationManager.clockMillisProvider = { fakeNow }
+
+        // In debug builds, Start.io test ads stay enabled automatically so emulator/debug doesn't hit live NO FILL
+        val liveConfig = com.example.data.model.AdConfig(adTestMode = false)
+        assertTrue(com.example.ads.AdMonetizationManager.effectiveStartIoTestAdsEnabled(liveConfig))
+
+        // Initially banner requests are allowed
+        assertTrue(com.example.ads.AdMonetizationManager.canRequestStartIoBanner())
+
+        // 1st NO FILL pauses Start.io banner requests for 120s
+        com.example.ads.AdMonetizationManager.recordStartIoBannerNoFill()
+        assertFalse(com.example.ads.AdMonetizationManager.canRequestStartIoBanner())
+
+        fakeNow += 119_000L
+        assertFalse(com.example.ads.AdMonetizationManager.canRequestStartIoBanner())
+
+        fakeNow += 1_000L // +120s reached
+        assertTrue(com.example.ads.AdMonetizationManager.canRequestStartIoBanner())
+
+        // 2nd NO FILL escalates cooldown to 300s
+        com.example.ads.AdMonetizationManager.recordStartIoBannerNoFill()
+        fakeNow += 200_000L
+        assertFalse(com.example.ads.AdMonetizationManager.canRequestStartIoBanner())
+
+        // Loaded ad or restored connectivity resets cooldown cleanly
+        com.example.ads.AdMonetizationManager.recordStartIoBannerLoaded()
+        assertTrue(com.example.ads.AdMonetizationManager.canRequestStartIoBanner())
+    }
 }

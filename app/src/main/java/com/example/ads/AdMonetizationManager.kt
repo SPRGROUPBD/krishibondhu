@@ -392,13 +392,28 @@ object AdMonetizationManager {
     @Volatile
     private var pendingAppOpenOnLaunch = false
 
+    private val STARTIO_NO_FILL_BACKOFF_MS = longArrayOf(120_000L, 300_000L, 600_000L)
+
     private var startIoInterstitial: StartAppAd? = null
     private var startIoInterstitialReady = false
     private var isLoadingStartIoInterstitial = false
+    @Volatile
+    private var startIoInterstitialNoFillUntil = 0L
+    @Volatile
+    private var startIoInterstitialFailCount = 0
 
     private var startIoRewarded: StartAppAd? = null
     private var startIoRewardedReady = false
     private var isLoadingStartIoRewarded = false
+    @Volatile
+    private var startIoRewardedNoFillUntil = 0L
+    @Volatile
+    private var startIoRewardedFailCount = 0
+
+    @Volatile
+    private var startIoBannerNoFillUntil = 0L
+    @Volatile
+    private var startIoBannerFailCount = 0
 
     private val retryAttempts = mutableMapOf<AdFormatType, Int>()
     private val retryJobs = mutableMapOf<AdFormatType, Job>()
@@ -415,6 +430,20 @@ object AdMonetizationManager {
 
     fun isTestEnvironment(): Boolean =
         Build.FINGERPRINT.contains("robolectric", ignoreCase = true) || Build.FINGERPRINT.isBlank()
+
+    internal fun isEmulatorDevice(): Boolean =
+        Build.FINGERPRINT.contains("generic", ignoreCase = true) ||
+            Build.FINGERPRINT.contains("emulator", ignoreCase = true) ||
+            Build.MODEL.contains("Emulator", ignoreCase = true) ||
+            Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
+            Build.MANUFACTURER.contains("Genymotion", ignoreCase = true) ||
+            Build.HARDWARE.contains("goldfish", ignoreCase = true) ||
+            Build.HARDWARE.contains("ranchu", ignoreCase = true) ||
+            Build.PRODUCT.contains("sdk_gphone", ignoreCase = true) ||
+            Build.PRODUCT.contains("emulator", ignoreCase = true)
+
+    internal fun effectiveStartIoTestAdsEnabled(config: AdConfig = latestConfig): Boolean =
+        config.adTestMode || BuildConfig.DEBUG || isEmulatorDevice()
 
     internal fun readLevelPlaySecret(): String {
         val secretKey = runCatching { BuildConfig.LEVELPLAY_APP_KEY.trim() }.getOrDefault("")
@@ -627,6 +656,7 @@ object AdMonetizationManager {
         if (isTestEnvironment()) return
         if (!NetworkMonitor.isCurrentlyOnline(context)) return
         if (!config.adsEnabled || !config.androidAdsEnabled) return
+        clearStartIoBackoff()
         appendLog(
             code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
             network = "NetworkMonitor",
@@ -924,13 +954,41 @@ object AdMonetizationManager {
         }
     }
 
+    private fun startIoCooldownForFailCount(failCount: Int): Long {
+        val idx = (failCount - 1).coerceIn(0, STARTIO_NO_FILL_BACKOFF_MS.lastIndex)
+        return STARTIO_NO_FILL_BACKOFF_MS[idx]
+    }
+
+    internal fun clearStartIoBackoff() {
+        startIoInterstitialFailCount = 0
+        startIoInterstitialNoFillUntil = 0L
+        startIoRewardedFailCount = 0
+        startIoRewardedNoFillUntil = 0L
+        startIoBannerFailCount = 0
+        startIoBannerNoFillUntil = 0L
+    }
+
+    fun canRequestStartIoBanner(): Boolean =
+        clockMillisProvider() >= startIoBannerNoFillUntil
+
+    fun recordStartIoBannerLoaded() {
+        startIoBannerFailCount = 0
+        startIoBannerNoFillUntil = 0L
+    }
+
+    fun recordStartIoBannerNoFill() {
+        startIoBannerFailCount += 1
+        startIoBannerNoFillUntil = clockMillisProvider() + startIoCooldownForFailCount(startIoBannerFailCount)
+    }
+
     private fun initializeStartIo(context: Context, config: AdConfig, appId: String) {
         if (isTestEnvironment()) return
         val appContext = context.applicationContext
         if (!NetworkMonitor.isCurrentlyOnline(appContext)) return
+        val testAds = effectiveStartIoTestAdsEnabled(config)
         if (startIoInitialized && initializedStartIoAppId == appId) {
             runCatching {
-                StartAppSDK.setTestAdsEnabled(config.adTestMode)
+                StartAppSDK.setTestAdsEnabled(testAds)
                 StartAppSDK.setUserConsent(appContext, "pas", System.currentTimeMillis(), config.consentGranted)
             }
             return
@@ -941,17 +999,20 @@ object AdMonetizationManager {
         appendLog(
             code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
             network = "Start.io",
-            message = "Initializing Start.io SDK 5.4.0 (appId=${maskKey(appId)}, testMode=${config.adTestMode})"
+            message = "Initializing Start.io SDK 5.4.0 (appId=${maskKey(appId)}, testMode=$testAds)"
         )
 
         runCatching {
-            StartAppSDK.setTestAdsEnabled(config.adTestMode)
+            StartAppSDK.setTestAdsEnabled(testAds)
             StartAppSDK.setUserConsent(appContext, "pas", System.currentTimeMillis(), config.consentGranted)
+            StartAppAd.disableSplash()
             StartAppSDK.initParams(appContext, appId)
+                .setReturnAdsEnabled(false)
                 .setCallback {
                     startIoInitializing = false
                     startIoInitialized = true
                     initializedStartIoAppId = appId
+                    StartAppAd.disableSplash()
                     _telemetry.update {
                         it.copy(
                             startIoReady = true,
@@ -961,7 +1022,7 @@ object AdMonetizationManager {
                     appendLog(
                         code = AdDebugEventCode.SDK_INITIALIZATION_SUCCESS,
                         network = "Start.io",
-                        message = "Start.io SDK initialized"
+                        message = "Start.io SDK initialized (testMode=$testAds)"
                     )
                     if (latestConfig.interstitialEnabled || latestConfig.appOpenEnabled) {
                         preloadStartIoInterstitial(appContext)
@@ -1000,6 +1061,8 @@ object AdMonetizationManager {
     private fun preloadStartIoInterstitial(context: Context) {
         if (isTestEnvironment() || !startIoInitialized || isLoadingStartIoInterstitial || startIoInterstitialReady) return
         if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || (!latestConfig.interstitialEnabled && !latestConfig.appOpenEnabled)) return
+        if (!NetworkMonitor.isCurrentlyOnline(context)) return
+        if (clockMillisProvider() < startIoInterstitialNoFillUntil) return
         isLoadingStartIoInterstitial = true
         runCatching {
             val ad = StartAppAd(context.applicationContext)
@@ -1008,6 +1071,8 @@ object AdMonetizationManager {
                 override fun onReceiveAd(adObj: Ad) {
                     isLoadingStartIoInterstitial = false
                     startIoInterstitialReady = true
+                    startIoInterstitialFailCount = 0
+                    startIoInterstitialNoFillUntil = 0L
                     appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.INTERSTITIAL, "Start.io", "Start.io Interstitial / App Open ready")
                     if (pendingAppOpenOnLaunch && latestConfig.appOpenEnabled && !isAdBlockedRoute(currentRoute)) {
                         scope.launch { maybeShowAppOpenOnForeground() }
@@ -1017,18 +1082,24 @@ object AdMonetizationManager {
                 override fun onFailedToReceiveAd(adObj: Ad?) {
                     isLoadingStartIoInterstitial = false
                     startIoInterstitialReady = false
+                    startIoInterstitial = null
+                    startIoInterstitialFailCount += 1
+                    startIoInterstitialNoFillUntil = clockMillisProvider() + startIoCooldownForFailCount(startIoInterstitialFailCount)
                     appendLog(AdDebugEventCode.AD_NO_FILL, AdFormatType.INTERSTITIAL, "Start.io", adObj?.errorMessage ?: "Start.io interstitial failed")
                 }
             })
         }.onFailure {
             isLoadingStartIoInterstitial = false
             startIoInterstitialReady = false
+            startIoInterstitial = null
         }
     }
 
-    private fun preloadStartIoRewarded(context: Context) {
+    private fun preloadStartIoRewarded(context: Context, force: Boolean = false) {
         if (isTestEnvironment() || !startIoInitialized || isLoadingStartIoRewarded || startIoRewardedReady) return
         if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || !latestConfig.rewardedEnabled) return
+        if (!NetworkMonitor.isCurrentlyOnline(context)) return
+        if (!force && clockMillisProvider() < startIoRewardedNoFillUntil) return
         isLoadingStartIoRewarded = true
         runCatching {
             val ad = StartAppAd(context.applicationContext)
@@ -1037,18 +1108,24 @@ object AdMonetizationManager {
                 override fun onReceiveAd(adObj: Ad) {
                     isLoadingStartIoRewarded = false
                     startIoRewardedReady = true
+                    startIoRewardedFailCount = 0
+                    startIoRewardedNoFillUntil = 0L
                     appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.REWARDED, "Start.io", "Start.io Rewarded ready")
                 }
 
                 override fun onFailedToReceiveAd(adObj: Ad?) {
                     isLoadingStartIoRewarded = false
                     startIoRewardedReady = false
+                    startIoRewarded = null
+                    startIoRewardedFailCount += 1
+                    startIoRewardedNoFillUntil = clockMillisProvider() + startIoCooldownForFailCount(startIoRewardedFailCount)
                     appendLog(AdDebugEventCode.AD_NO_FILL, AdFormatType.REWARDED, "Start.io", adObj?.errorMessage ?: "Start.io rewarded failed")
                 }
             })
         }.onFailure {
             isLoadingStartIoRewarded = false
             startIoRewardedReady = false
+            startIoRewarded = null
         }
     }
 
@@ -2280,9 +2357,15 @@ object AdMonetizationManager {
         startIoInterstitial = null
         startIoInterstitialReady = false
         isLoadingStartIoInterstitial = false
+        startIoInterstitialNoFillUntil = 0L
+        startIoInterstitialFailCount = 0
         startIoRewarded = null
         startIoRewardedReady = false
         isLoadingStartIoRewarded = false
+        startIoRewardedNoFillUntil = 0L
+        startIoRewardedFailCount = 0
+        startIoBannerNoFillUntil = 0L
+        startIoBannerFailCount = 0
         _telemetry.value = AdRuntimeTelemetry()
     }
 
