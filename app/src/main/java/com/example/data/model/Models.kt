@@ -156,6 +156,8 @@ data class AdminDashboardStats(
     val totalBuyers: Int = 0,
     val verifiedBuyers: Int = 0,
     val activeProducts: Int = 0,
+    val pendingProductsCount: Int = 0,
+    val totalProductsCount: Int = 0,
     val todaysOrders: Int = 0,
     val completedOrders: Int = 0,
     val totalSalesAmount: Double = 0.0,
@@ -176,20 +178,20 @@ data class AdConfig(
     val mediationPlatform: String = "UNITY_LEVELPLAY",
     val mediationAppKey: String = "",
     val adTestMode: Boolean = false,
-    // 5 Ad Formats (LevelPlay Ad Unit / Placement IDs)
+    // 5 Ad Formats (Direct Unity Ads placements or LevelPlay Ad Unit IDs)
     val bannerEnabled: Boolean = true,
-    val androidBannerId: String = "",
+    val androidBannerId: String = DEFAULT_UNITY_BANNER_ID,
     val nativeEnabled: Boolean = true,
     val androidNativePlacement: String = "",
     val interstitialEnabled: Boolean = true,
-    val androidInterstitialId: String = "",
-    val rewardedEnabled: Boolean = false,
-    val androidRewardedId: String = "",
+    val androidInterstitialId: String = DEFAULT_UNITY_INTERSTITIAL_ID,
+    val rewardedEnabled: Boolean = true,
+    val androidRewardedId: String = DEFAULT_UNITY_REWARDED_ID,
     val appOpenEnabled: Boolean = false,
     val androidAppOpenId: String = "",
     // 8 Supported Mediation Networks (Zero AdMob)
     val unityAdsEnabled: Boolean = true,
-    val unityGameId: String = "",
+    val unityGameId: String = DEFAULT_UNITY_GAME_ID,
     val appLovinEnabled: Boolean = false,
     val appLovinSdkKey: String = "",
     val metaAudienceEnabled: Boolean = false,
@@ -234,11 +236,35 @@ data class AdConfig(
     val sponsorCtaText: String = "বিস্তারিত দেখুন",
     val updatedAt: Long = 0L
 ) {
+    companion object {
+        const val DEFAULT_UNITY_GAME_ID = "6227313"
+        const val DEFAULT_UNITY_BANNER_ID = "Banner_Android"
+        const val DEFAULT_UNITY_INTERSTITIAL_ID = "Interstitial_Android"
+        const val DEFAULT_UNITY_REWARDED_ID = "Rewarded_Android"
+    }
+
     fun resolvedBannerUnitId(): String = androidBannerId.trim()
     fun resolvedNativePlacement(): String = androidNativePlacement.trim()
     fun resolvedInterstitialUnitId(): String = androidInterstitialId.trim()
     fun resolvedRewardedUnitId(): String = androidRewardedId.trim()
     fun resolvedAppOpenUnitId(): String = androidAppOpenId.trim()
+
+    fun usesDirectUnityAds(): Boolean =
+        adsEnabled &&
+            androidAdsEnabled &&
+            mediationAppKey.trim().isEmpty() &&
+            unityAdsEnabled &&
+            unityGameId.trim().isNotEmpty()
+
+    fun hydratedWithDefaults(): AdConfig {
+        if (mediationAppKey.trim().isNotEmpty()) return this
+        return copy(
+            unityGameId = unityGameId.ifBlank { DEFAULT_UNITY_GAME_ID },
+            androidBannerId = androidBannerId.ifBlank { DEFAULT_UNITY_BANNER_ID },
+            androidInterstitialId = androidInterstitialId.ifBlank { DEFAULT_UNITY_INTERSTITIAL_ID },
+            androidRewardedId = androidRewardedId.ifBlank { DEFAULT_UNITY_REWARDED_ID }
+        )
+    }
 }
 
 fun Double.formatBdt(): String {

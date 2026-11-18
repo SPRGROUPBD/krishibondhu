@@ -29,6 +29,7 @@ playServicesAppSet = "16.1.0"
 playServicesAdsIdentifier = "18.2.0"
 lifecycleProcess = "2.8.7"
 levelplaySdk = "9.2.0"
+unityAds = "4.16.6"
 levelplayUnityAdsAdapter = "5.13.0"
 levelplayAppLovinAdapter = "5.2.0"
 levelplayMetaAdapter = "5.6.0"
@@ -91,6 +92,7 @@ play-services-appset = { group = "com.google.android.gms", name = "play-services
 play-services-ads-identifier = { group = "com.google.android.gms", name = "play-services-ads-identifier", version.ref = "playServicesAdsIdentifier" }
 androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycleProcess" }
 levelplay-mediation-sdk = { group = "com.unity3d.ads-mediation", name = "mediation-sdk", version.ref = "levelplaySdk" }
+unity-ads = { group = "com.unity3d.ads", name = "unity-ads", version.ref = "unityAds" }
 levelplay-unityads-adapter = { group = "com.unity3d.ads-mediation", name = "unityads-adapter", version.ref = "levelplayUnityAdsAdapter" }
 levelplay-applovin-adapter = { group = "com.unity3d.ads-mediation", name = "applovin-adapter", version.ref = "levelplayAppLovinAdapter" }
 levelplay-facebook-adapter = { group = "com.unity3d.ads-mediation", name = "facebook-adapter", version.ref = "levelplayMetaAdapter" }

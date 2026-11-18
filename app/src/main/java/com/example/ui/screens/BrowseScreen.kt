@@ -121,7 +121,8 @@ fun BrowseScreen(
             uiState.selectedDivision == null || it.divisionBn.equalsBn(uiState.selectedDivision)
         }.map { it.districtBn } +
             uiState.products.filter {
-                uiState.selectedDivision == null || it.division.equalsBn(uiState.selectedDivision)
+                it.status.equals("ACTIVE", ignoreCase = true) &&
+                    (uiState.selectedDivision == null || it.division.equalsBn(uiState.selectedDivision))
             }.map { it.district } +
             uiState.farmers.filter {
                 uiState.selectedDivision == null || it.division.equalsBn(uiState.selectedDivision)
@@ -154,7 +155,8 @@ fun BrowseScreen(
                 (uiState.selectedDistrict == null || f.district.equalsBn(uiState.selectedDistrict))
         }.map { it.upazila }
         val fromProducts = uiState.products.filter { p ->
-            (uiState.selectedDivision == null || p.division.equalsBn(uiState.selectedDivision)) &&
+            p.status.equals("ACTIVE", ignoreCase = true) &&
+                (uiState.selectedDivision == null || p.division.equalsBn(uiState.selectedDivision)) &&
                 (uiState.selectedDistrict == null || p.district.equalsBn(uiState.selectedDistrict))
         }.map { it.upazila }
         (fromStatic + fromLocations + fromFarmers + fromProducts)
@@ -182,7 +184,8 @@ fun BrowseScreen(
                 (uiState.selectedUpazila == null || f.upazila.equalsBn(uiState.selectedUpazila))
         }.map { it.unionName }
         val fromProducts = uiState.products.filter { p ->
-            (uiState.selectedDivision == null || p.division.equalsBn(uiState.selectedDivision)) &&
+            p.status.equals("ACTIVE", ignoreCase = true) &&
+                (uiState.selectedDivision == null || p.division.equalsBn(uiState.selectedDivision)) &&
                 (uiState.selectedDistrict == null || p.district.equalsBn(uiState.selectedDistrict)) &&
                 (uiState.selectedUpazila == null || p.upazila.equalsBn(uiState.selectedUpazila))
         }.map { it.unionName }
@@ -783,7 +786,7 @@ fun BrowseScreen(
                         modifier = Modifier.fillMaxSize()
                     ) {
                         items(uiState.filteredFarmers, key = { it.id }) { farmer ->
-                            val count = uiState.products.count { it.farmerId == farmer.id }
+                            val count = uiState.products.count { it.farmerId == farmer.id && it.status == "ACTIVE" }
                             FarmerCard(
                                 farmer = farmer,
                                 productCount = count,

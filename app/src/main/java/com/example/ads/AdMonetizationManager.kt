@@ -5,6 +5,11 @@ import android.content.Context
 import android.os.Build
 import com.example.data.model.AdConfig
 import com.example.util.NetworkMonitor
+import com.unity3d.ads.IUnityAdsInitializationListener
+import com.unity3d.ads.IUnityAdsLoadListener
+import com.unity3d.ads.IUnityAdsShowListener
+import com.unity3d.ads.UnityAds
+import com.unity3d.ads.UnityAdsShowOptions
 import com.unity3d.mediation.LevelPlay
 import com.unity3d.mediation.LevelPlayAdError
 import com.unity3d.mediation.LevelPlayAdInfo
@@ -207,18 +212,23 @@ private fun defaultAdapterStatuses(
     sdkInitialized: Boolean
 ): List<AdNetworkAdapterStatus> =
     SUPPORTED_NETWORK_DESCRIPTORS.map { desc ->
-        val packaged = isAdapterClassPresent(desc.adapterClass)
+        val directUnityMode = desc.key == "unity_ads" && config.usesDirectUnityAds()
+        val packaged = isAdapterClassPresent(desc.adapterClass) ||
+            (desc.key == "unity_ads" && isAdapterClassPresent("com.unity3d.ads.UnityAds"))
         val enabled = desc.enabledSelector(config)
         val keyPresent = desc.appIdSelector(config).trim().isNotBlank()
-        val ready = sdkInitialized && packaged && enabled && keyPresent
+        val ready = sdkInitialized && packaged && enabled && keyPresent &&
+            (directUnityMode || config.mediationAppKey.trim().isNotEmpty())
         val note = when {
             !packaged -> "Adapter class missing from build"
             !enabled -> "Disabled in Admin Panel"
             !keyPresent -> if (desc.requiresSeparateApproval) {
                 "Account approval & Network App ID required"
             } else {
-                "Network App/Game ID missing in Admin Panel"
+                "Unity Game ID missing in Admin Panel"
             }
+            directUnityMode && sdkInitialized -> "সক্রিয় (Direct Unity Ads • Game ID: ${config.unityGameId.trim()})"
+            directUnityMode -> "Waiting for Direct Unity Ads SDK initialization (${config.unityGameId.trim()})"
             !sdkInitialized -> "Waiting for LevelPlay SDK initialization"
             else -> "Configured & active via LevelPlay Mediation"
         }
@@ -226,7 +236,7 @@ private fun defaultAdapterStatuses(
             key = desc.key,
             displayName = desc.displayName,
             adapterClass = desc.adapterClass,
-            adapterVersion = desc.adapterVersion,
+            adapterVersion = if (directUnityMode) "4.16.6 (Direct)" else desc.adapterVersion,
             requiresSeparateApproval = desc.requiresSeparateApproval,
             sdkPackaged = packaged,
             enabledInConfig = enabled,
@@ -251,6 +261,10 @@ object AdMonetizationManager {
     @Volatile
     private var initializedAppKey: String = ""
     @Volatile
+    private var initializedUnityGameId: String = ""
+    @Volatile
+    private var isDirectUnityMode: Boolean = false
+    @Volatile
     private var sdkInitialized = false
     @Volatile
     private var sdkInitializing = false
@@ -263,13 +277,16 @@ object AdMonetizationManager {
 
     private var interstitialAd: LevelPlayInterstitialAd? = null
     private var loadedInterstitialUnitId: String = ""
+    private var loadedDirectInterstitialId: String = ""
     private var isLoadingInterstitial = false
     private var lastInterstitialShownAt = 0L
 
     private var rewardedAd: LevelPlayRewardedAd? = null
     private var loadedRewardedUnitId: String = ""
+    private var loadedDirectRewardedId: String = ""
     private var isLoadingRewarded = false
     private var pendingRewardCallback: ((Boolean, String) -> Unit)? = null
+    private var pendingDirectRewardShowActivity: WeakReference<Activity>? = null
 
     private var appOpenAd: LevelPlayInterstitialAd? = null
     private var loadedAppOpenUnitId: String = ""
@@ -317,8 +334,9 @@ object AdMonetizationManager {
         if (!config.adsEnabled || !config.androidAdsEnabled) {
             return
         }
+        val usesDirectUnity = config.usesDirectUnityAds()
         val appKey = config.mediationAppKey.trim()
-        if (appKey.isEmpty()) {
+        if (!usesDirectUnity && appKey.isEmpty()) {
             return
         }
         if (!isTestEnvironment()) {
@@ -345,19 +363,24 @@ object AdMonetizationManager {
             return
         }
 
+        if (config.usesDirectUnityAds()) {
+            initializeDirectUnityAds(context, config, onReady)
+            return
+        }
+
         val appKey = config.mediationAppKey.trim()
         if (appKey.isEmpty()) {
             _telemetry.update {
                 it.copy(
                     sdkInitStatus = SdkInitStatus.FAILED,
-                    lastInitError = "LevelPlay App Key missing in Admin Monetization settings",
+                    lastInitError = "Unity Game ID বা LevelPlay App Key দেওয়া হয়নি",
                     activeAppKeyMasked = "(empty)",
                     adapterStatuses = defaultAdapterStatuses(config, false)
                 )
             }
             appendLog(
                 code = AdDebugEventCode.INVALID_APP_KEY,
-                message = "LevelPlay initialization skipped: App Key is empty"
+                message = "Ad initialization skipped: both Unity Game ID and LevelPlay App Key are unavailable"
             )
             return
         }
@@ -375,17 +398,19 @@ object AdMonetizationManager {
             return
         }
 
-        if (sdkInitialized && initializedAppKey == appKey) {
+        if (sdkInitialized && !isDirectUnityMode && initializedAppKey == appKey) {
             onReady?.invoke()
             return
         }
         if (sdkInitializing) return
 
         sdkInitializing = true
+        isDirectUnityMode = false
         val masked = maskKey(appKey)
         _telemetry.update {
             it.copy(
                 sdkInitStatus = SdkInitStatus.INITIALIZING,
+                mediationPlatform = "Unity LevelPlay 9.2.0",
                 activeAppKeyMasked = masked,
                 testModeEnabled = config.adTestMode,
                 lastInitError = ""
@@ -417,10 +442,12 @@ object AdMonetizationManager {
                 override fun onInitSuccess(configuration: LevelPlayConfiguration) {
                     sdkInitializing = false
                     sdkInitialized = true
+                    isDirectUnityMode = false
                     initializedAppKey = appKey
                     _telemetry.update {
                         it.copy(
                             sdkInitStatus = SdkInitStatus.SUCCESS,
+                            mediationPlatform = "Unity LevelPlay 9.2.0",
                             lastInitError = "",
                             activeAppKeyMasked = masked,
                             testModeEnabled = config.adTestMode,
@@ -471,6 +498,127 @@ object AdMonetizationManager {
         }
     }
 
+    private fun initializeDirectUnityAds(
+        context: Context,
+        config: AdConfig,
+        onReady: (() -> Unit)? = null
+    ) {
+        val gameId = config.unityGameId.trim()
+        if (gameId.isEmpty()) return
+        if (isTestEnvironment()) return
+
+        val appContext = context.applicationContext
+        if (!NetworkMonitor.isCurrentlyOnline(appContext)) {
+            appendLog(
+                code = AdDebugEventCode.NETWORK_UNAVAILABLE,
+                network = "Unity Ads",
+                message = "Cannot initialize Unity Ads: device is offline"
+            )
+            return
+        }
+
+        if ((sdkInitialized && isDirectUnityMode && initializedUnityGameId == gameId) ||
+            (UnityAds.isInitialized && initializedUnityGameId == gameId)
+        ) {
+            sdkInitialized = true
+            isDirectUnityMode = true
+            _telemetry.update {
+                it.copy(
+                    sdkInitStatus = SdkInitStatus.SUCCESS,
+                    mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
+                    activeAppKeyMasked = "Game ID: $gameId",
+                    testModeEnabled = config.adTestMode,
+                    lastInitError = "",
+                    adapterStatuses = defaultAdapterStatuses(latestConfig, true)
+                )
+            }
+            onReady?.let { cb -> scope.launch { cb() } }
+            return
+        }
+        if (sdkInitializing) return
+
+        sdkInitializing = true
+        isDirectUnityMode = true
+        _telemetry.update {
+            it.copy(
+                sdkInitStatus = SdkInitStatus.INITIALIZING,
+                mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
+                activeAppKeyMasked = "Game ID: $gameId",
+                testModeEnabled = config.adTestMode,
+                lastInitError = ""
+            )
+        }
+        appendLog(
+            code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
+            network = "Unity Ads",
+            message = "Initializing Unity Ads SDK (Game ID=$gameId, testMode=${config.adTestMode})"
+        )
+
+        runCatching {
+            UnityAds.initialize(appContext, gameId, config.adTestMode, object : IUnityAdsInitializationListener {
+                override fun onInitializationComplete() {
+                    sdkInitializing = false
+                    sdkInitialized = true
+                    isDirectUnityMode = true
+                    initializedUnityGameId = gameId
+                    _telemetry.update {
+                        it.copy(
+                            sdkInitStatus = SdkInitStatus.SUCCESS,
+                            mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
+                            activeAppKeyMasked = "Game ID: $gameId",
+                            testModeEnabled = latestConfig.adTestMode,
+                            lastInitError = "",
+                            adapterStatuses = defaultAdapterStatuses(latestConfig, true)
+                        )
+                    }
+                    appendLog(
+                        code = AdDebugEventCode.SDK_INITIALIZATION_SUCCESS,
+                        network = "Unity Ads",
+                        message = "Unity Ads SDK ${UnityAds.version} initialized (Game ID=$gameId)"
+                    )
+                    onReady?.let { cb -> scope.launch { cb() } }
+                }
+
+                override fun onInitializationFailed(
+                    error: UnityAds.UnityAdsInitializationError,
+                    message: String
+                ) {
+                    sdkInitializing = false
+                    sdkInitialized = false
+                    val msg = "${error.name}: $message"
+                    _telemetry.update {
+                        it.copy(
+                            sdkInitStatus = SdkInitStatus.FAILED,
+                            lastInitError = msg,
+                            adapterStatuses = defaultAdapterStatuses(latestConfig, false)
+                        )
+                    }
+                    appendLog(
+                        code = AdDebugEventCode.SDK_INITIALIZATION_FAILED,
+                        network = "Unity Ads",
+                        message = "Unity Ads init failed ($msg)"
+                    )
+                }
+            })
+        }.onFailure { err ->
+            sdkInitializing = false
+            sdkInitialized = false
+            val msg = err.message ?: "Unexpected Unity Ads initialization error"
+            _telemetry.update {
+                it.copy(
+                    sdkInitStatus = SdkInitStatus.FAILED,
+                    lastInitError = msg,
+                    adapterStatuses = defaultAdapterStatuses(latestConfig, false)
+                )
+            }
+            appendLog(
+                code = AdDebugEventCode.SDK_INITIALIZATION_FAILED,
+                network = "Unity Ads",
+                message = msg
+            )
+        }
+    }
+
     fun preloadAllFormats(context: Context, config: AdConfig = latestConfig) {
         if (isTestEnvironment()) return
         if (!config.adsEnabled || !config.androidAdsEnabled) return
@@ -503,6 +651,77 @@ object AdMonetizationManager {
             }
             return
         }
+        if (latestConfig.usesDirectUnityAds()) {
+            if ((loadedDirectInterstitialId == cleanId) || isLoadingInterstitial) return
+            isLoadingInterstitial = true
+            updateFormatMetric(AdFormatType.INTERSTITIAL) {
+                it.copy(
+                    requestStatus = "Requesting",
+                    requestCount = it.requestCount + 1,
+                    unitOrPlacementId = cleanId
+                )
+            }
+            appendLog(
+                code = AdDebugEventCode.AD_REQUEST_STARTED,
+                format = AdFormatType.INTERSTITIAL,
+                network = "Unity Ads",
+                message = "Loading Unity Interstitial placement $cleanId"
+            )
+            runCatching {
+                UnityAds.load(cleanId, object : IUnityAdsLoadListener {
+                    override fun onUnityAdsAdLoaded(placementId: String) {
+                        isLoadingInterstitial = false
+                        loadedDirectInterstitialId = placementId
+                        updateFormatMetric(AdFormatType.INTERSTITIAL) {
+                            it.copy(
+                                requestStatus = "Completed",
+                                loadedStatus = "Loaded",
+                                loadedCount = it.loadedCount + 1,
+                                lastError = ""
+                            )
+                        }
+                        appendLog(
+                            code = AdDebugEventCode.AD_LOADED,
+                            format = AdFormatType.INTERSTITIAL,
+                            network = "Unity Ads",
+                            message = "Unity Interstitial ready ($placementId)"
+                        )
+                    }
+
+                    override fun onUnityAdsFailedToLoad(
+                        placementId: String,
+                        error: UnityAds.UnityAdsLoadError,
+                        message: String
+                    ) {
+                        isLoadingInterstitial = false
+                        if (loadedDirectInterstitialId == placementId) loadedDirectInterstitialId = ""
+                        val isNoFill = error == UnityAds.UnityAdsLoadError.NO_FILL ||
+                            message.contains("no fill", ignoreCase = true)
+                        updateFormatMetric(AdFormatType.INTERSTITIAL) {
+                            it.copy(
+                                requestStatus = "Failed",
+                                loadedStatus = if (isNoFill) "No Fill" else "Failed",
+                                noFillCount = it.noFillCount + if (isNoFill) 1 else 0,
+                                failedCount = it.failedCount + 1,
+                                lastError = "${error.name}: $message"
+                            )
+                        }
+                        appendLog(
+                            code = if (isNoFill) AdDebugEventCode.AD_NO_FILL else AdDebugEventCode.AD_DISPLAY_FAILED,
+                            format = AdFormatType.INTERSTITIAL,
+                            network = "Unity Ads",
+                            message = "${error.name}: $message"
+                        )
+                    }
+                })
+            }.onFailure { err ->
+                isLoadingInterstitial = false
+                loadedDirectInterstitialId = ""
+                appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.INTERSTITIAL, "Unity Ads", err.message ?: "Unity Interstitial load error")
+            }
+            return
+        }
+
         if ((interstitialAd?.isAdReady() == true && loadedInterstitialUnitId == cleanId) || isLoadingInterstitial) {
             return
         }
@@ -608,6 +827,47 @@ object AdMonetizationManager {
         val now = System.currentTimeMillis()
         if (now - lastInterstitialShownAt < INTERSTITIAL_COOLDOWN_MS) return
 
+        if (latestConfig.usesDirectUnityAds()) {
+            if (sdkInitialized && loadedDirectInterstitialId == cleanId) {
+                lastInterstitialShownAt = now
+                loadedDirectInterstitialId = ""
+                runCatching {
+                    UnityAds.show(activity, cleanId, UnityAdsShowOptions(), object : IUnityAdsShowListener {
+                        override fun onUnityAdsShowFailure(
+                            placementId: String,
+                            error: UnityAds.UnityAdsShowError,
+                            message: String
+                        ) {
+                            updateFormatMetric(AdFormatType.INTERSTITIAL) {
+                                it.copy(failedCount = it.failedCount + 1, lastError = "${error.name}: $message")
+                            }
+                            appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.INTERSTITIAL, "Unity Ads", "${error.name}: $message")
+                            preloadInterstitial(activity.applicationContext, cleanId, latestConfig.interstitialEnabled)
+                        }
+
+                        override fun onUnityAdsShowStart(placementId: String) {
+                            trackFormatDisplayed(AdFormatType.INTERSTITIAL, "Unity Ads")
+                        }
+
+                        override fun onUnityAdsShowClick(placementId: String) = Unit
+
+                        override fun onUnityAdsShowComplete(
+                            placementId: String,
+                            state: UnityAds.UnityAdsShowCompletionState
+                        ) {
+                            appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.INTERSTITIAL, "Unity Ads", "Unity Interstitial closed (${state.name})")
+                            preloadInterstitial(activity.applicationContext, cleanId, latestConfig.interstitialEnabled)
+                        }
+                    })
+                }.onFailure { err ->
+                    appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.INTERSTITIAL, "Unity Ads", err.message ?: "Unity show failed")
+                }
+            } else {
+                preloadInterstitial(activity, cleanId, enabled)
+            }
+            return
+        }
+
         val ad = interstitialAd
         if (sdkInitialized && ad != null && loadedInterstitialUnitId == cleanId && ad.isAdReady()) {
             lastInterstitialShownAt = now
@@ -638,6 +898,81 @@ object AdMonetizationManager {
             }
             return
         }
+        if (latestConfig.usesDirectUnityAds()) {
+            if (loadedDirectRewardedId == cleanId || isLoadingRewarded) return
+            isLoadingRewarded = true
+            updateFormatMetric(AdFormatType.REWARDED) {
+                it.copy(
+                    requestStatus = "Requesting",
+                    requestCount = it.requestCount + 1,
+                    unitOrPlacementId = cleanId
+                )
+            }
+            appendLog(AdDebugEventCode.AD_REQUEST_STARTED, AdFormatType.REWARDED, "Unity Ads", "Loading Unity Rewarded placement $cleanId")
+
+            runCatching {
+                UnityAds.load(cleanId, object : IUnityAdsLoadListener {
+                    override fun onUnityAdsAdLoaded(placementId: String) {
+                        isLoadingRewarded = false
+                        loadedDirectRewardedId = placementId
+                        updateFormatMetric(AdFormatType.REWARDED) {
+                            it.copy(
+                                requestStatus = "Completed",
+                                loadedStatus = "Loaded",
+                                loadedCount = it.loadedCount + 1,
+                                lastError = ""
+                            )
+                        }
+                        appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.REWARDED, "Unity Ads", "Unity Rewarded ready ($placementId)")
+
+                        val waitingAct = pendingDirectRewardShowActivity?.get()
+                        val waitingCb = pendingRewardCallback
+                        if (waitingAct != null && !waitingAct.isFinishing && !waitingAct.isDestroyed && waitingCb != null) {
+                            pendingDirectRewardShowActivity = null
+                            scope.launch {
+                                showDirectUnityRewarded(waitingAct, placementId, waitingCb)
+                            }
+                        }
+                    }
+
+                    override fun onUnityAdsFailedToLoad(
+                        placementId: String,
+                        error: UnityAds.UnityAdsLoadError,
+                        message: String
+                    ) {
+                        isLoadingRewarded = false
+                        if (loadedDirectRewardedId == placementId) loadedDirectRewardedId = ""
+                        val isNoFill = error == UnityAds.UnityAdsLoadError.NO_FILL ||
+                            message.contains("no fill", ignoreCase = true)
+                        updateFormatMetric(AdFormatType.REWARDED) {
+                            it.copy(
+                                requestStatus = "Failed",
+                                loadedStatus = if (isNoFill) "No Fill" else "Failed",
+                                noFillCount = it.noFillCount + if (isNoFill) 1 else 0,
+                                failedCount = it.failedCount + 1,
+                                lastError = "${error.name}: $message"
+                            )
+                        }
+                        appendLog(
+                            code = if (isNoFill) AdDebugEventCode.AD_NO_FILL else AdDebugEventCode.AD_DISPLAY_FAILED,
+                            format = AdFormatType.REWARDED,
+                            network = "Unity Ads",
+                            message = "${error.name}: $message"
+                        )
+                        pendingDirectRewardShowActivity = null
+                        pendingRewardCallback?.invoke(false, "বিজ্ঞাপন লোড হয়নি (${error.name})")
+                        pendingRewardCallback = null
+                    }
+                })
+            }.onFailure { err ->
+                isLoadingRewarded = false
+                loadedDirectRewardedId = ""
+                pendingDirectRewardShowActivity = null
+                appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.REWARDED, "Unity Ads", err.message ?: "Unity Rewarded load error")
+            }
+            return
+        }
+
         if ((rewardedAd?.isAdReady() == true && loadedRewardedUnitId == cleanId) || isLoadingRewarded) return
 
         isLoadingRewarded = true
@@ -713,6 +1048,55 @@ object AdMonetizationManager {
         }
     }
 
+    private fun showDirectUnityRewarded(
+        activity: Activity,
+        placementId: String,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        loadedDirectRewardedId = ""
+        pendingRewardCallback = onResult
+        runCatching {
+            UnityAds.show(activity, placementId, UnityAdsShowOptions(), object : IUnityAdsShowListener {
+                override fun onUnityAdsShowFailure(
+                    placementId: String,
+                    error: UnityAds.UnityAdsShowError,
+                    message: String
+                ) {
+                    updateFormatMetric(AdFormatType.REWARDED) {
+                        it.copy(failedCount = it.failedCount + 1, lastError = "${error.name}: $message")
+                    }
+                    appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.REWARDED, "Unity Ads", "${error.name}: $message")
+                    pendingRewardCallback?.invoke(false, "${error.name}: $message")
+                    pendingRewardCallback = null
+                    preloadRewarded(activity.applicationContext, placementId, latestConfig.rewardedEnabled)
+                }
+
+                override fun onUnityAdsShowStart(placementId: String) {
+                    trackFormatDisplayed(AdFormatType.REWARDED, "Unity Ads")
+                }
+
+                override fun onUnityAdsShowClick(placementId: String) = Unit
+
+                override fun onUnityAdsShowComplete(
+                    placementId: String,
+                    state: UnityAds.UnityAdsShowCompletionState
+                ) {
+                    val completed = state == UnityAds.UnityAdsShowCompletionState.COMPLETED
+                    appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.REWARDED, "Unity Ads", "Unity Rewarded ${state.name}")
+                    pendingRewardCallback?.invoke(
+                        completed,
+                        if (completed) "Unity Rewarded Video সম্পন্ন ✓" else "ভিডিও সম্পূর্ণ দেখা হয়নি"
+                    )
+                    pendingRewardCallback = null
+                    preloadRewarded(activity.applicationContext, placementId, latestConfig.rewardedEnabled)
+                }
+            })
+        }.onFailure { err ->
+            pendingRewardCallback = null
+            onResult(false, err.message ?: "Failed to show Unity Rewarded ad")
+        }
+    }
+
     fun showRewardedAd(
         activity: Activity?,
         placementName: String = "agro_tip_reward",
@@ -737,6 +1121,18 @@ object AdMonetizationManager {
             onResult(false, "Test environment")
             return
         }
+
+        if (cfg.usesDirectUnityAds()) {
+            if (sdkInitialized && loadedDirectRewardedId == cleanId) {
+                showDirectUnityRewarded(activity, cleanId, onResult)
+            } else {
+                pendingRewardCallback = onResult
+                pendingDirectRewardShowActivity = WeakReference(activity)
+                preloadRewarded(activity, cleanId, true)
+            }
+            return
+        }
+
         val ad = rewardedAd
         if (sdkInitialized && ad != null && loadedRewardedUnitId == cleanId && ad.isAdReady()) {
             pendingRewardCallback = onResult
@@ -938,8 +1334,8 @@ object AdMonetizationManager {
 
     fun canRequestSdkAd(context: Context, config: AdConfig, unitOrPlacementId: String, format: AdFormatType): Boolean {
         if (!config.adsEnabled || !config.androidAdsEnabled) return false
-        if (config.mediationAppKey.trim().isEmpty()) {
-            appendLog(AdDebugEventCode.INVALID_APP_KEY, format, message = "Mediation App Key is missing")
+        if (!config.usesDirectUnityAds() && config.mediationAppKey.trim().isEmpty()) {
+            appendLog(AdDebugEventCode.INVALID_APP_KEY, format, message = "Unity Game ID or Mediation App Key is missing")
             return false
         }
         if (unitOrPlacementId.trim().isEmpty()) {
@@ -960,16 +1356,21 @@ object AdMonetizationManager {
     fun resetForTest() {
         latestConfig = AdConfig()
         initializedAppKey = ""
+        initializedUnityGameId = ""
+        isDirectUnityMode = false
         sdkInitialized = false
         sdkInitializing = false
         interstitialAd = null
         loadedInterstitialUnitId = ""
+        loadedDirectInterstitialId = ""
         isLoadingInterstitial = false
         lastInterstitialShownAt = 0L
         rewardedAd = null
         loadedRewardedUnitId = ""
+        loadedDirectRewardedId = ""
         isLoadingRewarded = false
         pendingRewardCallback = null
+        pendingDirectRewardShowActivity = null
         appOpenAd = null
         loadedAppOpenUnitId = ""
         isLoadingAppOpen = false
@@ -1005,8 +1406,10 @@ object AdMonetizationManager {
             updatedFormats[AdFormatType.APP_OPEN] = (updatedFormats[AdFormatType.APP_OPEN] ?: AdFormatTelemetry(AdFormatType.APP_OPEN))
                 .copy(enabled = config.appOpenEnabled, unitOrPlacementId = config.resolvedAppOpenUnitId())
 
+            val directMode = config.usesDirectUnityAds()
             state.copy(
-                activeAppKeyMasked = maskKey(config.mediationAppKey.trim()),
+                mediationPlatform = if (directMode) "Unity Ads 4.16.6 (Direct)" else "Unity LevelPlay 9.2.0",
+                activeAppKeyMasked = if (directMode) "Game ID: ${config.unityGameId.trim()}" else maskKey(config.mediationAppKey.trim()),
                 testModeEnabled = config.adTestMode,
                 adapterStatuses = defaultAdapterStatuses(config, sdkInitialized),
                 formatMetrics = updatedFormats

@@ -87,6 +87,41 @@ fun ProductDetailScreen(
             return@Scaffold
         }
 
+        val isOwnerOrAdmin = (activeUser != null && activeUser.id == product.farmerId) ||
+            uiState.activeRole == UserRole.ADMIN
+        val isBlockedForPublic = !isOwnerOrAdmin &&
+            (product.status == "PENDING_APPROVAL" || product.status == "REJECTED")
+        if (isBlockedForPublic) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("⏳", style = MaterialTheme.typography.displayMedium)
+                    Text(
+                        text = "এই ফসলটি এখনো অ্যাডমিন যাচাইয়ের অপেক্ষায় রয়েছে বা অনুমোদিত নয়।",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "অ্যাডমিন যাচাই ও অনুমোদনের পর সব ক্রেতার জন্য উন্মুক্ত হবে।",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(onClick = onBack) {
+                        Text("ফিরে যান")
+                    }
+                }
+            }
+            return@Scaffold
+        }
+
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()

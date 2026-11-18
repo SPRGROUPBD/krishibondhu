@@ -1048,7 +1048,7 @@ private fun MarketplaceHomeContent(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     items(verifiedFarmers, key = { it.id }) { farmer ->
-                        val count = uiState.products.count { it.farmerId == farmer.id }
+                        val count = uiState.products.count { it.farmerId == farmer.id && it.status == "ACTIVE" }
                         Card(
                             modifier = Modifier
                                 .width(220.dp)
@@ -1120,6 +1120,13 @@ private fun MarketplaceHomeContent(
                     }
                 }
             }
+        }
+
+        item {
+            RewardedMarketTipCard(
+                adConfig = uiState.adConfig,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
         }
 
         item {

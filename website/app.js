@@ -16,6 +16,7 @@ import {
   BD_DIVISIONS,
   BD_DISTRICTS,
   ORDER_STATUS_META,
+  PRODUCT_STATUS_META,
   UNITS,
   BD_DISTRICT_CENTROIDS,
   buildInitialSeedLocations,
@@ -73,6 +74,8 @@ const state = {
   adminPaymentFilter: "ALL",
   adminPaymentQuery: "",
   adminOrderFilter: "ALL",
+  adminProductFilter: "PENDING_APPROVAL",
+  adminProductSearch: "",
   infoTab: "about",
   adConfig: { ...DEFAULT_AD_CONFIG }
 };
@@ -134,6 +137,15 @@ function upsertArrayItem(arr, item) {
   }
 }
 
+function normalizeAdConfig(raw) {
+  const merged = { ...DEFAULT_AD_CONFIG, ...(raw && typeof raw === "object" ? raw : {}) };
+  if (!String(merged.unityGameId || "").trim()) merged.unityGameId = DEFAULT_AD_CONFIG.unityGameId;
+  if (!String(merged.androidBannerId || "").trim()) merged.androidBannerId = DEFAULT_AD_CONFIG.androidBannerId;
+  if (!String(merged.androidInterstitialId || "").trim()) merged.androidInterstitialId = DEFAULT_AD_CONFIG.androidInterstitialId;
+  if (!String(merged.androidRewardedId || "").trim()) merged.androidRewardedId = DEFAULT_AD_CONFIG.androidRewardedId;
+  return merged;
+}
+
 async function initFirebaseRealtime() {
   try {
     const [{ initializeApp, getApps }, dbMod] = await Promise.all([
@@ -188,9 +200,7 @@ async function initFirebaseRealtime() {
       state.orderPayments = root.orderPayments && typeof root.orderPayments === "object"
         ? Object.entries(root.orderPayments).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
-      state.adConfig = root.adConfig && typeof root.adConfig === "object"
-        ? { ...DEFAULT_AD_CONFIG, ...root.adConfig }
-        : { ...DEFAULT_AD_CONFIG };
+      state.adConfig = normalizeAdConfig(root.adConfig);
       state.paymentSettings = root.paymentSettings && typeof root.paymentSettings === "object"
         ? { ...DEFAULT_PAYMENT_SETTINGS, ...root.paymentSettings }
         : { ...DEFAULT_PAYMENT_SETTINGS };
@@ -310,13 +320,8 @@ async function initFirebaseRealtime() {
 
     onValue(child(rtdbRef, "adConfig"), (snap) => {
       const val = snap.val();
-      if (val && typeof val === "object") {
-        state.adConfig = { ...DEFAULT_AD_CONFIG, ...val };
-        renderCurrentView();
-      } else if (val === null) {
-        state.adConfig = { ...DEFAULT_AD_CONFIG };
-        renderCurrentView();
-      }
+      state.adConfig = normalizeAdConfig(val);
+      renderCurrentView();
     });
 
     onValue(child(rtdbRef, "activationPayments"), (snap) => {
@@ -365,6 +370,17 @@ async function rtdbPush(path, data) {
     return true;
   } catch (err) {
     console.warn("RTDB write failed (" + path + "):", err);
+    return false;
+  }
+}
+
+async function rtdbDelete(path) {
+  if (!rtdbRef || !rtdbApi) return false;
+  try {
+    await rtdbApi.remove(rtdbApi.child(rtdbRef, path));
+    return true;
+  } catch (err) {
+    console.warn("RTDB delete failed (" + path + "):", err);
     return false;
   }
 }
@@ -1494,6 +1510,10 @@ function addToCart(productId, qty) {
     showToast("নিজের ফসল নিজে কেনা যাবে না।", "error");
     return;
   }
+  if (product.status === "PENDING_APPROVAL" || product.status === "REJECTED") {
+    showToast("এই ফসলটি এখনো অ্যাডমিন কর্তৃক অনুমোদিত নয়।", "error");
+    return;
+  }
   if (product.status !== "ACTIVE" || product.availableQuantity <= 0) {
     showToast("দুঃখিত, এই ফসলটির মজুত শেষ।", "error");
     return;
@@ -1928,29 +1948,43 @@ async function createFarmerProduct(form) {
     deliveryChargeEstimate: form.supportsDirectDelivery ? fee : 0,
     isWholesale: true,
     isPopular: false,
-    status: "ACTIVE",
+    status: "PENDING_APPROVAL",
     createdAt: now,
     updatedAt: now
   };
 
   state.products.unshift(product);
+  const adminNotif = {
+    id: shortId("not"),
+    userId: SUPERADMIN_CREDENTIALS.userId,
+    targetRole: "ADMIN",
+    senderRole: "FARMER",
+    orderId: "",
+    type: "PRODUCT_APPROVAL_PENDING",
+    titleBn: `নতুন ফসল যাচাইয়ের আবেদন: ${product.nameBn}`,
+    messageBn: `কৃষক ${farmer.fullName} (${farmer.district}) নতুন ফসল "${product.nameBn}" (${formatQty(qty)} মণ, ${formatBdt(price)}/মণ) যোগ করেছেন। অ্যাডমিন অনুমোদনের পর প্রকাশিত হবে।`,
+    isRead: false,
+    createdAt: now
+  };
   const audit = {
     id: shortId("aud"),
     actorId: farmer.id,
     actorRole: farmer.role,
-    actionBn: "নতুন পাইকারি ফসল যুক্ত (ওয়েব)",
+    actionBn: "নতুন পাইকারি ফসল জমা (যাচাই অপেক্ষমাণ)",
     targetEntity: "Product",
     targetId: product.id,
     detailsBn: `${product.nameBn} (${product.district}) — ${formatBdt(product.pricePerUnit)}/মণ`,
     createdAt: now
   };
+  state.notifications.unshift(adminNotif);
   state.auditLogs.unshift(audit);
   saveLocalSnapshot();
 
   await rtdbPush(`products/${product.id}`, product);
+  await rtdbPush(`notifications/${adminNotif.id}`, adminNotif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
-  showToast("আপনার পাইকারি ফসল সফলভাবে যুক্ত ও লাইভ করা হয়েছে!", "success");
+  showToast("আপনার ফসল জমা হয়েছে! অ্যাডমিন যাচাই ও অনুমোদনের পর সবার জন্য প্রকাশিত হবে ✓", "success");
   state.farmerTab = "products";
   renderCurrentView();
   return true;
@@ -1974,11 +2008,18 @@ async function updateFarmerPriceAndStock(productId, newPrice, newStock) {
   prod.availableQuantity = s;
   prod.unit = "মণ";
   prod.isWholesale = true;
-  prod.status = s > 0 ? "ACTIVE" : "OUT_OF_STOCK";
+  if (!["PENDING_APPROVAL", "REJECTED"].includes(prod.status)) {
+    prod.status = s > 0 ? "ACTIVE" : "OUT_OF_STOCK";
+  }
   prod.updatedAt = Date.now();
   saveLocalSnapshot();
   await rtdbPush(`products/${prod.id}`, prod);
-  showToast("দাম ও মজুত আপডেট হয়েছে!", "success");
+  showToast(
+    prod.status === "PENDING_APPROVAL"
+      ? "দাম ও মজুত সংরক্ষিত হয়েছে (অ্যাডমিন অনুমোদনের পর প্রকাশিত হবে)।"
+      : "দাম ও মজুত আপডেট হয়েছে!",
+    "success"
+  );
   renderCurrentView();
 }
 
@@ -2579,6 +2620,161 @@ async function adminResolveComplaint(complaintId) {
   renderCurrentView();
 }
 
+async function adminVerifyProduct(productId, approved, reason = "") {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") {
+    showToast("শুধুমাত্র অ্যাডমিন ফসল যাচাই ও অনুমোদন করতে পারেন।", "error");
+    return false;
+  }
+  const prod = state.products.find((p) => p.id === productId);
+  if (!prod) return false;
+  const now = Date.now();
+  const nextStatus = approved
+    ? Number(prod.availableQuantity || 0) > 0
+      ? "ACTIVE"
+      : "OUT_OF_STOCK"
+    : "REJECTED";
+  prod.status = nextStatus;
+  prod.updatedAt = now;
+
+  const cleanReason = String(reason || "").trim();
+  const farmerNotif = {
+    id: shortId("not"),
+    userId: prod.farmerId,
+    targetRole: "FARMER",
+    senderRole: "ADMIN",
+    orderId: "",
+    type: "PRODUCT_VERIFICATION",
+    titleBn: approved
+      ? `আপনার ফসল "${prod.nameBn}" অনুমোদিত হয়েছে ✓`
+      : `আপনার ফসল "${prod.nameBn}" প্রত্যাখ্যাত হয়েছে`,
+    messageBn: approved
+      ? `অ্যাডমিন যাচাইয়ের পর আপনার "${prod.nameBn}" ফসলটি সবার জন্য উন্মুক্ত করা হয়েছে।`
+      : `অ্যাডমিন আপনার "${prod.nameBn}" ফসলটি অনুমোদন করেননি। ${cleanReason ? "কারণ: " + cleanReason : ""}`,
+    isRead: false,
+    createdAt: now
+  };
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: approved ? "ফসল অনুমোদন (অ্যাডমিন)" : "ফসল প্রত্যাখ্যান (অ্যাডমিন)",
+    targetEntity: "Product",
+    targetId: prod.id,
+    detailsBn: `${prod.nameBn} (${prod.farmerName}) -> ${nextStatus}${cleanReason ? " (" + cleanReason + ")" : ""}`,
+    createdAt: now
+  };
+  state.notifications.unshift(farmerNotif);
+  state.auditLogs.unshift(audit);
+  saveLocalSnapshot();
+
+  await rtdbPush(`products/${prod.id}`, prod);
+  await rtdbPush(`notifications/${farmerNotif.id}`, farmerNotif);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+  closeModal();
+  showToast(approved ? `"${prod.nameBn}" অনুমোদিত ও সবার জন্য প্রকাশিত হয়েছে!` : `"${prod.nameBn}" প্রত্যাখ্যান করা হয়েছে।`, approved ? "success" : "info");
+  renderCurrentView();
+  return true;
+}
+
+async function adminUpdateProduct(productId, form) {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") {
+    showToast("শুধুমাত্র অ্যাডমিন ফসল সম্পাদনা করতে পারেন।", "error");
+    return false;
+  }
+  const prod = state.products.find((p) => p.id === productId);
+  if (!prod) return false;
+
+  const nameBn = String(form.nameBn || "").trim();
+  const price = Number(form.pricePerUnit);
+  const qty = Number(form.availableQuantity);
+  if (!nameBn || Number.isNaN(price) || price <= 0 || Number.isNaN(qty) || qty < 0) {
+    showToast("ফসলের নাম, সঠিক দাম ও মজুত দিন।", "error");
+    return false;
+  }
+  const cat = state.categories.find((c) => c.id === form.categoryId);
+  const requestedStatus = String(form.status || prod.status || "ACTIVE");
+  const normalizedStatus =
+    requestedStatus === "ACTIVE" && qty <= 0
+      ? "OUT_OF_STOCK"
+      : ["PENDING_APPROVAL", "ACTIVE", "REJECTED", "OUT_OF_STOCK"].includes(requestedStatus)
+      ? requestedStatus
+      : prod.status;
+
+  const now = Date.now();
+  prod.nameBn = nameBn;
+  prod.nameEn = nameBn;
+  if (cat) {
+    prod.categoryId = cat.id;
+    prod.categoryNameBn = cat.nameBn;
+  }
+  prod.pricePerUnit = price;
+  prod.availableQuantity = qty;
+  prod.unit = "মণ";
+  prod.isWholesale = true;
+  prod.descriptionBn = String(form.descriptionBn ?? prod.descriptionBn ?? "").trim();
+  prod.status = normalizedStatus;
+  prod.updatedAt = now;
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: "ফসল সম্পাদনা (অ্যাডমিন)",
+    targetEntity: "Product",
+    targetId: prod.id,
+    detailsBn: `${prod.nameBn} — ${formatBdt(prod.pricePerUnit)}/মণ, মজুত ${formatQty(prod.availableQuantity)} মণ (${prod.status})`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+  saveLocalSnapshot();
+
+  await rtdbPush(`products/${prod.id}`, prod);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+  closeModal();
+  showToast(`"${prod.nameBn}" তথ্য সফলভাবে আপডেট হয়েছে!`, "success");
+  renderCurrentView();
+  return true;
+}
+
+async function deleteProduct(productId) {
+  const actor = getActiveUser();
+  const prod = state.products.find((p) => p.id === productId);
+  if (!actor || !prod) return false;
+  if (actor.role !== "ADMIN" && prod.farmerId !== actor.id) {
+    showToast("শুধুমাত্র অ্যাডমিন বা সংশ্লিষ্ট কৃষক এই ফসল মুছতে পারেন।", "error");
+    return false;
+  }
+  const now = Date.now();
+  state.products = state.products.filter((p) => p.id !== productId);
+  state.cart = state.cart.filter((c) => c.productId !== productId);
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: actor.id,
+    actorRole: actor.role,
+    actionBn: actor.role === "ADMIN" ? "ফসল মুছে ফেলা (অ্যাডমিন)" : "ফসল মুছে ফেলা (কৃষক)",
+    targetEntity: "Product",
+    targetId: productId,
+    detailsBn: `${prod.nameBn} (${prod.farmerName}) মুছে ফেলা হয়েছে`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+  saveLocalSnapshot();
+  updateHeaderChrome();
+
+  await rtdbDelete(`products/${productId}`);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+  closeModal();
+  showToast(`"${prod.nameBn}" তালিকা থেকে মুছে ফেলা হয়েছে।`, "info");
+  renderCurrentView();
+  return true;
+}
+
 async function markVisibleNotificationsRead() {
   const visible = getVisibleNotifications().filter((n) => !n.isRead);
   for (const n of visible) {
@@ -2990,7 +3186,13 @@ function renderProductCard(p) {
       <button onclick="window.kbApp.navigate('product-detail', { id: '${escapeHtml(p.id)}' })" class="text-left block w-full relative">
         ${imgHtml}
         <span class="absolute top-3 left-3 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500 text-white shadow">পাইকারি মাত্র</span>
-        ${p.farmerVerified ? `<span class="absolute top-3 right-3 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#168447] text-white shadow">✓ যাচাইকৃত</span>` : ""}
+        ${
+          p.status !== "ACTIVE"
+            ? `<span class="absolute top-3 right-3 px-2.5 py-0.5 rounded-full text-[11px] font-bold shadow ${(PRODUCT_STATUS_META[p.status] || PRODUCT_STATUS_META.PENDING_APPROVAL).color}">${escapeHtml((PRODUCT_STATUS_META[p.status] || PRODUCT_STATUS_META.PENDING_APPROVAL).labelBn)}</span>`
+            : p.farmerVerified
+            ? `<span class="absolute top-3 right-3 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#168447] text-white shadow">✓ যাচাইকৃত</span>`
+            : ""
+        }
       </button>
       <div class="p-4 flex-1 flex flex-col justify-between gap-3">
         <div>
@@ -3428,6 +3630,17 @@ function renderProductDetailPage() {
     return `<div class="bg-white rounded-3xl p-8 text-center"><p>ফসলটি পাওয়া যায়নি।</p><button onclick="window.kbApp.navigate('browse')" class="mt-3 px-4 py-2 rounded-xl bg-[#168447] text-white text-sm">ফিরে যান</button></div>`;
   }
   const viewer = getActiveUser();
+  const canViewUnpublished = Boolean(viewer && (viewer.role === "ADMIN" || viewer.id === prod.farmerId));
+  if ((prod.status === "PENDING_APPROVAL" || prod.status === "REJECTED") && !canViewUnpublished) {
+    return `
+      <div class="bg-white rounded-3xl p-8 text-center border border-amber-200 max-w-lg mx-auto space-y-3">
+        <div class="text-4xl">⏳</div>
+        <h2 class="text-lg font-bold text-[#105B34]">এই ফসলটি এখনো অ্যাডমিন যাচাইয়ের অধীনে রয়েছে</h2>
+        <p class="text-sm text-gray-600">কৃষকের যুক্ত করা নতুন ফসল অ্যাডমিন অনুমোদন করলেই সবার জন্য প্রকাশিত হয়।</p>
+        <button onclick="window.kbApp.navigate('browse')" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">সকল অনুমোদিত ফসল দেখুন</button>
+      </div>
+    `;
+  }
   const viewerActive = viewer && isMarketplaceActive(viewer);
   const farmer = state.users.find((u) => u.id === prod.farmerId);
   const maxQ = Math.max(0.5, Number(prod.availableQuantity || 0));
@@ -4313,15 +4526,16 @@ function renderFarmerProductsTab(myProducts, active) {
   return `
     <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
       ${myProducts
-        .map(
-          (p) => `
+        .map((p) => {
+          const stMeta = PRODUCT_STATUS_META[p.status] || PRODUCT_STATUS_META.PENDING_APPROVAL;
+          return `
           <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
-            <div class="flex justify-between items-start">
+            <div class="flex justify-between items-start gap-2">
               <div>
                 <h3 class="font-bold text-base text-[#105B34]">${escapeHtml(p.nameBn)}</h3>
                 <p class="text-xs text-gray-500">${escapeHtml(p.categoryNameBn)} • ${escapeHtml(p.district)} • ১ মণ = ${MON_TO_KG} কেজি</p>
               </div>
-              <span class="px-2 py-0.5 rounded-full text-[11px] font-bold ${p.status === "ACTIVE" ? "bg-emerald-100 text-emerald-800" : "bg-gray-200 text-gray-700"}">${escapeHtml(p.status)}</span>
+              <span class="px-2 py-0.5 rounded-full text-[11px] font-bold ${stMeta.color}">${escapeHtml(stMeta.labelBn)}</span>
             </div>
             <div class="grid grid-cols-2 gap-2 text-xs">
               <div>
@@ -4334,13 +4548,19 @@ function renderFarmerProductsTab(myProducts, active) {
               </div>
             </div>
             <div class="text-[11px] text-emerald-800 font-semibold">মোট ওজন: ${formatQty(Number(p.availableQuantity || 0) * MON_TO_KG)} কেজি</div>
-            <button ${!active ? "disabled" : ""} onclick="window.kbApp.updateFarmerPriceAndStock('${escapeHtml(p.id)}', document.getElementById('price_${escapeHtml(p.id)}').value, document.getElementById('stock_${escapeHtml(p.id)}').value)"
-              class="w-full py-2.5 rounded-xl bg-[#168447] disabled:opacity-50 text-white text-xs font-bold hover:bg-[#105B34]">
-              আপডেট সংরক্ষণ করুন
-            </button>
+            <div class="flex gap-2">
+              <button ${!active ? "disabled" : ""} onclick="window.kbApp.updateFarmerPriceAndStock('${escapeHtml(p.id)}', document.getElementById('price_${escapeHtml(p.id)}').value, document.getElementById('stock_${escapeHtml(p.id)}').value)"
+                class="flex-1 py-2.5 rounded-xl bg-[#168447] disabled:opacity-50 text-white text-xs font-bold hover:bg-[#105B34]">
+                আপডেট সংরক্ষণ
+              </button>
+              <button onclick="window.kbApp.confirmDeleteProduct('${escapeHtml(p.id)}')"
+                class="px-3 py-2.5 rounded-xl bg-red-50 text-red-700 border border-red-200 text-xs font-bold hover:bg-red-100">
+                🗑️ মুছুন
+              </button>
+            </div>
           </div>
-        `
-        )
+        `;
+        })
         .join("")}
     </div>
   `;
@@ -4764,6 +4984,7 @@ function renderAdminDashboardPage() {
   const expiredUsersCount = nonAdminUsers.filter((u) => u.accountStatus === "EXPIRED").length;
   const suspendedUsersCount = nonAdminUsers.filter((u) => u.accountStatus === "SUSPENDED").length;
   const pendingActCount = state.activationPayments.filter((p) => p.status === "PENDING").length;
+  const pendingProductsCount = state.products.filter((p) => p.status === "PENDING_APPROVAL").length;
   const orderPayVerifyCount = state.orders.filter((o) => !o.farmerPaymentConfirmed && !["PENDING", "CANCELLED", "REJECTED", "COMPLETED"].includes(o.status)).length;
   const validOrders = state.orders.filter((o) => !["CANCELLED", "REJECTED"].includes(o.status));
   const totalSales = validOrders.reduce((s, o) => s + Number(o.productTotal || 0), 0);
@@ -4778,6 +4999,7 @@ function renderAdminDashboardPage() {
     ["overview", "সারসংক্ষেপ"],
     ["payments", `💳 অ্যাক্টিভেশন পেমেন্ট${pendingActCount ? ` (${pendingActCount})` : ""}`],
     ["farmers", `কৃষক ও ক্রেতা (${nonAdminUsers.length})`],
+    ["products", `🌾 ফসল যাচাই${pendingProductsCount ? ` (${pendingProductsCount})` : ""}`],
     ["orders", `অর্ডার (${state.orders.length})`],
     ["payment-settings", "⚙️ পেমেন্ট সেটিংস"],
     ["notifications", "🔔 নোটিফিকেশন পাঠান"],
@@ -4792,9 +5014,9 @@ function renderAdminDashboardPage() {
     const entries = Array.from(districtTotals.entries()).sort((a, b) => b[1] - a[1]);
     bodyHtml = `
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">অপেক্ষমাণ অ্যাক্টিভেশন পেমেন্ট</div><div class="text-2xl font-extrabold text-amber-700">${pendingActCount}</div><div class="text-[11px] text-gray-500 mt-1">মোট আবেদন: ${state.activationPayments.length}</div></div>
+        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">অপেক্ষমাণ অ্যাক্টিভেশন ও ফসল যাচাই</div><div class="text-2xl font-extrabold text-amber-700">${pendingActCount + pendingProductsCount}</div><div class="text-[11px] text-gray-500 mt-1">পেমেন্ট: ${pendingActCount} • ফসল যাচাই বাকি: ${pendingProductsCount}</div></div>
         <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">সক্রিয় অ্যাকাউন্ট (২ বছর)</div><div class="text-2xl font-extrabold text-[#168447]">${activeUsersCount}</div><div class="text-[11px] text-gray-500 mt-1">মেয়াদোত্তীর্ণ: ${expiredUsersCount} • স্থগিত: ${suspendedUsersCount}</div></div>
-        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">কৃষক পেমেন্ট অনুমোদন বাকি</div><div class="text-2xl font-extrabold text-sky-700">${orderPayVerifyCount}</div><div class="text-[11px] text-gray-500 mt-1">মোট বৈধ অর্ডার: ${validOrders.length}</div></div>
+        <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট ফসল (প্রকাশিত/সব)</div><div class="text-2xl font-extrabold text-sky-700">${state.products.filter((p) => p.status === "ACTIVE").length} / ${state.products.length}</div><div class="text-[11px] text-gray-500 mt-1">কৃষক পেমেন্ট বাকি: ${orderPayVerifyCount} • অর্ডার: ${validOrders.length}</div></div>
         <div class="bg-white rounded-2xl p-5 border border-emerald-100"><div class="text-xs text-gray-500">মোট বিক্রয় (${verifiedFarmers} কৃষক • ${verifiedBuyers} ক্রেতা)</div><div class="text-2xl font-extrabold text-[#168447]">${formatBdt(totalSales)}</div></div>
       </div>
       <div class="bg-white rounded-3xl p-6 border border-emerald-100 space-y-3">
@@ -5091,6 +5313,83 @@ function renderAdminDashboardPage() {
         </div>
       </div>
     `;
+  } else if (tab === "products") {
+    const prodFilter = state.adminProductFilter || "PENDING_APPROVAL";
+    const prodSearch = String(state.adminProductSearch || "").trim().toLowerCase();
+    const filteredProducts = state.products
+      .filter((p) => (prodFilter === "ALL" ? true : p.status === prodFilter))
+      .filter((p) => {
+        if (!prodSearch) return true;
+        return (
+          String(p.nameBn || "").toLowerCase().includes(prodSearch) ||
+          String(p.farmerName || "").toLowerCase().includes(prodSearch) ||
+          String(p.categoryNameBn || "").toLowerCase().includes(prodSearch) ||
+          String(p.district || "").toLowerCase().includes(prodSearch)
+        );
+      })
+      .slice()
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+    bodyHtml = `
+      <div class="space-y-4">
+        <div class="bg-white rounded-2xl p-4 border border-emerald-100 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 class="font-bold text-sm text-[#105B34]">🌾 কৃষকের ফসল যাচাই, অনুমোদন, সম্পাদনা ও বাতিল</h3>
+              <p class="text-xs text-gray-600">কৃষক নতুন ফসল যোগ করলে এখানে জমা হয়। অ্যাডমিন অনুমোদন করলে তবেই সবার জন্য উন্মুক্ত হবে; প্রয়োজনে অ্যাডমিন সম্পাদনা বা মুছতে পারবেন।</p>
+            </div>
+            <input type="text" value="${escapeHtml(state.adminProductSearch || "")}" oninput="window.kbApp.setAdminProductSearch(this.value)" placeholder="ফসল, কৃষক বা জেলা খুঁজুন..." class="px-3 py-2 rounded-xl border border-emerald-200 text-xs w-full sm:w-64" />
+          </div>
+          <div class="flex flex-wrap gap-2">
+            ${[
+              ["PENDING_APPROVAL", `যাচাই বাকি (${state.products.filter((p) => p.status === "PENDING_APPROVAL").length})`],
+              ["ALL", `সব ফসল (${state.products.length})`],
+              ["ACTIVE", `প্রকাশিত (${state.products.filter((p) => p.status === "ACTIVE").length})`],
+              ["REJECTED", `প্রত্যাখ্যাত (${state.products.filter((p) => p.status === "REJECTED").length})`]
+            ]
+              .map(([k, lbl]) => `<button onclick="window.kbApp.setAdminProductFilter('${k}')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${prodFilter === k ? "bg-[#105B34] text-white" : "bg-[#EAF7EF] text-[#105B34]"}">${lbl}</button>`)
+              .join("")}
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          ${
+            !filteredProducts.length
+              ? `<div class="bg-white rounded-3xl p-8 text-center text-sm text-gray-500">এই ফিল্টারে কোনো ফসল পাওয়া যায়নি।</div>`
+              : filteredProducts
+                  .map((p) => {
+                    const stMeta = PRODUCT_STATUS_META[p.status] || PRODUCT_STATUS_META.PENDING_APPROVAL;
+                    return `
+                      <div class="bg-white rounded-2xl p-4 border border-emerald-100 flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                          ${
+                            p.imageUri
+                              ? `<img src="${escapeHtml(p.imageUri)}" alt="" class="w-14 h-14 rounded-2xl object-cover border border-emerald-200" />`
+                              : `<div class="w-14 h-14 rounded-2xl bg-[#EAF7EF] flex items-center justify-center text-2xl">🌾</div>`
+                          }
+                          <div class="space-y-1 text-xs">
+                            <div class="flex flex-wrap items-center gap-2">
+                              <span class="font-bold text-sm text-[#105B34]">${escapeHtml(p.nameBn)}</span>
+                              <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${stMeta.color}">${escapeHtml(stMeta.labelBn)}</span>
+                            </div>
+                            <div class="text-gray-700 font-semibold">${escapeHtml(p.categoryNameBn)} • ${formatBdt(p.pricePerUnit)}/মণ • মজুত: ${formatQty(p.availableQuantity)} মণ (${formatQty(Number(p.availableQuantity || 0) * MON_TO_KG)} কেজি)</div>
+                            <div class="text-gray-500">কৃষক: <strong>${escapeHtml(p.farmerName)}</strong> • 📍 ${escapeHtml(p.upazila)}, ${escapeHtml(p.district)}</div>
+                          </div>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                          ${p.status !== "ACTIVE" ? `<button onclick="window.kbApp.adminVerifyProduct('${escapeHtml(p.id)}', true)" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">✓ অনুমোদন ও প্রকাশ</button>` : ""}
+                          ${p.status !== "REJECTED" ? `<button onclick="window.kbApp.openAdminRejectProductModal('${escapeHtml(p.id)}')" class="px-3 py-1.5 rounded-xl bg-amber-600 text-white text-xs font-bold">✕ প্রত্যাখ্যান</button>` : ""}
+                          <button onclick="window.kbApp.openAdminEditProductModal('${escapeHtml(p.id)}')" class="px-3 py-1.5 rounded-xl bg-[#EAF7EF] text-[#105B34] border border-emerald-200 text-xs font-bold">✏️ সম্পাদনা</button>
+                          <button onclick="window.kbApp.confirmDeleteProduct('${escapeHtml(p.id)}')" class="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold">🗑️ মুছুন</button>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join("")
+          }
+        </div>
+      </div>
+    `;
   } else if (tab === "orders") {
     const oFilter = state.adminOrderFilter || "ALL";
     const filteredOrders =
@@ -5170,11 +5469,12 @@ function renderAdminDashboardPage() {
     bodyHtml = `
       <form onsubmit="window.kbApp.handleAdminSaveAdConfig(event)" class="space-y-5">
         <div class="bg-emerald-50 border border-emerald-200 rounded-3xl p-5 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 class="text-lg font-bold text-[#105B34]">💰 Unity LevelPlay (৮টি নেটওয়ার্ক ও ৫ ফরম্যাট) ও ওয়েব মনিটাইজেশন</h3>
-            <p class="text-xs text-gray-700">Android অ্যাপ থেকে AdMob সম্পূর্ণভাবে অপসারণ করা হয়েছে। Unity Ads সরাসরি সক্রিয় করা যায় এবং বাকি ৭টি নেটওয়ার্কের জন্য নিজস্ব পাবলিশার অ্যাকাউন্ট ও অনুমোদন প্রয়োজন। (Firebase RTDB-তে তাৎক্ষণিক সিঙ্ক হবে)</p>
+          <div class="space-y-1">
+            <h3 class="text-lg font-bold text-[#105B34]">💰 Direct Unity Ads (Game ID: 6227313) + LevelPlay (৮ নেটওয়ার্ক)</h3>
+            <p class="text-xs text-gray-700">Android অ্যাপ থেকে AdMob সম্পূর্ণভাবে অপসারণ করা হয়েছে। Unity Ads Game ID <strong>6227313</strong> (Banner_Android, Interstitial_Android, Rewarded_Android) সরাসরি সক্রিয় থাকে; চাইলে LevelPlay App Key যুক্ত করে বাকি ৭টি নেটওয়ার্কও চালাতে পারবেন।</p>
           </div>
-          <div class="flex flex-wrap gap-3 text-xs font-bold">
+          <div class="flex flex-wrap gap-2 text-xs font-bold">
+            <button type="button" onclick="window.kbApp.applyUnityDefaultPreset()" class="px-3 py-2 rounded-xl bg-[#105B34] text-white shadow hover:bg-[#168447]">⚡ Unity Ads 6227313 ডিফল্ট সেট</button>
             <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="adsEnabled" ${cfg.adsEnabled ? "checked" : ""} /> মাস্টার বিজ্ঞাপন চালু</label>
             <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="showAdsLabel" ${cfg.showAdsLabel ? "checked" : ""} /> Sponsored ব্যাজ</label>
             <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-amber-200"><input type="checkbox" name="adTestMode" ${cfg.adTestMode ? "checked" : ""} /> টেস্ট মোড</label>
@@ -5182,20 +5482,20 @@ function renderAdminDashboardPage() {
         </div>
 
         <div class="grid md:grid-cols-2 gap-5">
-          <!-- Unity LevelPlay Mediation & 5 Ad Formats -->
+          <!-- Direct Unity Ads & LevelPlay Mediation & 5 Ad Formats -->
           <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
             <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">1️⃣ Android Mediation — Unity LevelPlay ও ৫ ফরম্যাট</h4>
+              <h4 class="font-bold text-[#105B34]">1️⃣ Android Direct Unity Ads ও LevelPlay ৫ ফরম্যাট</h4>
               <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="androidAdsEnabled" ${cfg.androidAdsEnabled ? "checked" : ""} /> Android বিজ্ঞাপন চালু</label>
             </div>
             <div>
-              <label class="text-xs font-bold block mb-1">Unity LevelPlay App Key *</label>
-              <input name="mediationAppKey" value="${escapeHtml(cfg.mediationAppKey || "")}" placeholder="যেমন: 85460dcd (LevelPlay Dashboard)" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              <label class="text-xs font-bold block mb-1">Unity LevelPlay App Key (ঐচ্ছিক — ফাঁকা থাকলে Direct Unity 6227313 চলবে)</label>
+              <input name="mediationAppKey" value="${escapeHtml(cfg.mediationAppKey || "")}" placeholder="যেমন: 85460dcd (LevelPlay ব্যবহার করলে দিন)" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
             </div>
             <div class="grid grid-cols-2 gap-2.5 pt-1 text-xs">
               <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
                 <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="bannerEnabled" ${cfg.bannerEnabled !== false ? "checked" : ""} /> Adaptive Banner</label>
-                <input name="androidBannerId" value="${escapeHtml(cfg.androidBannerId || "")}" placeholder="Banner Ad Unit ID" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+                <input name="androidBannerId" value="${escapeHtml(cfg.androidBannerId || "Banner_Android")}" placeholder="Banner_Android" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
               </div>
               <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
                 <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="nativeEnabled" ${cfg.nativeEnabled !== false ? "checked" : ""} /> Native Ad</label>
@@ -5203,11 +5503,11 @@ function renderAdminDashboardPage() {
               </div>
               <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
                 <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="interstitialEnabled" ${cfg.interstitialEnabled !== false ? "checked" : ""} /> Interstitial</label>
-                <input name="androidInterstitialId" value="${escapeHtml(cfg.androidInterstitialId || "")}" placeholder="Interstitial Ad Unit ID" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+                <input name="androidInterstitialId" value="${escapeHtml(cfg.androidInterstitialId || "Interstitial_Android")}" placeholder="Interstitial_Android" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
               </div>
               <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
-                <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="rewardedEnabled" ${cfg.rewardedEnabled ? "checked" : ""} /> Rewarded Video</label>
-                <input name="androidRewardedId" value="${escapeHtml(cfg.androidRewardedId || "")}" placeholder="Rewarded Ad Unit ID" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+                <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="rewardedEnabled" ${cfg.rewardedEnabled !== false ? "checked" : ""} /> Rewarded Video</label>
+                <input name="androidRewardedId" value="${escapeHtml(cfg.androidRewardedId || "Rewarded_Android")}" placeholder="Rewarded_Android" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
               </div>
             </div>
             <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1 text-xs">
@@ -5219,11 +5519,11 @@ function renderAdminDashboardPage() {
           <!-- 8 Individual Android Mediation Networks -->
           <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-2.5">
             <h4 class="font-bold text-[#105B34]">2️⃣ ৮টি মিডিয়েশন নেটওয়ার্ক নিয়ন্ত্রণ (AdMob-মুক্ত)</h4>
-            <p class="text-[11px] text-amber-800 bg-amber-50 p-2 rounded-xl border border-amber-200">ℹ️ শুধু <strong>Unity Ads</strong> সরাসরি প্রস্তুত; বাকি ৭টির (AppLovin MAX, Meta, Mintegral, Pangle, InMobi, Liftoff, DT Exchange) জন্য নিজস্ব পাবলিশার অ্যাকাউন্ট ও অনুমোদন আবশ্যক।</p>
+            <p class="text-[11px] text-amber-800 bg-amber-50 p-2 rounded-xl border border-amber-200">ℹ️ শুধু <strong>Unity Ads (6227313)</strong> সরাসরি প্রস্তুত; বাকি ৭টির (AppLovin MAX, Meta, Mintegral, Pangle, InMobi, Liftoff, DT Exchange) জন্য নিজস্ব পাবলিশার অ্যাকাউন্ট ও অনুমোদন আবশ্যক।</p>
             <div class="grid grid-cols-2 gap-2 text-xs">
               <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
                 <label class="font-bold flex items-center gap-1"><input type="checkbox" name="unityAdsEnabled" ${cfg.unityAdsEnabled !== false ? "checked" : ""} /> Unity Ads (প্রস্তুত)</label>
-                <input name="unityGameId" value="${escapeHtml(cfg.unityGameId || "")}" placeholder="Unity Game ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+                <input name="unityGameId" value="${escapeHtml(cfg.unityGameId || "6227313")}" placeholder="6227313" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
               </div>
               <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
                 <label class="font-bold flex items-center gap-1"><input type="checkbox" name="appLovinEnabled" ${cfg.appLovinEnabled ? "checked" : ""} /> AppLovin MAX</label>
@@ -5275,7 +5575,8 @@ function renderAdminDashboardPage() {
             <div>
               <label class="text-xs font-bold block mb-1">অগ্রাধিকার নেটওয়ার্ক</label>
               <select name="mobileAdNetworkPriority" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs bg-white">
-                <option value="ALL" ${(cfg.mobileAdNetworkPriority || "ALL") === "ALL" ? "selected" : ""}>সব সক্রিয় নেটওয়ার্ক (Unity LevelPlay + Web)</option>
+                <option value="ALL" ${(cfg.mobileAdNetworkPriority || "ALL") === "ALL" ? "selected" : ""}>সব সক্রিয় নেটওয়ার্ক (Unity Direct / LevelPlay + Web)</option>
+                <option value="UNITY_DIRECT" ${cfg.mobileAdNetworkPriority === "UNITY_DIRECT" ? "selected" : ""}>Direct Unity Ads (6227313)</option>
                 <option value="UNITY_LEVELPLAY" ${cfg.mobileAdNetworkPriority === "UNITY_LEVELPLAY" ? "selected" : ""}>Unity LevelPlay Mediation</option>
                 <option value="ADSTERRA" ${cfg.mobileAdNetworkPriority === "ADSTERRA" ? "selected" : ""}>Adsterra</option>
                 <option value="MONETAG" ${cfg.mobileAdNetworkPriority === "MONETAG" ? "selected" : ""}>Monetag / PropellerAds</option>
@@ -5911,9 +6212,118 @@ window.kbApp = {
   setAdminPaymentFilter(f) { state.adminPaymentFilter = f; renderCurrentView(); },
   setAdminPaymentQuery(q) { state.adminPaymentQuery = q; renderCurrentView(); },
   setAdminOrderFilter(f) { state.adminOrderFilter = f; renderCurrentView(); },
+  setAdminProductFilter(f) { state.adminProductFilter = f; renderCurrentView(); },
+  setAdminProductSearch(q) { state.adminProductSearch = q; renderCurrentView(); },
   setInfoTab(t) { state.infoTab = t; renderCurrentView(); },
   adminVerifyUser,
   adminVerifyFarmer: adminVerifyUser,
+  adminVerifyProduct,
+  openAdminRejectProductModal(productId) {
+    const prod = state.products.find((p) => p.id === productId);
+    if (!prod) return;
+    openModal(`
+      <h3 class="text-lg font-bold text-[#105B34] mb-3">✕ ফসল প্রত্যাখ্যান করুন (${escapeHtml(prod.nameBn)})</h3>
+      <form onsubmit="window.kbApp.handleAdminRejectProductSubmit(event, '${escapeHtml(productId)}')" class="space-y-3">
+        <div>
+          <label class="text-xs font-bold block mb-1">প্রত্যাখ্যানের কারণ *</label>
+          <textarea name="reason" rows="3" required placeholder="যেমন: পণ্যের দাম বা বিবরণ সঠিক নয়।" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm"></textarea>
+        </div>
+        <div class="flex gap-2 justify-end">
+          <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+          <button type="submit" class="px-4 py-2 rounded-xl bg-red-600 text-white text-xs font-bold">প্রত্যাখ্যান নিশ্চিত</button>
+        </div>
+      </form>
+    `);
+  },
+  async handleAdminRejectProductSubmit(e, productId) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    await adminVerifyProduct(productId, false, fd.get("reason"));
+  },
+  openAdminEditProductModal(productId) {
+    const prod = state.products.find((p) => p.id === productId);
+    if (!prod) return;
+    openModal(`
+      <h3 class="text-lg font-bold text-[#105B34] mb-3">✏️ ফসলের তথ্য সম্পাদনা করুন</h3>
+      <form onsubmit="window.kbApp.handleAdminEditProductSubmit(event, '${escapeHtml(productId)}')" class="space-y-3">
+        <div>
+          <label class="text-xs font-bold block mb-1">ফসলের নাম *</label>
+          <input name="nameBn" required value="${escapeHtml(prod.nameBn)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
+        </div>
+        <div>
+          <label class="text-xs font-bold block mb-1">ক্যাটাগরি *</label>
+          <select name="categoryId" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm bg-white">
+            ${state.categories.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === prod.categoryId ? "selected" : ""}>${escapeHtml(c.emoji || "")} ${escapeHtml(c.nameBn)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs font-bold block mb-1">প্রতি মণের দাম (৳) *</label>
+            <input name="pricePerUnit" type="number" min="1" step="0.5" required value="${prod.pricePerUnit}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm font-bold" />
+          </div>
+          <div>
+            <label class="text-xs font-bold block mb-1">মজুত (মণ) *</label>
+            <input name="availableQuantity" type="number" min="0" step="0.5" required value="${prod.availableQuantity}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm font-bold" />
+          </div>
+        </div>
+        <div>
+          <label class="text-xs font-bold block mb-1">অবস্থা (Status)</label>
+          <select name="status" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm bg-white">
+            <option value="ACTIVE" ${prod.status === "ACTIVE" ? "selected" : ""}>অনুমোদিত ও প্রকাশিত (ACTIVE)</option>
+            <option value="PENDING_APPROVAL" ${prod.status === "PENDING_APPROVAL" ? "selected" : ""}>যাচাই অপেক্ষমাণ (PENDING_APPROVAL)</option>
+            <option value="REJECTED" ${prod.status === "REJECTED" ? "selected" : ""}>প্রত্যাখ্যাত (REJECTED)</option>
+            <option value="OUT_OF_STOCK" ${prod.status === "OUT_OF_STOCK" ? "selected" : ""}>মজুত শেষ (OUT_OF_STOCK)</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-bold block mb-1">বিবরণ</label>
+          <textarea name="descriptionBn" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm">${escapeHtml(prod.descriptionBn || "")}</textarea>
+        </div>
+        <div class="flex gap-2 justify-end">
+          <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+          <button type="submit" class="px-4 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">আপডেট সংরক্ষণ</button>
+        </div>
+      </form>
+    `);
+  },
+  async handleAdminEditProductSubmit(e, productId) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    await adminUpdateProduct(productId, Object.fromEntries(fd.entries()));
+  },
+  confirmDeleteProduct(productId) {
+    const prod = state.products.find((p) => p.id === productId);
+    if (!prod) return;
+    openModal(`
+      <h3 class="text-lg font-bold text-red-700 mb-2">🗑️ ফসলটি স্থায়ীভাবে মুছবেন?</h3>
+      <p class="text-sm text-gray-700 mb-4">"${escapeHtml(prod.nameBn)}" স্থায়ীভাবে ডাটাবেস থেকে মুছে ফেলা হবে।</p>
+      <div class="flex gap-2 justify-end">
+        <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+        <button type="button" onclick="window.kbApp.deleteProductConfirmed('${escapeHtml(productId)}')" class="px-4 py-2 rounded-xl bg-red-600 text-white text-xs font-bold">হ্যাঁ, মুছুন</button>
+      </div>
+    `);
+  },
+  async deleteProductConfirmed(productId) {
+    await deleteProduct(productId);
+  },
+  async applyUnityDefaultPreset() {
+    await adminSaveAdConfig({
+      ...(state.adConfig || DEFAULT_AD_CONFIG),
+      adsEnabled: true,
+      androidAdsEnabled: true,
+      mediationPlatform: "UNITY_DIRECT",
+      mediationAppKey: "",
+      unityAdsEnabled: true,
+      unityGameId: "6227313",
+      bannerEnabled: true,
+      androidBannerId: "Banner_Android",
+      interstitialEnabled: true,
+      androidInterstitialId: "Interstitial_Android",
+      rewardedEnabled: true,
+      androidRewardedId: "Rewarded_Android",
+      adTestMode: false
+    });
+  },
   adminResolveComplaint,
   exportCsvReport,
   markVisibleNotificationsRead,
@@ -6073,12 +6483,15 @@ window.kbApp = {
   async handleAdminSaveAdConfig(e) {
     e.preventDefault();
     const fd = new FormData(e.target);
+    const mediationAppKey = String(fd.get("mediationAppKey") || "").trim();
+    const unityAdsEnabled = fd.get("unityAdsEnabled") === "on";
+    const unityGameId = String(fd.get("unityGameId") || "").trim();
     await adminSaveAdConfig({
       adsEnabled: fd.get("adsEnabled") === "on",
       showAdsLabel: fd.get("showAdsLabel") === "on",
       androidAdsEnabled: fd.get("androidAdsEnabled") === "on",
-      mediationPlatform: "UNITY_LEVELPLAY",
-      mediationAppKey: String(fd.get("mediationAppKey") || "").trim(),
+      mediationPlatform: unityAdsEnabled && !mediationAppKey && unityGameId ? "UNITY_DIRECT" : "UNITY_LEVELPLAY",
+      mediationAppKey,
       adTestMode: fd.get("adTestMode") === "on",
       bannerEnabled: fd.get("bannerEnabled") === "on",
       androidBannerId: String(fd.get("androidBannerId") || "").trim(),
@@ -6090,8 +6503,8 @@ window.kbApp = {
       androidRewardedId: String(fd.get("androidRewardedId") || "").trim(),
       appOpenEnabled: fd.get("appOpenEnabled") === "on",
       androidAppOpenId: String(fd.get("androidAppOpenId") || "").trim(),
-      unityAdsEnabled: fd.get("unityAdsEnabled") === "on",
-      unityGameId: String(fd.get("unityGameId") || "").trim(),
+      unityAdsEnabled,
+      unityGameId,
       appLovinEnabled: fd.get("appLovinEnabled") === "on",
       appLovinSdkKey: String(fd.get("appLovinSdkKey") || "").trim(),
       metaAudienceEnabled: fd.get("metaAudienceEnabled") === "on",

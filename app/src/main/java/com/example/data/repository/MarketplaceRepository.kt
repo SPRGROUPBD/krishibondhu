@@ -986,6 +986,9 @@ class MarketplaceRepository(
         if (requestedQty <= 0.0) {
             return Result.failure(IllegalArgumentException("সঠিক পরিমাণ (মণ) নির্বাচন করুন।"))
         }
+        if (product.status == "PENDING_APPROVAL" || product.status == "REJECTED") {
+            return Result.failure(IllegalArgumentException("এই ফসলটি এখনো অ্যাডমিন কর্তৃক অনুমোদিত নয়।"))
+        }
         if (product.status != "ACTIVE" || product.availableQuantity <= 0.0) {
             return Result.failure(IllegalArgumentException("দুঃখিত, এই ফসলটির মজুত শেষ।"))
         }
@@ -1327,7 +1330,7 @@ class MarketplaceRepository(
             deliveryChargeEstimate = if (supportsDirectDelivery) deliveryCharge else 0.0,
             isWholesale = true,
             isPopular = false,
-            status = "ACTIVE",
+            status = "PENDING_APPROVAL",
             createdAt = now,
             updatedAt = now,
             isDemoRecord = false
@@ -1335,18 +1338,189 @@ class MarketplaceRepository(
         db.productDao().upsertProduct(product)
         rtdbSync.pushProduct(product)
         val totalListingValue = quantity * pricePerUnit
+        val adminNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = "ALL",
+            targetRole = UserRole.ADMIN.name,
+            senderRole = UserRole.FARMER.name,
+            type = "PRODUCT_APPROVAL_PENDING",
+            titleBn = "নতুন ফসল যাচাই অপেক্ষমাণ (${product.nameBn})",
+            messageBn = "কৃষক ${activeFarmer.fullName} (${product.district}) নতুন ফসল '${product.nameBn}' (${quantity.formatQty()} মণ × ${pricePerUnit.formatBdt()}/মণ) যুক্ত করেছেন। অনুমোদনের পর সবার জন্য উন্মুক্ত হবে।",
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(adminNotif)
+        rtdbSync.pushNotification(adminNotif)
         val audit = AuditLogEntity(
             id = "aud_${UUID.randomUUID().toString().take(8)}",
             actorId = activeFarmer.id,
             actorRole = activeFarmer.role,
-            actionBn = "নতুন ফসল যুক্ত",
+            actionBn = "নতুন ফসল জমা (অ্যাডমিন যাচাই অপেক্ষমাণ)",
             targetEntity = "Product",
             targetId = product.id,
-            detailsBn = "${product.nameBn} (${product.district}) — ${quantity.formatQty()} মণ × ${pricePerUnit.formatBdt()}/মণ = ${totalListingValue.formatBdt()}"
+            detailsBn = "${product.nameBn} (${product.district}) — ${quantity.formatQty()} মণ × ${pricePerUnit.formatBdt()}/মণ = ${totalListingValue.formatBdt()} [PENDING_APPROVAL]"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)
         return Result.success(product)
+    }
+
+    suspend fun adminVerifyProduct(
+        admin: UserEntity,
+        productId: String,
+        approved: Boolean,
+        reason: String = ""
+    ): Result<ProductEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন ফসল যাচাই ও অনুমোদন করতে পারেন।"))
+        }
+        val existing = db.productDao().getProductById(productId)
+            ?: return Result.failure(IllegalArgumentException("ফসলটি পাওয়া যায়নি।"))
+        val now = System.currentTimeMillis()
+        val targetStatus = if (approved) {
+            if (existing.availableQuantity > 0.0) "ACTIVE" else "OUT_OF_STOCK"
+        } else {
+            "REJECTED"
+        }
+        val updated = existing.copy(
+            status = targetStatus,
+            updatedAt = now
+        )
+        db.productDao().upsertProduct(updated)
+        rtdbSync.pushProduct(updated)
+
+        val farmerNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = existing.farmerId,
+            targetRole = UserRole.FARMER.name,
+            senderRole = UserRole.ADMIN.name,
+            type = if (approved) "PRODUCT_APPROVED" else "PRODUCT_REJECTED",
+            titleBn = if (approved) "আপনার ফসল অনুমোদিত হয়েছে (${existing.nameBn})" else "ফসল তালিকাভুক্তি প্রত্যাখ্যাত (${existing.nameBn})",
+            messageBn = if (approved) {
+                "অ্যাডমিন আপনার '${existing.nameBn}' ফসলটি অনুমোদন করেছেন এবং এখন সব ক্রেতার জন্য উন্মুক্ত।"
+            } else {
+                reason.ifBlank { "অ্যাডমিন আপনার '${existing.nameBn}' ফসলটি অনুমোদন করেননি। সঠিক তথ্য দিয়ে পুনরায় জমা দিন।" }
+            },
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(farmerNotif)
+        rtdbSync.pushNotification(farmerNotif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = if (approved) "ফসল অনুমোদন (ACTIVE)" else "ফসল প্রত্যাখ্যান (REJECTED)",
+            targetEntity = "Product",
+            targetId = productId,
+            detailsBn = "${existing.nameBn} (কৃষক: ${existing.farmerName}) -> $targetStatus ${if (reason.isNotBlank()) "($reason)" else ""}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updated)
+    }
+
+    suspend fun adminUpdateProduct(
+        admin: UserEntity,
+        productId: String,
+        nameBn: String,
+        category: CategoryEntity,
+        pricePerUnit: Double,
+        availableQuantity: Double,
+        descriptionBn: String,
+        status: String
+    ): Result<ProductEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন ফসল সম্পাদনা করতে পারেন।"))
+        }
+        val existing = db.productDao().getProductById(productId)
+            ?: return Result.failure(IllegalArgumentException("ফসলটি পাওয়া যায়নি।"))
+        val cleanName = nameBn.trim()
+        if (cleanName.isBlank() || pricePerUnit <= 0.0 || availableQuantity < 0.0) {
+            return Result.failure(IllegalArgumentException("ফসলের সঠিক নাম, প্রতি মণের দাম ও মজুত পরিমাণ দিন।"))
+        }
+        val normalizedStatus = when (status.trim().uppercase()) {
+            "ACTIVE" -> if (availableQuantity > 0.0) "ACTIVE" else "OUT_OF_STOCK"
+            "OUT_OF_STOCK" -> "OUT_OF_STOCK"
+            "REJECTED" -> "REJECTED"
+            "PENDING_APPROVAL" -> "PENDING_APPROVAL"
+            else -> if (availableQuantity > 0.0) "ACTIVE" else "OUT_OF_STOCK"
+        }
+        val now = System.currentTimeMillis()
+        val updated = existing.copy(
+            nameBn = cleanName,
+            nameEn = cleanName,
+            categoryId = category.id,
+            categoryNameBn = category.nameBn,
+            pricePerUnit = pricePerUnit,
+            availableQuantity = availableQuantity,
+            unit = ProductUnit.MON.labelBn,
+            isWholesale = true,
+            descriptionBn = descriptionBn.trim(),
+            status = normalizedStatus,
+            updatedAt = now
+        )
+        db.productDao().upsertProduct(updated)
+        rtdbSync.pushProduct(updated)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "অ্যাডমিন কর্তৃক ফসল সম্পাদনা",
+            targetEntity = "Product",
+            targetId = productId,
+            detailsBn = "$cleanName (${category.nameBn}) — ${pricePerUnit.formatBdt()}/মণ, মজুত: ${availableQuantity.formatQty()} মণ, অবস্থা: $normalizedStatus"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updated)
+    }
+
+    suspend fun deleteProduct(actor: UserEntity, productId: String): Result<Unit> {
+        val existing = db.productDao().getProductById(productId)
+            ?: return Result.failure(IllegalArgumentException("ফসলটি পাওয়া যায়নি।"))
+        val isAdmin = actor.role == UserRole.ADMIN.name
+        val isOwnerFarmer = actor.role == UserRole.FARMER.name && existing.farmerId == actor.id
+        if (!isAdmin && !isOwnerFarmer) {
+            return Result.failure(IllegalAccessException("এই ফসলটি মুছে ফেলার অনুমতি নেই।"))
+        }
+        val now = System.currentTimeMillis()
+        db.withTransaction {
+            db.productDao().deleteProductById(productId)
+            db.cartDao().deleteCartItemsForProduct(productId)
+        }
+        rtdbSync.deleteProduct(productId)
+
+        if (isAdmin && existing.farmerId != actor.id) {
+            val farmerNotif = NotificationEntity(
+                id = "not_${UUID.randomUUID().toString().take(8)}",
+                userId = existing.farmerId,
+                targetRole = UserRole.FARMER.name,
+                senderRole = UserRole.ADMIN.name,
+                type = "PRODUCT_DELETED",
+                titleBn = "ফসল তালিকা থেকে সরানো হয়েছে (${existing.nameBn})",
+                messageBn = "অ্যাডমিন '${existing.nameBn}' ফসলটি মার্কেটপ্লেস থেকে মুছে ফেলেছেন।",
+                isRead = false,
+                createdAt = now
+            )
+            db.notificationAuditDao().insertNotification(farmerNotif)
+            rtdbSync.pushNotification(farmerNotif)
+        }
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = actor.id,
+            actorRole = actor.role,
+            actionBn = if (isAdmin) "অ্যাডমিন কর্তৃক ফসল মুছে ফেলা" else "কৃষক কর্তৃক নিজস্ব ফসল মুছে ফেলা",
+            targetEntity = "Product",
+            targetId = productId,
+            detailsBn = "${existing.nameBn} (কৃষক: ${existing.farmerName})"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(Unit)
     }
 
     suspend fun updateFarmerPriceAndStock(

@@ -211,8 +211,10 @@ class ExampleRobolectricTest {
             isWholesale = false
         ).getOrThrow()
 
-        assertTrue(repo.addToCart(prod1, 2.0, buyer).isSuccess)
-        assertTrue(repo.addToCart(prod2, 5.0, buyer).isSuccess)
+        val approvedProd1 = repo.adminVerifyProduct(admin, prod1.id, approved = true).getOrThrow()
+        val approvedProd2 = repo.adminVerifyProduct(admin, prod2.id, approved = true).getOrThrow()
+        assertTrue(repo.addToCart(approvedProd1, 2.0, buyer).isSuccess)
+        assertTrue(repo.addToCart(approvedProd2, 5.0, buyer).isSuccess)
 
         val ordersResult = repo.placeOrdersFromCart(
             buyer = buyer,
@@ -314,7 +316,8 @@ class ExampleRobolectricTest {
             isWholesale = false
         ).getOrThrow()
 
-        repo.addToCart(prod, 2.0, buyer)
+        val approvedProd = repo.adminVerifyProduct(admin, prod.id, approved = true).getOrThrow()
+        repo.addToCart(approvedProd, 2.0, buyer)
         val order = repo.placeOrdersFromCart(
             buyer = buyer,
             deliveryOption = DeliveryOption.FARM_PICKUP,
@@ -1042,8 +1045,9 @@ class ExampleRobolectricTest {
             isWholesale = false
         ).getOrThrow()
 
-        // Step 1: Buyer places wholesale order -> starts PAYMENT_PENDING
-        repo.addToCart(prod, 10.0, buyer).getOrThrow()
+        // Step 1: Admin approves product, then buyer places wholesale order -> starts PAYMENT_PENDING
+        val approvedProd = repo.adminVerifyProduct(admin, prod.id, approved = true).getOrThrow()
+        repo.addToCart(approvedProd, 10.0, buyer).getOrThrow()
         val order = repo.placeOrdersFromCart(
             buyer = buyer,
             deliveryOption = DeliveryOption.FARM_PICKUP,
@@ -1494,8 +1498,11 @@ class ExampleRobolectricTest {
         assertTrue(product.isWholesale)
         assertEquals("মণ", product.unit)
 
+        // Admin approves crop before buyer can order it
+        val approvedProduct = repo.adminVerifyProduct(admin, product.id, approved = true).getOrThrow()
+
         // Order total = ৳100, buyer advance = ৳50
-        repo.addToCart(product, 1.0, buyer).getOrThrow()
+        repo.addToCart(approvedProduct, 1.0, buyer).getOrThrow()
         val placed = repo.placeOrdersFromCart(
             buyer = buyer,
             deliveryOption = DeliveryOption.FARM_PICKUP,
@@ -1636,7 +1643,8 @@ class ExampleRobolectricTest {
             deliveryCharge = 0.0
         ).getOrThrow()
 
-        repo.addToCart(prod, 1.0, buyer).getOrThrow()
+        val approvedProd = repo.adminVerifyProduct(admin, prod.id, approved = true).getOrThrow()
+        repo.addToCart(approvedProd, 1.0, buyer).getOrThrow()
         val order = repo.placeOrdersFromCart(
             buyer = buyer,
             deliveryOption = DeliveryOption.FARM_PICKUP,
@@ -1656,6 +1664,170 @@ class ExampleRobolectricTest {
 
         assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isSuccess)
         assertEquals(OrderStatus.COMPLETED.name, db.orderDao().getOrderById(order.id)!!.status)
+    }
+
+    @Test
+    fun directUnityAds6227313DefaultsAndHydrationAreActive() {
+        val defaultConfig = com.example.data.model.AdConfig()
+        assertEquals("6227313", defaultConfig.unityGameId)
+        assertEquals("Banner_Android", defaultConfig.androidBannerId)
+        assertEquals("Interstitial_Android", defaultConfig.androidInterstitialId)
+        assertEquals("Rewarded_Android", defaultConfig.androidRewardedId)
+        assertTrue(defaultConfig.adsEnabled)
+        assertTrue(defaultConfig.androidAdsEnabled)
+        assertTrue(defaultConfig.unityAdsEnabled)
+        assertTrue(defaultConfig.rewardedEnabled)
+        assertTrue(defaultConfig.usesDirectUnityAds())
+
+        val legacyBlankConfig = com.example.data.model.AdConfig(
+            mediationAppKey = "",
+            unityGameId = "",
+            androidBannerId = "",
+            androidInterstitialId = "",
+            androidRewardedId = ""
+        )
+        val hydrated = legacyBlankConfig.hydratedWithDefaults()
+        assertEquals("6227313", hydrated.unityGameId)
+        assertEquals("Banner_Android", hydrated.androidBannerId)
+        assertEquals("Interstitial_Android", hydrated.androidInterstitialId)
+        assertEquals("Rewarded_Android", hydrated.androidRewardedId)
+        assertTrue(hydrated.usesDirectUnityAds())
+
+        com.example.ads.AdMonetizationManager.resetForTest()
+        com.example.ads.AdMonetizationManager.syncConfig(context, hydrated)
+        val telemetry = com.example.ads.AdMonetizationManager.telemetry.value
+        assertTrue(telemetry.mediationPlatform.contains("Unity", ignoreCase = true))
+        assertEquals("Banner_Android", telemetry.formatMetrics[com.example.ads.AdFormatType.BANNER]?.unitOrPlacementId)
+        assertEquals("Interstitial_Android", telemetry.formatMetrics[com.example.ads.AdFormatType.INTERSTITIAL]?.unitOrPlacementId)
+        assertEquals("Rewarded_Android", telemetry.formatMetrics[com.example.ads.AdFormatType.REWARDED]?.unitOrPlacementId)
+        val unityAdapter = telemetry.adapterStatuses.first { it.key == "unity_ads" }
+        assertTrue(unityAdapter.enabledInConfig)
+        assertTrue(unityAdapter.appKeyConfigured)
+    }
+
+    @Test
+    fun farmerCropRequiresAdminApprovalAndAdminCanEditOrDelete() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val categories = repo.categories.first()
+        val firstCat = categories[0]
+        val secondCat = categories[1]
+
+        val farmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "অনুমোদন পরীক্ষক কৃষক",
+                phone = "01733330001",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "কুমারখালী",
+                unionName = "",
+                village = "",
+                nidLastFour = "4444",
+                farmBio = "ধান"
+            ).getOrThrow()
+        )
+        val buyer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "অনুমোদন পরীক্ষক ক্রেতা",
+                phone = "01733330002",
+                rawPassword = "pass1234",
+                role = UserRole.BUYER,
+                division = "ঢাকা",
+                district = "ঢাকা",
+                upazila = "সাভার",
+                unionName = "",
+                village = "",
+                nidLastFour = "",
+                farmBio = ""
+            ).getOrThrow()
+        )
+
+        // Farmer creates product -> starts PENDING_APPROVAL and notifies Admin
+        val created = repo.createFarmerProduct(
+            farmer = farmer,
+            category = firstCat,
+            nameBn = "কাটারিভোগ ধান",
+            descriptionBn = "নতুন ফসল",
+            imageUri = "",
+            quantity = 12.0,
+            unit = ProductUnit.MON.labelBn,
+            pricePerUnit = 1500.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0
+        ).getOrThrow()
+        assertEquals("PENDING_APPROVAL", created.status)
+        assertTrue(repo.notifications.first().any { it.targetRole == UserRole.ADMIN.name && it.type == "PRODUCT_APPROVAL_PENDING" })
+
+        // Hidden from public/buyer feed & cannot be added to cart before admin approves
+        val unapprovedUiState = com.example.ui.viewmodel.MarketplaceUiState(
+            isLoading = false,
+            products = listOf(created)
+        )
+        assertEquals(0, unapprovedUiState.filteredProducts.size)
+        assertTrue(repo.addToCart(created, 1.0, buyer).isFailure)
+
+        // Farmer updating stock/price cannot bypass PENDING_APPROVAL
+        repo.updateFarmerPriceAndStock(
+            productId = created.id,
+            farmerId = farmer.id,
+            newPrice = 1550.0,
+            newStock = 15.0
+        ).getOrThrow()
+        assertEquals("PENDING_APPROVAL", db.productDao().getProductById(created.id)!!.status)
+
+        // Non-admin cannot approve or edit
+        assertTrue(repo.adminVerifyProduct(buyer, created.id, approved = true).isFailure)
+        assertTrue(
+            repo.adminUpdateProduct(
+                admin = buyer,
+                productId = created.id,
+                nameBn = "হ্যাকড",
+                category = secondCat,
+                pricePerUnit = 999.0,
+                availableQuantity = 5.0,
+                descriptionBn = "",
+                status = "ACTIVE"
+            ).isFailure
+        )
+
+        // Admin approves -> becomes ACTIVE, visible in feed, buyer can add to cart
+        val approved = repo.adminVerifyProduct(admin, created.id, approved = true).getOrThrow()
+        assertEquals("ACTIVE", approved.status)
+        val approvedUiState = com.example.ui.viewmodel.MarketplaceUiState(
+            isLoading = false,
+            products = listOf(approved)
+        )
+        assertEquals(1, approvedUiState.filteredProducts.size)
+        assertTrue(repo.addToCart(approved, 2.0, buyer).isSuccess)
+
+        // Admin edits product details
+        val edited = repo.adminUpdateProduct(
+            admin = admin,
+            productId = created.id,
+            nameBn = "উন্নত কাটারিভোগ চাল",
+            category = secondCat,
+            pricePerUnit = 2100.0,
+            availableQuantity = 20.0,
+            descriptionBn = "যাচাইকৃত প্রিমিয়াম মান",
+            status = "ACTIVE"
+        ).getOrThrow()
+        assertEquals("উন্নত কাটারিভোগ চাল", edited.nameBn)
+        assertEquals(secondCat.id, edited.categoryId)
+        assertEquals(2100.0, edited.pricePerUnit, 0.01)
+        assertEquals(20.0, edited.availableQuantity, 0.01)
+
+        // Admin deletes product -> removed from products DB and buyer cart
+        assertTrue(repo.deleteProduct(admin, created.id).isSuccess)
+        assertNull(db.productDao().getProductById(created.id))
+        assertTrue(db.cartDao().observeCartItems().first().none { it.productId == created.id })
     }
 }
 

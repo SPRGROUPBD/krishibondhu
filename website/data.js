@@ -23,21 +23,21 @@ export const DEFAULT_AD_CONFIG = {
   adsEnabled: true,
   showAdsLabel: true,
   androidAdsEnabled: true,
-  mediationPlatform: "UNITY_LEVELPLAY",
+  mediationPlatform: "UNITY_DIRECT",
   mediationAppKey: "",
   adTestMode: false,
   bannerEnabled: true,
-  androidBannerId: "",
+  androidBannerId: "Banner_Android",
   nativeEnabled: true,
   androidNativePlacement: "",
   interstitialEnabled: true,
-  androidInterstitialId: "",
-  rewardedEnabled: false,
-  androidRewardedId: "",
+  androidInterstitialId: "Interstitial_Android",
+  rewardedEnabled: true,
+  androidRewardedId: "Rewarded_Android",
   appOpenEnabled: false,
   androidAppOpenId: "",
   unityAdsEnabled: true,
-  unityGameId: "",
+  unityGameId: "6227313",
   appLovinEnabled: false,
   appLovinSdkKey: "",
   metaAudienceEnabled: false,
@@ -270,6 +270,13 @@ export const ORDER_STATUS_META = {
   COMPLETED: { labelBn: "সম্পন্ন", labelEn: "Completed", color: "bg-green-100 text-green-800" },
   CANCELLED: { labelBn: "বাতিল", labelEn: "Cancelled", color: "bg-gray-200 text-gray-700" },
   DISPUTED: { labelBn: "বিরোধপূর্ণ", labelEn: "Disputed", color: "bg-rose-100 text-rose-800" }
+};
+
+export const PRODUCT_STATUS_META = {
+  PENDING_APPROVAL: { labelBn: "অ্যাডমিন যাচাই অপেক্ষমাণ", labelEn: "Pending Admin Approval", color: "bg-amber-100 text-amber-800" },
+  ACTIVE: { labelBn: "অনুমোদিত (সবার জন্য উন্মুক্ত)", labelEn: "Active / Published", color: "bg-emerald-100 text-emerald-800" },
+  REJECTED: { labelBn: "অ্যাডমিন কর্তৃক প্রত্যাখ্যাত", labelEn: "Rejected", color: "bg-red-100 text-red-700" },
+  OUT_OF_STOCK: { labelBn: "মজুত শেষ", labelEn: "Out of Stock", color: "bg-gray-200 text-gray-700" }
 };
 
 // Mon-only selling unit (1 মণ = 40 কেজি); KG option is removed platform-wide

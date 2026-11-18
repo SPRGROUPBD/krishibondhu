@@ -1,6 +1,9 @@
 package com.example.ui.components
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.net.http.SslError
@@ -24,6 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -40,7 +44,6 @@ import androidx.core.net.toUri
 import coil.compose.AsyncImage
 import com.example.ads.AdFormatType
 import com.example.ads.AdMonetizationManager
-import com.example.ads.SdkInitStatus
 import com.example.data.model.AdConfig
 import com.example.ui.theme.DarkGreen
 import com.example.ui.theme.HarvestGoldLight
@@ -57,6 +60,14 @@ import com.unity3d.mediation.LevelPlayAdInfo
 import com.unity3d.mediation.LevelPlayAdSize
 import com.unity3d.mediation.banner.LevelPlayBannerAdView
 import com.unity3d.mediation.banner.LevelPlayBannerAdViewListener
+import com.unity3d.services.banners.BannerErrorInfo
+import com.unity3d.services.banners.BannerView
+import com.unity3d.services.banners.UnityBannerSize
+
+private fun Context.findActivity(): Activity? =
+    generateSequence(this) { (it as? ContextWrapper)?.baseContext }
+        .filterIsInstance<Activity>()
+        .firstOrNull()
 
 @Composable
 fun AdBannerSection(
@@ -85,11 +96,17 @@ fun AdBannerSection(
     val sdkReadyOrTest = AdMonetizationManager.isTestEnvironment() ||
         telemetry.sdkInitStatus == com.example.ads.SdkInitStatus.SUCCESS
 
+    val showDirectUnityBanner = adConfig.usesDirectUnityAds() &&
+        adConfig.bannerEnabled &&
+        bannerUnitId.isNotBlank() &&
+        (allows("UNITY") || allows("LEVELPLAY") || allows("UNITY_LEVELPLAY")) &&
+        (AdMonetizationManager.isTestEnvironment() || (isOnline && sdkReadyOrTest))
+
     val showMediatedBanner = adConfig.androidAdsEnabled &&
         adConfig.bannerEnabled &&
         adConfig.mediationAppKey.isNotBlank() &&
         bannerUnitId.isNotBlank() &&
-        allows("LEVELPLAY") &&
+        (allows("LEVELPLAY") || allows("UNITY_LEVELPLAY")) &&
         (AdMonetizationManager.isTestEnvironment() || (isOnline && sdkReadyOrTest))
 
     val showMediatedNative = adConfig.androidAdsEnabled &&
@@ -103,12 +120,12 @@ fun AdBannerSection(
         (AdMonetizationManager.isTestEnvironment() || isOnline)
     val showSponsor = adConfig.sponsorEnabled &&
         adConfig.sponsorTitle.isNotBlank() &&
-        (allows("SPONSOR") || (!showMediatedBanner && !showMobileWebAd))
+        (allows("SPONSOR") || (!showMediatedBanner && !showDirectUnityBanner && !showMobileWebAd))
 
     val directLink = adConfig.mobileDirectLinkUrl.trim()
         .takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
-    if (!showSponsor && !showMediatedBanner && !showMediatedNative && !showMobileWebAd && directLink == null) return
+    if (!showSponsor && !showDirectUnityBanner && !showMediatedBanner && !showMediatedNative && !showMobileWebAd && directLink == null) return
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -274,6 +291,15 @@ fun AdBannerSection(
             }
         }
 
+        // 2b. Direct Unity Ads Banner (Unity Game ID + Banner_Android — Zero AdMob)
+        if (showDirectUnityBanner) {
+            DirectUnityBannerAdCard(
+                placementId = bannerUnitId,
+                placementTag = placementTag,
+                showAdsLabel = adConfig.showAdsLabel
+            )
+        }
+
         // 3. Unity LevelPlay Adaptive Banner (Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff, DT Exchange — Zero AdMob)
         if (showMediatedBanner) {
             var bannerFailed by remember(bannerUnitId, placementTag) { mutableStateOf(false) }
@@ -393,6 +419,226 @@ fun AdBannerSection(
                 placementName = nativePlacement,
                 showAdsLabel = adConfig.showAdsLabel
             )
+        }
+    }
+}
+
+@Composable
+private fun DirectUnityBannerAdCard(
+    placementId: String,
+    placementTag: String,
+    showAdsLabel: Boolean
+) {
+    var bannerFailed by remember(placementId, placementTag) { mutableStateOf(false) }
+    if (bannerFailed) return
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (showAdsLabel) {
+                Text(
+                    text = "Sponsored Ad • Unity Ads",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+            if (AdMonetizationManager.isTestEnvironment()) {
+                Surface(
+                    color = LightGreen,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("unity_banner_$placementTag")
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "Unity Banner ($placementId / $placementTag)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = DarkGreen
+                        )
+                    }
+                }
+            } else {
+                key(placementId, placementTag) {
+                    var bannerViewHolder by remember { mutableStateOf<BannerView?>(null) }
+                    DisposableEffect(placementId, placementTag) {
+                        onDispose {
+                            runCatching { bannerViewHolder?.destroy() }
+                            bannerViewHolder = null
+                        }
+                    }
+                    AndroidView(
+                        factory = { ctx ->
+                            val host = ctx.findActivity() ?: ctx
+                            runCatching {
+                                val size = UnityBannerSize.getDynamicSize(host)
+                                BannerView(host, placementId, size).apply {
+                                    listener = object : BannerView.IListener {
+                                        override fun onBannerLoaded(bannerAdView: BannerView?) {
+                                            bannerFailed = false
+                                            AdMonetizationManager.trackFormatLoaded(AdFormatType.BANNER, "Unity Ads")
+                                        }
+
+                                        override fun onBannerShown(bannerAdView: BannerView?) {
+                                            AdMonetizationManager.trackFormatDisplayed(AdFormatType.BANNER, "Unity Ads")
+                                        }
+
+                                        override fun onBannerClick(bannerAdView: BannerView?) = Unit
+
+                                        override fun onBannerFailedToLoad(
+                                            bannerAdView: BannerView?,
+                                            errorInfo: BannerErrorInfo?
+                                        ) {
+                                            bannerFailed = true
+                                            AdMonetizationManager.trackFormatFailed(
+                                                AdFormatType.BANNER,
+                                                errorInfo?.errorCode?.ordinal ?: -1,
+                                                errorInfo?.errorMessage ?: "Unity banner failed to load"
+                                            )
+                                        }
+
+                                        override fun onBannerLeftApplication(bannerAdView: BannerView?) = Unit
+                                    }
+                                    AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, placementId)
+                                    load()
+                                }.also { bannerViewHolder = it }
+                            }.getOrElse { err ->
+                                bannerFailed = true
+                                AdMonetizationManager.trackFormatFailed(
+                                    AdFormatType.BANNER,
+                                    -1,
+                                    err.message ?: "Unity BannerView creation error"
+                                )
+                                FrameLayout(ctx)
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 50.dp)
+                            .testTag("unity_banner_$placementTag")
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RewardedMarketTipCard(
+    adConfig: AdConfig,
+    modifier: Modifier = Modifier
+) {
+    if (!adConfig.adsEnabled || !adConfig.androidAdsEnabled || !adConfig.rewardedEnabled) return
+    val rewardedId = adConfig.resolvedRewardedUnitId()
+    if (rewardedId.isBlank()) return
+    val hasAdConfig = adConfig.usesDirectUnityAds() || adConfig.mediationAppKey.isNotBlank()
+    if (!hasAdConfig) return
+
+    val context = LocalContext.current
+    var unlockedTip by remember { mutableStateOf<String?>(null) }
+    var statusMessage by remember { mutableStateOf<String?>(null) }
+
+    val tips = remember {
+        listOf(
+            "🌾 পাইকারি পরামর্শ: মণ প্রতি আর্দ্রতা ১৪% এর নিচে থাকলে ধান ও ভুট্টা সংরক্ষণে ভালো পাইকারি দাম পাওয়া যায়।",
+            "🧅 সংরক্ষণ টিপস: পেঁয়াজ ও আলু ছায়াযুক্ত ও বাতাস চলাচল করে এমন মাচায় রাখলে পচন ৩০% পর্যন্ত কমে।",
+            "📦 পরিবহন টিপস: সরাসরি খামার থেকে পাইকারি পিকআপে মধ্যস্বত্বভোগীর ৫–১২% খরচ সাশ্রয় হয়।"
+        )
+    }
+
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = HarvestGoldLight),
+        border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.3f)),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("rewarded_market_tip_card")
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.PlayCircle, contentDescription = null, tint = DarkGreen)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "দৈনিক পাইকারি কৃষি টিপস (Rewarded Video)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkGreen
+                    )
+                }
+                if (adConfig.showAdsLabel) {
+                    Surface(color = LightGreen, shape = RoundedCornerShape(6.dp)) {
+                        Text(
+                            text = "Ad",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = DarkGreen,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            if (unlockedTip != null) {
+                Text(
+                    text = unlockedTip!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = DarkGreen,
+                    fontWeight = FontWeight.SemiBold
+                )
+            } else {
+                Text(
+                    text = "একটি ছোট ভিডিও বিজ্ঞাপন দেখে আজকের ফসল সংরক্ষণ ও পাইকারি বাজারের বিশেষ টিপস দেখুন।",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            if (!statusMessage.isNullOrBlank()) {
+                Text(
+                    text = statusMessage!!,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = DarkGreen
+                )
+            }
+
+            Button(
+                onClick = {
+                    statusMessage = "বিজ্ঞাপন লোড হচ্ছে..."
+                    AdMonetizationManager.showRewardedAd(
+                        activity = context.findActivity(),
+                        placementName = rewardedId
+                    ) { rewarded, detail ->
+                        if (rewarded) {
+                            unlockedTip = tips.random()
+                            statusMessage = "✓ ধন্যবাদ! টিপস আনলক হয়েছে।"
+                        } else {
+                            statusMessage = detail
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("watch_rewarded_ad_button")
+            ) {
+                Icon(Icons.Filled.PlayCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(if (unlockedTip == null) "ভিডিও দেখে টিপস আনলক করুন" else "আরেকটি টিপস দেখুন")
+            }
         }
     }
 }

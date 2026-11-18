@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.MyLocation
@@ -77,7 +78,8 @@ fun SellScreen(
         deliveryCharge: Double,
         isWholesale: Boolean
     ) -> Unit,
-    onUpdatePriceAndStock: (productId: String, newPrice: Double, newStock: Double) -> Unit
+    onUpdatePriceAndStock: (productId: String, newPrice: Double, newStock: Double) -> Unit,
+    onDeleteProduct: (productId: String) -> Unit = {}
 ) {
     val activeUser = uiState.activeUser
     val lang = uiState.language
@@ -154,6 +156,7 @@ fun SellScreen(
 
     var showAddForm by remember { mutableStateOf(false) }
     var editingProduct by remember { mutableStateOf<ProductEntity?>(null) }
+    var deletingProduct by remember { mutableStateOf<ProductEntity?>(null) }
 
     LazyColumn(
         modifier = Modifier
@@ -310,6 +313,13 @@ fun SellScreen(
             }
         } else {
             items(myProducts, key = { it.id }) { prod ->
+                val (statusLabelBn, statusBg, statusFg) = when (prod.status.uppercase()) {
+                    "PENDING_APPROVAL" -> Triple("অ্যাডমিন যাচাই অপেক্ষমাণ", HarvestGoldLight, Color(0xFF92400E))
+                    "ACTIVE" -> Triple("অনুমোদিত (সবার জন্য উন্মুক্ত)", LightGreen, DarkGreen)
+                    "REJECTED" -> Triple("প্রত্যাখ্যাত", Color(0xFFFEE2E2), Color(0xFFB91C1C))
+                    "OUT_OF_STOCK" -> Triple("মজুত শেষ", Color(0xFFF3F4F6), Color(0xFF374151))
+                    else -> Triple(prod.status, Color(0xFFF3F4F6), Color(0xFF374151))
+                }
                 Card(
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -321,7 +331,7 @@ fun SellScreen(
                             .padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(prod.nameBn, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text(
                                 text = "${prod.pricePerUnit.formatBdt()}/মণ • মজুত: ${prod.availableQuantity.formatQty()} মণ",
@@ -329,18 +339,44 @@ fun SellScreen(
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.SemiBold
                             )
-                            Text(
-                                text = "অবস্থা: ${prod.status} • ${prod.categoryNameBn}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(color = statusBg, shape = RoundedCornerShape(6.dp)) {
+                                    Text(
+                                        text = statusLabelBn,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = statusFg,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Text(
+                                    text = prod.categoryNameBn,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                         if (isFarmerActive) {
-                            FilledTonalIconButton(
-                                onClick = { editingProduct = prod },
-                                modifier = Modifier.testTag("edit_product_${prod.id}")
-                            ) {
-                                Icon(Icons.Filled.Edit, contentDescription = "দাম ও মজুত সম্পাদনা")
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                FilledTonalIconButton(
+                                    onClick = { editingProduct = prod },
+                                    modifier = Modifier.testTag("edit_product_${prod.id}")
+                                ) {
+                                    Icon(Icons.Filled.Edit, contentDescription = "দাম ও মজুত সম্পাদনা")
+                                }
+                                FilledTonalIconButton(
+                                    onClick = { deletingProduct = prod },
+                                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                        containerColor = Color(0xFFFEE2E2),
+                                        contentColor = Color(0xFFB91C1C)
+                                    ),
+                                    modifier = Modifier.testTag("delete_product_${prod.id}")
+                                ) {
+                                    Icon(Icons.Filled.Delete, contentDescription = "ফসল মুছুন")
+                                }
                             }
                         }
                     }
@@ -356,6 +392,28 @@ fun SellScreen(
             onSave = { newPrice, newStock ->
                 onUpdatePriceAndStock(prod.id, newPrice, newStock)
                 editingProduct = null
+            }
+        )
+    }
+
+    deletingProduct?.let { prod ->
+        AlertDialog(
+            onDismissRequest = { deletingProduct = null },
+            title = { Text("ফসল মুছে ফেলুন?") },
+            text = { Text("আপনি কি নিশ্চিতভাবে '${prod.nameBn}' তালিকা থেকে মুছে ফেলতে চান?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteProduct(prod.id)
+                        deletingProduct = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFB91C1C))
+                ) {
+                    Text("মুছে ফেলুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingProduct = null }) { Text("বাতিল") }
             }
         )
     }

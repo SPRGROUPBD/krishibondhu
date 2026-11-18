@@ -121,6 +121,7 @@ dependencies {
   implementation(libs.play.services.appset)
   implementation(libs.play.services.ads.identifier)
   implementation(libs.levelplay.mediation.sdk)
+  implementation(libs.unity.ads)
   implementation(libs.levelplay.unityads.adapter)
   implementation(libs.levelplay.applovin.adapter)
   implementation(libs.levelplay.facebook.adapter)

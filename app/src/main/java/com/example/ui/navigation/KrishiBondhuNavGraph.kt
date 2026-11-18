@@ -395,7 +395,8 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                     harvest, avail, addr, pickup, deliv, fee, wholesale
                                 ) {}
                             },
-                            onUpdatePriceAndStock = viewModel::updateFarmerPriceAndStock
+                            onUpdatePriceAndStock = viewModel::updateFarmerPriceAndStock,
+                            onDeleteProduct = viewModel::deleteProduct
                         )
                     }
 
@@ -471,7 +472,16 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         FarmerProfileScreen(
                             farmerId = fid,
                             uiState = uiState,
-                            onBack = { navController.popBackStack() },
+                            onBack = {
+                                navController.popBackStack()
+                                AdMonetizationManager.maybeShowInterstitial(
+                                    activity = activity,
+                                    overrideUnitId = uiState.adConfig.resolvedInterstitialUnitId(),
+                                    enabled = uiState.adConfig.adsEnabled &&
+                                        uiState.adConfig.androidAdsEnabled &&
+                                        uiState.adConfig.interstitialEnabled
+                                )
+                            },
                             onProductClick = { pid -> navController.navigate(Routes.productDetail(pid)) },
                             onQuickAddToCart = { pid ->
                                 uiState.products.firstOrNull { it.id == pid }?.let {
@@ -553,6 +563,9 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 onAddCategory = viewModel::adminAddCategory,
                                 onAddLocation = viewModel::adminAddLocation,
                                 onResolveComplaint = viewModel::adminResolveComplaint,
+                                onVerifyProduct = viewModel::adminVerifyProduct,
+                                onUpdateProduct = viewModel::adminUpdateProduct,
+                                onDeleteProduct = viewModel::deleteProduct,
                                 onSaveAdConfig = viewModel::adminSaveAdConfig,
                                 onBuildCsvReport = viewModel::buildCsvReport
                             )
@@ -634,7 +647,16 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         val topic = backStack.arguments?.getString("topic") ?: "about"
                         InfoScreen(
                             topic = topic,
-                            onBack = { navController.popBackStack() }
+                            onBack = {
+                                navController.popBackStack()
+                                AdMonetizationManager.maybeShowInterstitial(
+                                    activity = activity,
+                                    overrideUnitId = uiState.adConfig.resolvedInterstitialUnitId(),
+                                    enabled = uiState.adConfig.adsEnabled &&
+                                        uiState.adConfig.androidAdsEnabled &&
+                                        uiState.adConfig.interstitialEnabled
+                                )
+                            }
                         )
                     }
                 }

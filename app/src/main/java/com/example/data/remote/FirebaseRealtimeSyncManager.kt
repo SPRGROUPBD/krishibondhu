@@ -933,6 +933,22 @@ class FirebaseRealtimeSyncManager(
         }
     }
 
+    suspend fun deleteProduct(productId: String) {
+        if (!enableRemoteSync || productId.isBlank()) return
+        val sdkOk = withTimeoutOrNull(3000L) {
+            runCatching {
+                val root = rootRefOrNull() ?: return@runCatching false
+                root.child("products").child(productId).removeValue().await()
+                true
+            }.onFailure { Log.w(TAG, "SDK delete (products/$productId) fallback to REST: ${it.message}") }
+                .getOrDefault(false)
+        } ?: false
+
+        if (!sdkOk) {
+            restDelete("products/$productId.json")
+        }
+    }
+
     suspend fun pushOrder(order: OrderEntity, items: List<OrderItemEntity>) {
         val map = orderToMap(order, items)
         pushNode("orders/${order.id}", map) { root ->
@@ -1114,6 +1130,23 @@ class FirebaseRealtimeSyncManager(
             }
         }.onFailure {
             Log.w(TAG, "REST PUT $relativePath skipped: ${it.message}")
+        }.getOrDefault(false)
+    }
+
+    private suspend fun restDelete(relativePath: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val req = Request.Builder()
+                .url("$RTDB_URL/$relativePath")
+                .delete()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "REST DELETE $relativePath HTTP ${resp.code}")
+                }
+                resp.isSuccessful
+            }
+        }.onFailure {
+            Log.w(TAG, "REST DELETE $relativePath skipped: ${it.message}")
         }.getOrDefault(false)
     }
 
@@ -1868,17 +1901,17 @@ class FirebaseRealtimeSyncManager(
             mediationAppKey = s.str("mediationAppKey") ?: "",
             adTestMode = s.bool("adTestMode") ?: false,
             bannerEnabled = s.bool("bannerEnabled") ?: true,
-            androidBannerId = s.str("androidBannerId") ?: "",
+            androidBannerId = s.str("androidBannerId") ?: AdConfig.DEFAULT_UNITY_BANNER_ID,
             nativeEnabled = s.bool("nativeEnabled") ?: true,
             androidNativePlacement = s.str("androidNativePlacement") ?: "",
             interstitialEnabled = s.bool("interstitialEnabled") ?: true,
-            androidInterstitialId = s.str("androidInterstitialId") ?: "",
-            rewardedEnabled = s.bool("rewardedEnabled") ?: false,
-            androidRewardedId = s.str("androidRewardedId") ?: "",
+            androidInterstitialId = s.str("androidInterstitialId") ?: AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID,
+            rewardedEnabled = s.bool("rewardedEnabled") ?: true,
+            androidRewardedId = s.str("androidRewardedId") ?: AdConfig.DEFAULT_UNITY_REWARDED_ID,
             appOpenEnabled = s.bool("appOpenEnabled") ?: false,
             androidAppOpenId = s.str("androidAppOpenId") ?: "",
             unityAdsEnabled = s.bool("unityAdsEnabled") ?: true,
-            unityGameId = s.str("unityGameId") ?: "",
+            unityGameId = s.str("unityGameId") ?: AdConfig.DEFAULT_UNITY_GAME_ID,
             appLovinEnabled = s.bool("appLovinEnabled") ?: false,
             appLovinSdkKey = s.str("appLovinSdkKey") ?: "",
             metaAudienceEnabled = s.bool("metaAudienceEnabled") ?: false,
@@ -1921,7 +1954,7 @@ class FirebaseRealtimeSyncManager(
             sponsorTargetUrl = s.str("sponsorTargetUrl") ?: "",
             sponsorCtaText = s.str("sponsorCtaText") ?: "বিস্তারিত দেখুন",
             updatedAt = s.lng("updatedAt") ?: 0L
-        )
+        ).hydratedWithDefaults()
     }.getOrNull()
 
     private fun jsonToAdConfig(o: JSONObject): AdConfig? = runCatching {
@@ -1933,17 +1966,17 @@ class FirebaseRealtimeSyncManager(
             mediationAppKey = o.optString("mediationAppKey", ""),
             adTestMode = o.optBoolean("adTestMode", false),
             bannerEnabled = o.optBoolean("bannerEnabled", true),
-            androidBannerId = o.optString("androidBannerId", ""),
+            androidBannerId = o.optString("androidBannerId", AdConfig.DEFAULT_UNITY_BANNER_ID),
             nativeEnabled = o.optBoolean("nativeEnabled", true),
             androidNativePlacement = o.optString("androidNativePlacement", ""),
             interstitialEnabled = o.optBoolean("interstitialEnabled", true),
-            androidInterstitialId = o.optString("androidInterstitialId", ""),
-            rewardedEnabled = o.optBoolean("rewardedEnabled", false),
-            androidRewardedId = o.optString("androidRewardedId", ""),
+            androidInterstitialId = o.optString("androidInterstitialId", AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID),
+            rewardedEnabled = o.optBoolean("rewardedEnabled", true),
+            androidRewardedId = o.optString("androidRewardedId", AdConfig.DEFAULT_UNITY_REWARDED_ID),
             appOpenEnabled = o.optBoolean("appOpenEnabled", false),
             androidAppOpenId = o.optString("androidAppOpenId", ""),
             unityAdsEnabled = o.optBoolean("unityAdsEnabled", true),
-            unityGameId = o.optString("unityGameId", ""),
+            unityGameId = o.optString("unityGameId", AdConfig.DEFAULT_UNITY_GAME_ID),
             appLovinEnabled = o.optBoolean("appLovinEnabled", false),
             appLovinSdkKey = o.optString("appLovinSdkKey", ""),
             metaAudienceEnabled = o.optBoolean("metaAudienceEnabled", false),
@@ -1986,7 +2019,7 @@ class FirebaseRealtimeSyncManager(
             sponsorTargetUrl = o.optString("sponsorTargetUrl", ""),
             sponsorCtaText = o.optString("sponsorCtaText", "বিস্তারিত দেখুন"),
             updatedAt = o.optLong("updatedAt", 0L)
-        )
+        ).hydratedWithDefaults()
     }.getOrNull()
 
     private fun activationPaymentToMap(p: ActivationPaymentEntity): Map<String, Any?> = mapOf(

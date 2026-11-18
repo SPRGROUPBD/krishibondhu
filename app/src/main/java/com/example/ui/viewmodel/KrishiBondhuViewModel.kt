@@ -148,6 +148,7 @@ data class MarketplaceUiState(
             val totalBuyers = buyers.size
             val verifiedBuyers = buyers.count { it.verificationStatus == "VERIFIED" }
             val activeProds = products.count { it.status == "ACTIVE" }
+            val pendingProds = products.count { it.status == "PENDING_APPROVAL" }
             val dayAgo = System.currentTimeMillis() - 86_400_000L
             val todaysOrders = orders.count { it.createdAt >= dayAgo }
             val completedOrders = orders.count { it.status == OrderStatus.COMPLETED.name }
@@ -179,6 +180,8 @@ data class MarketplaceUiState(
                 totalBuyers = totalBuyers,
                 verifiedBuyers = verifiedBuyers,
                 activeProducts = activeProds,
+                pendingProductsCount = pendingProds,
+                totalProductsCount = products.size,
                 todaysOrders = todaysOrders,
                 completedOrders = completedOrders,
                 totalSalesAmount = totalSales,
@@ -739,7 +742,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
                 supportsFarmPickup, supportsDirectDelivery, deliveryCharge, isWholesale
             )
                 .onSuccess {
-                    showToast("আপনার ফসল সফলভাবে যুক্ত হয়েছে!")
+                    showToast("আপনার ফসল জমা হয়েছে! অ্যাডমিন যাচাই ও অনুমোদনের পর সবার জন্য প্রকাশিত হবে ✓")
                     onSuccess()
                 }
                 .onFailure { showToast(it.message ?: "ফসল যুক্ত করা যায়নি") }
@@ -752,6 +755,45 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             repo.updateFarmerPriceAndStock(productId, farmerId, newPrice, newStock)
                 .onSuccess { showToast("দাম ও মজুত আপডেট হয়েছে") }
                 .onFailure { showToast(it.message ?: "আপডেট ব্যর্থ হয়েছে") }
+        }
+    }
+
+    fun adminVerifyProduct(productId: String, approved: Boolean, reason: String = "") {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminVerifyProduct(admin, productId, approved, reason)
+                .onSuccess {
+                    showToast(if (approved) "ফসল অনুমোদিত ও সবার জন্য উন্মুক্ত করা হয়েছে ✓" else "ফসল প্রত্যাখ্যান করা হয়েছে")
+                }
+                .onFailure { showToast(it.message ?: "ফসল যাচাই করা যায়নি") }
+        }
+    }
+
+    fun adminUpdateProduct(
+        productId: String,
+        nameBn: String,
+        category: CategoryEntity,
+        pricePerUnit: Double,
+        availableQuantity: Double,
+        descriptionBn: String,
+        status: String
+    ) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminUpdateProduct(admin, productId, nameBn, category, pricePerUnit, availableQuantity, descriptionBn, status)
+                .onSuccess { showToast("ফসলের তথ্য অ্যাডমিন কর্তৃক আপডেট হয়েছে ✓") }
+                .onFailure { showToast(it.message ?: "ফসল আপডেট করা যায়নি") }
+        }
+    }
+
+    fun deleteProduct(productId: String) {
+        val actor = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.deleteProduct(actor, productId)
+                .onSuccess { showToast("ফসলটি তালিকা থেকে মুছে ফেলা হয়েছে ✓") }
+                .onFailure { showToast(it.message ?: "ফসল মুছে ফেলা যায়নি") }
         }
     }
 

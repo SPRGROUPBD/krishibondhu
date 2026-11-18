@@ -141,8 +141,11 @@ interface ProductDao {
     @Query("UPDATE products SET availableQuantity = availableQuantity + :qty, status = 'ACTIVE', updatedAt = :now WHERE id = :productId")
     suspend fun restoreStock(productId: String, qty: Double, now: Long)
 
-    @Query("UPDATE products SET pricePerUnit = :price, availableQuantity = :stock, status = CASE WHEN :stock > 0 THEN 'ACTIVE' ELSE 'OUT_OF_STOCK' END, updatedAt = :now WHERE id = :productId AND farmerId = :farmerId")
+    @Query("UPDATE products SET pricePerUnit = :price, availableQuantity = :stock, status = CASE WHEN status IN ('PENDING_APPROVAL', 'REJECTED') THEN status WHEN :stock > 0 THEN 'ACTIVE' ELSE 'OUT_OF_STOCK' END, updatedAt = :now WHERE id = :productId AND farmerId = :farmerId")
     suspend fun updateFarmerPriceAndStock(productId: String, farmerId: String, price: Double, stock: Double, now: Long): Int
+
+    @Query("DELETE FROM products WHERE id = :productId")
+    suspend fun deleteProductById(productId: String)
 
     @Query("SELECT * FROM products WHERE farmerId = :farmerId")
     suspend fun getProductsForFarmer(farmerId: String): List<ProductEntity>
@@ -182,6 +185,9 @@ interface CartDao {
 
     @Query("DELETE FROM cart_items WHERE id = :id")
     suspend fun deleteCartItem(id: String)
+
+    @Query("DELETE FROM cart_items WHERE productId = :productId")
+    suspend fun deleteCartItemsForProduct(productId: String)
 
     @Query("DELETE FROM cart_items")
     suspend fun clearCart()

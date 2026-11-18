@@ -32,7 +32,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.ads.*
 import com.example.data.local.ActivationPaymentEntity
+import com.example.data.local.CategoryEntity
 import com.example.data.local.PaymentSettingsEntity
+import com.example.data.local.ProductEntity
 import com.example.data.model.*
 import com.example.ui.components.AccountStatusBadge
 import com.example.ui.components.OrderStatusChip
@@ -58,6 +60,9 @@ fun AdminDashboardScreen(
     onAddCategory: (nameBn: String, nameEn: String, emoji: String) -> Unit,
     onAddLocation: (division: String, district: String, upazila: String, union: String, village: String) -> Unit,
     onResolveComplaint: (complaintId: String) -> Unit,
+    onVerifyProduct: (productId: String, approved: Boolean, reason: String) -> Unit = { _, _, _ -> },
+    onUpdateProduct: (productId: String, nameBn: String, category: CategoryEntity, pricePerUnit: Double, availableQuantity: Double, descriptionBn: String, status: String) -> Unit = { _, _, _, _, _, _, _ -> },
+    onDeleteProduct: (productId: String) -> Unit = {},
     onSaveAdConfig: (AdConfig) -> Unit = {},
     onBuildCsvReport: () -> String
 ) {
@@ -68,6 +73,7 @@ fun AdminDashboardScreen(
         "সারসংক্ষেপ",
         "পেমেন্ট যাচাই (${stats.pendingActivationPayments})",
         "কৃষক ও ক্রেতা",
+        "ফসল যাচাই (${stats.pendingProductsCount})",
         "অর্ডার ও অভিযোগ (${uiState.orders.size})",
         "পেমেন্ট সেটিংস",
         "নোটিফিকেশন পাঠান",
@@ -122,7 +128,7 @@ fun AdminDashboardScreen(
                     Icon(Icons.Filled.Security, contentDescription = null, tint = DarkGreen, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "নীতিমালা: অ্যাডমিন পেমেন্ট ও অ্যাকাউন্ট যাচাই করেন — কোনো কৃষকের পণ্যের দাম পরিবর্তন করতে পারেন না।",
+                        text = "নীতিমালা: অ্যাডমিন অ্যাকাউন্ট, পেমেন্ট এবং কৃষকের ফসল যাচাই, অনুমোদন, সম্পাদনা ও বাতিল করতে পারেন।",
                         style = MaterialTheme.typography.labelSmall,
                         color = DarkGreen
                     )
@@ -155,20 +161,26 @@ fun AdminDashboardScreen(
                     onVerifyUser = onVerifyUser,
                     onSetAccountStatus = onSetAccountStatus
                 )
-                3 -> AdminOrdersComplaintsTab(
+                3 -> AdminProductsTab(
+                    uiState = uiState,
+                    onVerifyProduct = onVerifyProduct,
+                    onUpdateProduct = onUpdateProduct,
+                    onDeleteProduct = onDeleteProduct
+                )
+                4 -> AdminOrdersComplaintsTab(
                     uiState = uiState,
                     onVerifyOrderPayment = onVerifyOrderPayment,
                     onResolveComplaint = onResolveComplaint
                 )
-                4 -> AdminPaymentSettingsTab(
+                5 -> AdminPaymentSettingsTab(
                     settings = uiState.paymentSettings,
                     onSave = onSavePaymentSettings
                 )
-                5 -> AdminNotificationsTab(uiState = uiState, onSendNotification = onSendNotification)
-                6 -> AdminCategoriesTab(uiState = uiState, onAddCategory = onAddCategory)
-                7 -> AdminLocationsTab(uiState = uiState, onAddLocation = onAddLocation)
-                8 -> AdminAuditLogTab(uiState = uiState)
-                9 -> AdminAdMonetizationTab(adConfig = uiState.adConfig, onSaveAdConfig = onSaveAdConfig)
+                6 -> AdminNotificationsTab(uiState = uiState, onSendNotification = onSendNotification)
+                7 -> AdminCategoriesTab(uiState = uiState, onAddCategory = onAddCategory)
+                8 -> AdminLocationsTab(uiState = uiState, onAddLocation = onAddLocation)
+                9 -> AdminAuditLogTab(uiState = uiState)
+                10 -> AdminAdMonetizationTab(adConfig = uiState.adConfig, onSaveAdConfig = onSaveAdConfig)
             }
         }
     }
@@ -200,7 +212,7 @@ private fun AdminOverviewTab(stats: AdminDashboardStats) {
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AdminKpiCard("সক্রিয় ফসল", "${stats.activeProducts}", Color(0xFFB45309), Modifier.weight(1f))
+                AdminKpiCard("সক্রিয় / যাচাই বাকি ফসল", "${stats.activeProducts} / ${stats.pendingProductsCount}", Color(0xFFB45309), Modifier.weight(1f))
                 AdminKpiCard("কৃষক পেমেন্ট অনুমোদন বাকি", "${stats.pendingOrderPaymentVerifications}", InfoBlue, Modifier.weight(1f))
             }
         }
@@ -1315,6 +1327,354 @@ private fun AdminAuditLogTab(uiState: MarketplaceUiState) {
 }
 
 @Composable
+private fun AdminProductsTab(
+    uiState: MarketplaceUiState,
+    onVerifyProduct: (String, Boolean, String) -> Unit,
+    onUpdateProduct: (String, String, CategoryEntity, Double, Double, String, String) -> Unit,
+    onDeleteProduct: (String) -> Unit
+) {
+    var statusFilter by remember { mutableStateOf("PENDING_APPROVAL") }
+    var searchQuery by remember { mutableStateOf("") }
+    var editingProduct by remember { mutableStateOf<ProductEntity?>(null) }
+    var rejectingProduct by remember { mutableStateOf<ProductEntity?>(null) }
+    var deletingProduct by remember { mutableStateOf<ProductEntity?>(null) }
+
+    val activeCategories = remember(uiState.categories) {
+        uiState.categories.filter { it.isActive }
+    }
+
+    val filteredProducts = remember(uiState.products, statusFilter, searchQuery) {
+        val q = searchQuery.normalizeBn()
+        uiState.products
+            .filter { p ->
+                val matchesStatus = statusFilter == "ALL" || p.status.equals(statusFilter, ignoreCase = true)
+                val matchesSearch = q.isBlank() ||
+                    p.nameBn.containsBn(q) ||
+                    p.farmerName.containsBn(q) ||
+                    p.district.containsBn(q) ||
+                    p.categoryNameBn.containsBn(q)
+                matchesStatus && matchesSearch
+            }
+            .sortedWith(
+                compareBy<ProductEntity> {
+                    when (it.status.uppercase()) {
+                        "PENDING_APPROVAL" -> 0
+                        "ACTIVE" -> 1
+                        "REJECTED" -> 2
+                        else -> 3
+                    }
+                }.thenByDescending { it.updatedAt }
+            )
+    }
+
+    val pendingCount = uiState.products.count { it.status == "PENDING_APPROVAL" }
+    val activeCount = uiState.products.count { it.status == "ACTIVE" }
+    val rejectedCount = uiState.products.count { it.status == "REJECTED" }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                label = { Text("ফসল, কৃষক বা জেলা খুঁজুন...") },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("admin_products_search")
+            )
+        }
+        item {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    FilterChip(
+                        selected = statusFilter == "PENDING_APPROVAL",
+                        onClick = { statusFilter = "PENDING_APPROVAL" },
+                        label = { Text("যাচাই বাকি ($pendingCount)") },
+                        modifier = Modifier.testTag("admin_products_filter_pending")
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = statusFilter == "ACTIVE",
+                        onClick = { statusFilter = "ACTIVE" },
+                        label = { Text("অনুমোদিত ($activeCount)") },
+                        modifier = Modifier.testTag("admin_products_filter_active")
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = statusFilter == "REJECTED",
+                        onClick = { statusFilter = "REJECTED" },
+                        label = { Text("প্রত্যাখ্যাত ($rejectedCount)") },
+                        modifier = Modifier.testTag("admin_products_filter_rejected")
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = statusFilter == "ALL",
+                        onClick = { statusFilter = "ALL" },
+                        label = { Text("সব (${uiState.products.size})") },
+                        modifier = Modifier.testTag("admin_products_filter_all")
+                    )
+                }
+            }
+        }
+
+        if (filteredProducts.isEmpty()) {
+            item {
+                Card(shape = RoundedCornerShape(14.dp)) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text("🌾", style = MaterialTheme.typography.headlineMedium)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text("এই বিভাগে কোনো ফসল নেই", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        } else {
+            items(filteredProducts, key = { it.id }) { prod ->
+                val (badgeLabel, badgeBg, badgeFg) = when (prod.status.uppercase()) {
+                    "PENDING_APPROVAL" -> Triple("যাচাই অপেক্ষমাণ", HarvestGoldLight, Color(0xFF92400E))
+                    "ACTIVE" -> Triple("অনুমোদিত (ACTIVE)", LightGreen, DarkGreen)
+                    "REJECTED" -> Triple("প্রত্যাখ্যাত (REJECTED)", Color(0xFFFEE2E2), Color(0xFFB91C1C))
+                    "OUT_OF_STOCK" -> Triple("মজুত শেষ", Color(0xFFF3F4F6), Color(0xFF374151))
+                    else -> Triple(prod.status, Color(0xFFF3F4F6), Color(0xFF374151))
+                }
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(prod.nameBn, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = "${prod.categoryNameBn} • ${prod.pricePerUnit.formatBdt()}/মণ • মজুত: ${prod.availableQuantity.formatQty()} মণ",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = PrimaryGreen,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Surface(color = badgeBg, shape = RoundedCornerShape(8.dp)) {
+                                Text(
+                                    text = badgeLabel,
+                                    color = badgeFg,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "কৃষক: ${prod.farmerName} • ${prod.upazila}, ${prod.district}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (prod.descriptionBn.isNotBlank()) {
+                            Text(prod.descriptionBn, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (prod.status != "ACTIVE") {
+                                Button(
+                                    onClick = { onVerifyProduct(prod.id, true, "") },
+                                    modifier = Modifier.weight(1f).testTag("admin_approve_product_${prod.id}")
+                                ) {
+                                    Text("অনুমোদন", maxLines = 1)
+                                }
+                            }
+                            if (prod.status != "REJECTED") {
+                                OutlinedButton(
+                                    onClick = { rejectingProduct = prod },
+                                    modifier = Modifier.weight(1f).testTag("admin_reject_product_${prod.id}")
+                                ) {
+                                    Text("প্রত্যাখ্যান", maxLines = 1)
+                                }
+                            }
+                            FilledTonalButton(
+                                onClick = { editingProduct = prod },
+                                modifier = Modifier.testTag("admin_edit_product_${prod.id}")
+                            ) {
+                                Icon(Icons.Filled.Edit, contentDescription = "সম্পাদনা", modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("এডিট")
+                            }
+                            FilledTonalIconButton(
+                                onClick = { deletingProduct = prod },
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = Color(0xFFFEE2E2),
+                                    contentColor = Color(0xFFB91C1C)
+                                ),
+                                modifier = Modifier.testTag("admin_delete_product_${prod.id}")
+                            ) {
+                                Icon(Icons.Filled.Delete, contentDescription = "ফসল মুছুন")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    editingProduct?.let { prod ->
+        var nameBn by remember(prod.id) { mutableStateOf(prod.nameBn) }
+        var priceText by remember(prod.id) { mutableStateOf(prod.pricePerUnit.toString()) }
+        var qtyText by remember(prod.id) { mutableStateOf(prod.availableQuantity.toString()) }
+        var descBn by remember(prod.id) { mutableStateOf(prod.descriptionBn) }
+        var statusVal by remember(prod.id) { mutableStateOf(prod.status) }
+        var selectedCat by remember(prod.id, activeCategories) {
+            mutableStateOf(
+                activeCategories.firstOrNull { it.id == prod.categoryId }
+                    ?: uiState.categories.firstOrNull { it.id == prod.categoryId }
+                    ?: activeCategories.firstOrNull()
+                    ?: CategoryEntity(id = prod.categoryId, nameBn = prod.categoryNameBn, nameEn = prod.categoryNameBn, groupKey = "OTHER", emoji = "🌾", sortOrder = 1)
+            )
+        }
+
+        AlertDialog(
+            onDismissRequest = { editingProduct = null },
+            title = { Text("ফসল সম্পাদনা (${prod.nameBn})") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = nameBn,
+                        onValueChange = { nameBn = it },
+                        label = { Text("ফসলের নাম") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (activeCategories.isNotEmpty()) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(activeCategories, key = { it.id }) { cat ->
+                                FilterChip(
+                                    selected = selectedCat.id == cat.id,
+                                    onClick = { selectedCat = cat },
+                                    label = { Text("${cat.emoji} ${cat.nameBn}") }
+                                )
+                            }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = priceText,
+                            onValueChange = { priceText = it },
+                            label = { Text("দাম (৳/মণ)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = qtyText,
+                            onValueChange = { qtyText = it },
+                            label = { Text("মজুত (মণ)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = descBn,
+                        onValueChange = { descBn = it },
+                        label = { Text("বিবরণ") },
+                        minLines = 2,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(
+                            listOf(
+                                "ACTIVE" to "অনুমোদিত",
+                                "PENDING_APPROVAL" to "যাচাই বাকি",
+                                "REJECTED" to "প্রত্যাখ্যাত",
+                                "OUT_OF_STOCK" to "মজুত শেষ"
+                            )
+                        ) { (code, label) ->
+                            FilterChip(
+                                selected = statusVal == code,
+                                onClick = { statusVal = code },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val p = priceText.toDoubleOrNull() ?: prod.pricePerUnit
+                        val q = qtyText.toDoubleOrNull() ?: prod.availableQuantity
+                        onUpdateProduct(prod.id, nameBn, selectedCat, p, q, descBn, statusVal)
+                        editingProduct = null
+                    }
+                ) { Text("সংরক্ষণ") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingProduct = null }) { Text("বাতিল") }
+            }
+        )
+    }
+
+    rejectingProduct?.let { prod ->
+        var reason by remember(prod.id) { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { rejectingProduct = null },
+            title = { Text("ফসল প্রত্যাখ্যান (${prod.nameBn})") },
+            text = {
+                OutlinedTextField(
+                    value = reason,
+                    onValueChange = { reason = it },
+                    label = { Text("প্রত্যাখ্যানের কারণ (ঐচ্ছিক)") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onVerifyProduct(prod.id, false, reason)
+                        rejectingProduct = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AlertRed)
+                ) { Text("প্রত্যাখ্যান করুন") }
+            },
+            dismissButton = {
+                TextButton(onClick = { rejectingProduct = null }) { Text("বাতিল") }
+            }
+        )
+    }
+
+    deletingProduct?.let { prod ->
+        AlertDialog(
+            onDismissRequest = { deletingProduct = null },
+            title = { Text("ফসল মুছে ফেলুন?") },
+            text = { Text("অ্যাডমিন হিসেবে আপনি কি '${prod.nameBn}' সম্পূর্ণরূপে মুছে ফেলতে চান?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteProduct(prod.id)
+                        deletingProduct = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AlertRed)
+                ) { Text("মুছে ফেলুন") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingProduct = null }) { Text("বাতিল") }
+            }
+        )
+    }
+}
+
+@Composable
 private fun AdminAdMonetizationTab(
     adConfig: AdConfig,
     onSaveAdConfig: (AdConfig) -> Unit
@@ -1390,13 +1750,19 @@ private fun AdminAdMonetizationTab(
     var customAdName by remember(adConfig) { mutableStateOf(adConfig.customAdName) }
     var customTopHtml by remember(adConfig) { mutableStateOf(adConfig.customTopHtml) }
 
-    fun buildDraftConfig(): AdConfig = adConfig.copy(
-        adsEnabled = adsEnabled,
-        showAdsLabel = showAdsLabel,
-        androidAdsEnabled = androidAdsEnabled,
-        mediationPlatform = "UNITY_LEVELPLAY",
-        mediationAppKey = mediationAppKey.trim(),
-        adTestMode = adTestMode,
+    fun buildDraftConfig(): AdConfig {
+        val resolvedMode = if (unityAdsEnabled && mediationAppKey.trim().isBlank() && unityGameId.trim().isNotBlank()) {
+            "UNITY_DIRECT"
+        } else {
+            "UNITY_LEVELPLAY"
+        }
+        return adConfig.copy(
+            adsEnabled = adsEnabled,
+            showAdsLabel = showAdsLabel,
+            androidAdsEnabled = androidAdsEnabled,
+            mediationPlatform = resolvedMode,
+            mediationAppKey = mediationAppKey.trim(),
+            adTestMode = adTestMode,
         bannerEnabled = bannerEnabled,
         androidBannerId = androidBannerId.trim(),
         nativeEnabled = nativeEnabled,
@@ -1449,6 +1815,7 @@ private fun AdminAdMonetizationTab(
         customAdName = customAdName.trim(),
         customTopHtml = customTopHtml
     )
+    }
 
     val priorityOptions = listOf(
         "ALL" to "সব নেটওয়ার্ক (All)",
@@ -1482,7 +1849,7 @@ private fun AdminAdMonetizationTab(
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("Unity LevelPlay মনিটাইজেশন টেলিমেট্রি", fontWeight = FontWeight.Bold, color = DarkGreen)
+                        Text("Direct Unity Ads (6227313) & LevelPlay টেলিমেট্রি", fontWeight = FontWeight.Bold, color = DarkGreen, modifier = Modifier.weight(1f))
                         Surface(shape = RoundedCornerShape(999.dp), color = sdkColor.copy(alpha = 0.14f)) {
                             Text(
                                 text = telemetry.sdkInitStatus.labelBn,
@@ -1493,8 +1860,25 @@ private fun AdminAdMonetizationTab(
                             )
                         }
                     }
+                    Surface(
+                        color = LightGreen,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        val draft = buildDraftConfig()
+                        Text(
+                            text = if (draft.usesDirectUnityAds()) {
+                                "Active Mode: Direct Unity Ads SDK 4.16.6 (Game ID: ${draft.unityGameId})"
+                            } else {
+                                "Active Mode: Unity LevelPlay Mediation (App Key: ${telemetry.activeAppKeyMasked.ifBlank { "(not set)" }})"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = DarkGreen,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
                     Text(
-                        text = "AdMob সম্পূর্ণ অপসারিত (Zero AdMob SDK) • প্ল্যাটফর্ম: ${telemetry.mediationPlatform} • App Key: ${telemetry.activeAppKeyMasked.ifBlank { "(not set)" }} • Test Mode: ${if (telemetry.testModeEnabled) "ON" else "OFF"}",
+                        text = "AdMob সম্পূর্ণ অপসারিত (Zero AdMob SDK) • প্ল্যাটফর্ম: ${telemetry.mediationPlatform} • Test Mode: ${if (telemetry.testModeEnabled) "ON" else "OFF"}",
                         style = MaterialTheme.typography.bodySmall
                     )
                     if (telemetry.lastInitError.isNotBlank()) {
@@ -1562,6 +1946,25 @@ private fun AdminAdMonetizationTab(
                         ) {
                             Text("লগ পরিষ্কার করুন")
                         }
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            adsEnabled = true
+                            androidAdsEnabled = true
+                            unityAdsEnabled = true
+                            unityGameId = AdConfig.DEFAULT_UNITY_GAME_ID
+                            bannerEnabled = true
+                            androidBannerId = AdConfig.DEFAULT_UNITY_BANNER_ID
+                            interstitialEnabled = true
+                            androidInterstitialId = AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID
+                            rewardedEnabled = true
+                            androidRewardedId = AdConfig.DEFAULT_UNITY_REWARDED_ID
+                            mediationAppKey = ""
+                            AdMonetizationManager.initialize(context, buildDraftConfig())
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("admin_apply_unity_preset_button")
+                    ) {
+                        Text("Unity Ads 6227313 ডিফল্ট সেট ও টেস্ট করুন", fontWeight = FontWeight.Bold)
                     }
                 }
             }
