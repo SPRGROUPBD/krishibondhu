@@ -2,6 +2,7 @@ import {
   RTDB_CONFIG,
   SUPERADMIN_CREDENTIALS,
   DEFAULT_AD_CONFIG,
+  DEFAULT_DAILY_TIPS,
   DEFAULT_PAYMENT_SETTINGS,
   DEFAULT_FARMER_PAYMENT_SETTINGS,
   APP_VERSION_NAME,
@@ -77,12 +78,17 @@ const state = {
   adminProductFilter: "PENDING_APPROVAL",
   adminProductSearch: "",
   infoTab: "about",
-  adConfig: { ...DEFAULT_AD_CONFIG }
+  adConfig: { ...DEFAULT_AD_CONFIG },
+  dailyTips: [...DEFAULT_DAILY_TIPS],
+  dailyTipsManaged: false,
+  dailyTipIndex: 0,
+  revealedDailyTipId: ""
 };
 
 let rtdbRef = null;
 let rtdbApi = null;
 let lastAdScriptSignature = "";
+let latestRemoteDailyTipsMap = null;
 const alertedNotifIds = new Set();
 
 // ---------------------- Session Preferences (Online-Only RTDB Architecture) ----------------------
@@ -146,6 +152,26 @@ function normalizeAdConfig(raw) {
   return merged;
 }
 
+function normalizeDailyTipsList(rawMap, managedFlag) {
+  const hasObj = rawMap && typeof rawMap === "object" && Object.keys(rawMap).length > 0;
+  if (!hasObj) {
+    return managedFlag ? [] : [...DEFAULT_DAILY_TIPS];
+  }
+  return Object.entries(rawMap)
+    .map(([k, v]) => ({
+      id: v?.id || k,
+      titleBn: String(v?.titleBn || "").trim(),
+      contentBn: String(v?.contentBn || "").trim(),
+      categoryBn: String(v?.categoryBn || "কৃষি পরামর্শ").trim(),
+      emoji: String(v?.emoji || "🌾").trim() || "🌾",
+      isActive: v?.isActive !== false,
+      createdAt: Number(v?.createdAt || 0),
+      updatedAt: Number(v?.updatedAt || v?.createdAt || 0)
+    }))
+    .filter((t) => t.titleBn && t.contentBn)
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+}
+
 async function initFirebaseRealtime() {
   try {
     const [{ initializeApp, getApps }, dbMod] = await Promise.all([
@@ -201,6 +227,9 @@ async function initFirebaseRealtime() {
         ? Object.entries(root.orderPayments).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
       state.adConfig = normalizeAdConfig(root.adConfig);
+      latestRemoteDailyTipsMap = root.dailyTips && typeof root.dailyTips === "object" ? root.dailyTips : null;
+      state.dailyTipsManaged = Boolean(root.dailyTipsMeta && root.dailyTipsMeta.managed) || Boolean(latestRemoteDailyTipsMap && Object.keys(latestRemoteDailyTipsMap).length > 0);
+      state.dailyTips = normalizeDailyTipsList(latestRemoteDailyTipsMap, state.dailyTipsManaged);
       state.paymentSettings = root.paymentSettings && typeof root.paymentSettings === "object"
         ? { ...DEFAULT_PAYMENT_SETTINGS, ...root.paymentSettings }
         : { ...DEFAULT_PAYMENT_SETTINGS };
@@ -354,6 +383,23 @@ async function initFirebaseRealtime() {
       state.orderPayments = val && typeof val === "object"
         ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
+      renderCurrentView();
+    });
+
+    onValue(child(rtdbRef, "dailyTipsMeta"), (snap) => {
+      const meta = snap.val();
+      state.dailyTipsManaged = Boolean(meta && meta.managed) || Boolean(latestRemoteDailyTipsMap && Object.keys(latestRemoteDailyTipsMap).length > 0);
+      state.dailyTips = normalizeDailyTipsList(latestRemoteDailyTipsMap, state.dailyTipsManaged);
+      renderCurrentView();
+    });
+
+    onValue(child(rtdbRef, "dailyTips"), (snap) => {
+      const val = snap.val();
+      latestRemoteDailyTipsMap = val && typeof val === "object" ? val : null;
+      if (latestRemoteDailyTipsMap && Object.keys(latestRemoteDailyTipsMap).length > 0) {
+        state.dailyTipsManaged = true;
+      }
+      state.dailyTips = normalizeDailyTipsList(latestRemoteDailyTipsMap, state.dailyTipsManaged);
       renderCurrentView();
     });
   } catch (err) {
@@ -2852,6 +2898,140 @@ async function adminSaveAdConfig(nextConfig) {
   return true;
 }
 
+async function adminSaveDailyTip(tipDraft) {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") {
+    showToast("শুধুমাত্র সুপার অ্যাডমিন ডেইলি টিপস যোগ বা সম্পাদনা করতে পারেন।", "error");
+    return false;
+  }
+  const titleBn = String(tipDraft?.titleBn || "").trim();
+  const contentBn = String(tipDraft?.contentBn || "").trim();
+  if (!titleBn || !contentBn) {
+    showToast("ডেইলি টিপসের শিরোনাম এবং বিবরণ আবশ্যক।", "error");
+    return false;
+  }
+  const now = Date.now();
+  const existing = state.dailyTips.find((t) => t.id === tipDraft.id);
+  const id = String(tipDraft.id || "").trim() || shortId("tip");
+  const item = {
+    id,
+    titleBn,
+    contentBn,
+    categoryBn: String(tipDraft?.categoryBn || "কৃষি পরামর্শ").trim() || "কৃষি পরামর্শ",
+    emoji: String(tipDraft?.emoji || "🌾").trim() || "🌾",
+    isActive: tipDraft?.isActive !== false,
+    createdAt: existing?.createdAt || Number(tipDraft?.createdAt || now),
+    updatedAt: now
+  };
+  state.dailyTipsManaged = true;
+  state.dailyTips = [item, ...state.dailyTips.filter((t) => t.id !== id)]
+    .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: existing ? "ডেইলি টিপস সম্পাদনা (ওয়েব)" : "নতুন ডেইলি টিপস যোগ (ওয়েব)",
+    targetEntity: "DailyTip",
+    targetId: id,
+    detailsBn: `${item.emoji} ${item.titleBn} (${item.isActive ? "সক্রিয়" : "বন্ধ"})`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+
+  await rtdbPush("dailyTipsMeta", { managed: true, updatedAt: now });
+  await rtdbPush(`dailyTips/${id}`, item);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+  showToast("ডেইলি টিপস সফলভাবে সংরক্ষণ ও সিঙ্ক হয়েছে!", "success");
+  renderCurrentView();
+  return true;
+}
+
+async function adminDeleteDailyTip(tipId) {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") {
+    showToast("শুধুমাত্র সুপার অ্যাডমিন ডেইলি টিপস মুছতে পারেন।", "error");
+    return false;
+  }
+  const target = state.dailyTips.find((t) => t.id === tipId);
+  if (!target) return false;
+  const now = Date.now();
+  state.dailyTipsManaged = true;
+  state.dailyTips = state.dailyTips.filter((t) => t.id !== tipId);
+  if (state.revealedDailyTipId === tipId) state.revealedDailyTipId = "";
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: "ডেইলি টিপস মুছে ফেলা (ওয়েব)",
+    targetEntity: "DailyTip",
+    targetId: tipId,
+    detailsBn: `${target.titleBn} মুছে ফেলা হয়েছে`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+
+  await rtdbPush("dailyTipsMeta", { managed: true, updatedAt: now });
+  await rtdbDelete(`dailyTips/${tipId}`);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+  showToast("ডেইলি টিপস মুছে ফেলা হয়েছে।", "info");
+  renderCurrentView();
+  return true;
+}
+
+function renderChunkedGridWithFeedAds(items, renderCardFn, chunkSize = 4, gridClass = "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4") {
+  if (!items || !items.length) return "";
+  const blocks = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize);
+    blocks.push(`<div class="${gridClass}">${chunk.map(renderCardFn).join("")}</div>`);
+    if (i + chunkSize < items.length) {
+      const adHtml = renderAdPlacement("feed");
+      if (adHtml) blocks.push(adHtml);
+    }
+  }
+  return `<div class="space-y-4">${blocks.join("")}</div>`;
+}
+
+function renderDailyTipsCard() {
+  const activeTips = state.dailyTips.filter((t) => t.isActive !== false);
+  const currentTip = activeTips.find((t) => t.id === state.revealedDailyTipId) || activeTips[0] || null;
+  return `
+    <section class="bg-gradient-to-r from-amber-50 via-[#EAF7EF] to-emerald-50 rounded-3xl p-5 sm:p-6 border border-emerald-200 shadow-sm space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-2">
+          <span class="text-xl">💡</span>
+          <div>
+            <h3 class="font-bold text-[#105B34] text-base">আজকের পাইকারি কৃষি ডেইলি টিপস (${activeTips.length}টি)</h3>
+            <p class="text-[11px] text-gray-600">অ্যাডমিন প্যানেল থেকে রিয়েল-টাইম আপডেটকৃত সংরক্ষণ ও বাজার পরামর্শ</p>
+          </div>
+        </div>
+        ${
+          activeTips.length > 1
+            ? `<button type="button" onclick="window.kbApp.revealNextDailyTip()" class="px-3.5 py-2 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white text-xs font-bold shadow-sm">
+                অন্য টিপস দেখুন →
+              </button>`
+            : ""
+        }
+      </div>
+      ${
+        !currentTip
+          ? `<div class="bg-white/80 rounded-2xl p-4 text-xs text-gray-600 border border-emerald-100">বর্তমানে কোনো সক্রিয় ডেইলি টিপস নেই।</div>`
+          : `<div class="bg-white rounded-2xl p-4 border border-emerald-100 space-y-1.5">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <span class="font-bold text-sm text-[#105B34]">${escapeHtml(currentTip.emoji || "🌾")} ${escapeHtml(currentTip.titleBn)}</span>
+                <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#EAF7EF] text-[#105B34]">${escapeHtml(currentTip.categoryBn || "কৃষি পরামর্শ")}</span>
+              </div>
+              <p class="text-xs sm:text-sm text-gray-700 leading-relaxed">${escapeHtml(currentTip.contentBn)}</p>
+            </div>`
+      }
+    </section>
+  `;
+}
+
 function syncExternalAdNetworkScripts() {
   const cfg = state.adConfig || DEFAULT_AD_CONFIG;
   const sig = JSON.stringify({
@@ -3297,6 +3477,8 @@ function renderFarmerHomeWorkspace(user) {
         }
       </section>
 
+      ${renderAdPlacement("feed")}
+
       <!-- Farmer Listed Inventory -->
       <section class="space-y-3">
         <div class="flex items-center justify-between">
@@ -3309,9 +3491,11 @@ function renderFarmerHomeWorkspace(user) {
                 <p class="text-sm text-gray-600">আপনার কোনো ফসল এখনো তালিকাভুক্ত করা হয়নি।</p>
                 <button onclick="window.kbApp.navigate('farmer-dashboard', { tab: 'add' })" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">+ প্রথম ফসল যোগ করুন</button>
               </div>`
-            : `<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">${myProducts.slice(0, 4).map(renderProductCard).join("")}</div>`
+            : renderChunkedGridWithFeedAds(myProducts.slice(0, 6), renderProductCard, 2, "grid sm:grid-cols-2 lg:grid-cols-4 gap-4")
         }
       </section>
+
+      ${renderDailyTipsCard()}
 
       ${renderAdPlacement("feed")}
     </div>
@@ -3467,9 +3651,49 @@ function renderHomePage() {
                        <button onclick="window.kbApp.goSell()" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">ফসল যোগ করুন</button>`
                 }
               </div>`
-            : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">${activeProducts.slice(0, 8).map(renderProductCard).join("")}</div>`
+            : renderChunkedGridWithFeedAds(activeProducts.slice(0, 8), renderProductCard, 4, "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4")
         }
       </section>
+
+      ${renderAdPlacement("feed")}
+
+      ${
+        farmers.length
+          ? `<section class="space-y-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h2 class="text-lg sm:text-xl font-bold text-[#105B34]">👨‍🌾 যাচাইকৃত কৃষক (${farmers.length})</h2>
+                  <p class="text-xs text-gray-500">সরাসরি খামার থেকে পাইকারি ফসল সংগ্রহ করুন</p>
+                </div>
+                <button onclick="window.kbApp.navigate('farmers')" class="text-sm font-semibold text-[#168447] hover:underline">সব কৃষক দেখুন →</button>
+              </div>
+              ${renderChunkedGridWithFeedAds(
+                farmers.slice(0, 6),
+                (u) => {
+                  const cnt = state.products.filter((p) => p.farmerId === u.id && p.status === "ACTIVE").length;
+                  return `<div class="bg-white rounded-3xl p-4 border border-emerald-100 shadow-sm space-y-2.5">
+                    <div class="flex items-center gap-2.5">
+                      ${u.profileImageUri ? `<img src="${escapeHtml(u.profileImageUri)}" alt="" class="w-10 h-10 rounded-full object-cover border border-emerald-200" />` : `<div class="w-10 h-10 rounded-full bg-[#EAF7EF] flex items-center justify-center">👨‍🌾</div>`}
+                      <div class="min-w-0 flex-1">
+                        <div class="font-bold text-sm text-[#105B34] truncate">${escapeHtml(u.fullName)}</div>
+                        <div class="text-[11px] text-gray-600 truncate">📍 ${escapeHtml(u.upazila)}, ${escapeHtml(u.district)}</div>
+                      </div>
+                    </div>
+                    <div class="flex items-center justify-between text-xs text-gray-600">
+                      <span>★ ${Number(u.rating || 5).toFixed(1)}</span>
+                      <span>${cnt}টি ফসল</span>
+                    </div>
+                    <button onclick="window.kbApp.navigate('farmer-profile', { id: '${escapeHtml(u.id)}' })" class="w-full py-2 rounded-xl bg-[#EAF7EF] text-[#105B34] text-xs font-bold hover:bg-emerald-100">খামার দেখুন</button>
+                  </div>`;
+                },
+                3,
+                "grid sm:grid-cols-2 lg:grid-cols-3 gap-4"
+              )}
+            </section>`
+          : ""
+      }
+
+      ${renderDailyTipsCard()}
 
       ${renderAdPlacement("feed")}
 
@@ -3617,7 +3841,7 @@ function renderBrowsePage() {
               <p class="font-bold text-[#105B34]">এই ফিল্টারে কোনো ফসল পাওয়া যায়নি</p>
               <p class="text-xs text-gray-500 mt-1">অন্য জেলা, উপজেলা বা ক্যাটাগরি নির্বাচন করে চেষ্টা করুন।</p>
             </div>`
-          : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">${filtered.map(renderProductCard).join("")}</div>`
+          : renderChunkedGridWithFeedAds(filtered, renderProductCard, 4, "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4")
       }
       ${renderAdPlacement("feed")}
     </div>
@@ -3779,43 +4003,45 @@ function renderFarmersPage() {
       ${
         farmers.length === 0
           ? `<div class="bg-white rounded-3xl p-10 text-center border border-dashed border-emerald-200">এখনো কোনো কৃষক পাওয়া যায়নি।</div>`
-          : `<div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              ${farmers
-                .map((u) => {
-                  const count = state.products.filter((p) => p.farmerId === u.id && p.status === "ACTIVE").length;
-                  return `
-                    <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
-                      <div class="flex items-start justify-between gap-2">
-                        <div class="flex items-center gap-2.5">
-                          ${u.profileImageUri ? `<img src="${escapeHtml(u.profileImageUri)}" alt="" class="w-10 h-10 rounded-full object-cover border border-emerald-200" />` : `<div class="w-10 h-10 rounded-full bg-[#EAF7EF] flex items-center justify-center">👨‍🌾</div>`}
-                          <div>
-                            <h3 class="font-bold text-base text-[#105B34]">${escapeHtml(u.fullName)}</h3>
-                            <p class="text-xs text-gray-600">📍 ${escapeHtml(u.unionName ? u.unionName + ", " : "")}${escapeHtml(u.upazila)}, ${escapeHtml(u.district)} (${escapeHtml(u.division)})</p>
-                          </div>
+          : renderChunkedGridWithFeedAds(
+              farmers,
+              (u) => {
+                const count = state.products.filter((p) => p.farmerId === u.id && p.status === "ACTIVE").length;
+                return `
+                  <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="flex items-center gap-2.5">
+                        ${u.profileImageUri ? `<img src="${escapeHtml(u.profileImageUri)}" alt="" class="w-10 h-10 rounded-full object-cover border border-emerald-200" />` : `<div class="w-10 h-10 rounded-full bg-[#EAF7EF] flex items-center justify-center">👨‍🌾</div>`}
+                        <div>
+                          <h3 class="font-bold text-base text-[#105B34]">${escapeHtml(u.fullName)}</h3>
+                          <p class="text-xs text-gray-600">📍 ${escapeHtml(u.unionName ? u.unionName + ", " : "")}${escapeHtml(u.upazila)}, ${escapeHtml(u.district)} (${escapeHtml(u.division)})</p>
                         </div>
-                        <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${u.verificationStatus === "VERIFIED" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}">
-                          ${u.verificationStatus === "VERIFIED" ? "✓ যাচাইকৃত" : "যাচাই চলমান"}
-                        </span>
                       </div>
-                      <p class="text-xs text-gray-700 line-clamp-2">${escapeHtml(u.farmBio || "সরাসরি ফসল উৎপাদনকারী কৃষক")}</p>
-                      <div class="flex items-center justify-between text-xs text-gray-600 pt-1">
-                        <span>★ ${Number(u.rating || 5).toFixed(1)} (${u.reviewCount || 0} রিভিউ)</span>
-                        <span>${count}টি সক্রিয় ফসল</span>
-                      </div>
-                      <div class="flex gap-2 pt-1">
-                        <button onclick="window.kbApp.navigate('farmer-profile', { id: '${escapeHtml(u.id)}' })" class="flex-1 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">খামার দেখুন</button>
-                        ${
-                          viewerActive
-                            ? `<a href="tel:${escapeHtml(u.phone)}" class="px-3 py-2 rounded-xl border border-emerald-200 text-xs font-bold text-[#105B34]">📞 কল</a>`
-                            : `<button onclick="window.kbApp.requireContactGate()" class="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-xs font-bold text-amber-900">🔒 কল</button>`
-                        }
-                      </div>
+                      <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold ${u.verificationStatus === "VERIFIED" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}">
+                        ${u.verificationStatus === "VERIFIED" ? "✓ যাচাইকৃত" : "যাচাই চলমান"}
+                      </span>
                     </div>
-                  `;
-                })
-                .join("")}
-            </div>`
+                    <p class="text-xs text-gray-700 line-clamp-2">${escapeHtml(u.farmBio || "সরাসরি ফসল উৎপাদনকারী কৃষক")}</p>
+                    <div class="flex items-center justify-between text-xs text-gray-600 pt-1">
+                      <span>★ ${Number(u.rating || 5).toFixed(1)} (${u.reviewCount || 0} রিভিউ)</span>
+                      <span>${count}টি সক্রিয় ফসল</span>
+                    </div>
+                    <div class="flex gap-2 pt-1">
+                      <button onclick="window.kbApp.navigate('farmer-profile', { id: '${escapeHtml(u.id)}' })" class="flex-1 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">খামার দেখুন</button>
+                      ${
+                        viewerActive
+                          ? `<a href="tel:${escapeHtml(u.phone)}" class="px-3 py-2 rounded-xl border border-emerald-200 text-xs font-bold text-[#105B34]">📞 কল</a>`
+                          : `<button onclick="window.kbApp.requireContactGate()" class="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-xs font-bold text-amber-900">🔒 কল</button>`
+                      }
+                    </div>
+                  </div>
+                `;
+              },
+              3,
+              "grid sm:grid-cols-2 lg:grid-cols-3 gap-4"
+            )
       }
+      ${renderAdPlacement("feed")}
     </div>
   `;
 }
@@ -5006,6 +5232,7 @@ function renderAdminDashboardPage() {
     ["categories", "ক্যাটাগরি ও এলাকা"],
     ["complaints", `অভিযোগ (${state.complaints.length})`],
     ["ads", "💰 বিজ্ঞাপন ও সব নেটওয়ার্ক"],
+    ["tips", `💡 ডেইলি টিপস (${state.dailyTips.length})`],
     ["audit", "অডিট লগ"]
   ];
 
@@ -5686,6 +5913,78 @@ function renderAdminDashboardPage() {
         </button>
       </form>
     `;
+  } else if (tab === "tips") {
+    const activeTipsCount = state.dailyTips.filter((t) => t.isActive !== false).length;
+    bodyHtml = `
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div class="bg-white rounded-3xl p-6 border border-emerald-100 shadow-sm space-y-4">
+          <h3 class="text-lg font-bold text-[#105B34]">💡 নতুন ডেইলি কৃষি টিপস যোগ করুন</h3>
+          <p class="text-xs text-gray-600">এখান থেকে যোগ, সম্পাদনা বা মুছে ফেলা ডেইলি টিপস তাৎক্ষণিকভাবে Android অ্যাপের Rewarded Video কার্ডে ও ওয়েবসাইটে লাইভ হবে।</p>
+          <form onsubmit="window.kbApp.handleAdminAddDailyTip(event)" class="space-y-3">
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-xs font-bold block mb-1">আইকন (Emoji)</label>
+                <select name="emoji" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
+                  <option value="🌾">🌾 ধান/শস্য</option>
+                  <option value="🧅">🧅 সবজি</option>
+                  <option value="📦">📦 পরিবহন</option>
+                  <option value="🚜">🚜 চাষাবাদ</option>
+                  <option value="🌱">🌱 চারা/বীজ</option>
+                  <option value="💧">💧 সেচ</option>
+                  <option value="🌦️">🌦️ আবহাওয়া</option>
+                  <option value="💰">💰 বাজার দর</option>
+                </select>
+              </div>
+              <div class="col-span-2">
+                <label class="text-xs font-bold block mb-1">ক্যাটাগরি</label>
+                <input name="categoryBn" value="পাইকারি পরামর্শ" placeholder="পাইকারি পরামর্শ / সংরক্ষণ" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">শিরোনাম *</label>
+              <input name="titleBn" required placeholder="যেমন: ধান ও ভুট্টা সংরক্ষণ পরামর্শ" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">বিস্তারিত ডেইলি টিপস *</label>
+              <textarea name="contentBn" rows="3" required placeholder="কৃষক ও ক্রেতাদের জন্য উপকারী টিপস লিখুন..." class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm"></textarea>
+            </div>
+            <label class="flex items-center gap-2 text-xs font-bold bg-[#EAF7EF] px-3 py-2.5 rounded-xl border border-emerald-200">
+              <input type="checkbox" name="isActive" checked /> সক্রিয় রাখুন (Rewarded Video ও হোমপেজে দেখাবে)
+            </label>
+            <button type="submit" class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm">+ ডেইলি টিপস যোগ করুন</button>
+          </form>
+        </div>
+
+        <div class="bg-white rounded-3xl p-6 border border-emerald-100 shadow-sm space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-base font-bold text-[#105B34]">সব ডেইলি টিপস (${state.dailyTips.length}টি • সক্রিয় ${activeTipsCount}টি)</h3>
+          </div>
+          <div class="space-y-3 max-h-[540px] overflow-y-auto">
+            ${
+              !state.dailyTips.length
+                ? `<div class="p-8 text-center text-xs text-gray-500 border border-dashed border-emerald-200 rounded-2xl">কোনো ডেইলি টিপস নেই। বাম পাশের ফর্ম থেকে যোগ করুন।</div>`
+                : state.dailyTips
+                    .map(
+                      (t) => `<div class="p-4 rounded-2xl border ${t.isActive !== false ? "border-emerald-200 bg-[#F7FAF7]" : "border-gray-200 bg-gray-50"} space-y-2 text-xs">
+                        <div class="flex items-start justify-between gap-2">
+                          <div class="font-bold text-sm text-[#105B34]">${escapeHtml(t.emoji || "🌾")} ${escapeHtml(t.titleBn)}</div>
+                          <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${t.isActive !== false ? "bg-emerald-100 text-emerald-800" : "bg-gray-200 text-gray-700"}">${t.isActive !== false ? "সক্রিয়" : "বন্ধ"}</span>
+                        </div>
+                        <div class="text-[11px] font-semibold text-[#168447]">${escapeHtml(t.categoryBn || "কৃষি পরামর্শ")}</div>
+                        <p class="text-gray-700 leading-relaxed">${escapeHtml(t.contentBn)}</p>
+                        <div class="flex flex-wrap gap-2 pt-1">
+                          <button type="button" onclick="window.kbApp.toggleDailyTipActive('${escapeHtml(t.id)}')" class="px-3 py-1 rounded-lg border border-emerald-200 bg-white text-[#105B34] font-bold">${t.isActive !== false ? "⏸ বন্ধ করুন" : "▶ চালু করুন"}</button>
+                          <button type="button" onclick="window.kbApp.openAdminEditDailyTipModal('${escapeHtml(t.id)}')" class="px-3 py-1 rounded-lg bg-[#EAF7EF] text-[#105B34] font-bold border border-emerald-200">✏️ সম্পাদনা</button>
+                          <button type="button" onclick="window.kbApp.confirmDeleteDailyTip('${escapeHtml(t.id)}')" class="px-3 py-1 rounded-lg bg-red-600 text-white font-bold">🗑️ মুছুন</button>
+                        </div>
+                      </div>`
+                    )
+                    .join("")
+            }
+          </div>
+        </div>
+      </div>
+    `;
   } else {
     bodyHtml = `<div class="space-y-2">${state.auditLogs.slice(0, 60).map((a) => `<div class="bg-white rounded-xl p-3 border border-emerald-100 text-xs flex justify-between"><div><strong>${escapeHtml(a.actionBn)}</strong> — ${escapeHtml(a.detailsBn)}</div><span class="text-gray-500">${new Date(a.createdAt).toLocaleString("bn-BD")}</span></div>`).join("") || `<div class="bg-white rounded-2xl p-8 text-center">কোনো লগ নেই।</div>`}</div>`;
   }
@@ -6365,6 +6664,93 @@ window.kbApp = {
       androidRewardedId: "Rewarded_Android",
       adTestMode: false
     });
+  },
+  revealNextDailyTip() {
+    const activeTips = state.dailyTips.filter((t) => t.isActive !== false);
+    if (!activeTips.length) return;
+    state.dailyTipIndex = (state.dailyTipIndex + 1) % activeTips.length;
+    state.revealedDailyTipId = activeTips[state.dailyTipIndex].id;
+    renderCurrentView();
+  },
+  async handleAdminAddDailyTip(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const ok = await adminSaveDailyTip({
+      emoji: String(fd.get("emoji") || "🌾"),
+      categoryBn: String(fd.get("categoryBn") || "কৃষি পরামর্শ"),
+      titleBn: String(fd.get("titleBn") || ""),
+      contentBn: String(fd.get("contentBn") || ""),
+      isActive: fd.get("isActive") === "on"
+    });
+    if (ok) e.target.reset();
+  },
+  async toggleDailyTipActive(tipId) {
+    const tip = state.dailyTips.find((t) => t.id === tipId);
+    if (!tip) return;
+    await adminSaveDailyTip({ ...tip, isActive: tip.isActive === false });
+  },
+  openAdminEditDailyTipModal(tipId) {
+    const tip = state.dailyTips.find((t) => t.id === tipId);
+    if (!tip) return;
+    openModal(`
+      <h3 class="text-lg font-bold text-[#105B34] mb-3">✏️ ডেইলি টিপস সম্পাদনা</h3>
+      <form onsubmit="window.kbApp.handleAdminEditDailyTipSubmit(event, '${escapeHtml(tip.id)}')" class="space-y-3">
+        <div class="grid grid-cols-3 gap-2">
+          <div>
+            <label class="text-xs font-bold block mb-1">আইকন</label>
+            <input name="emoji" value="${escapeHtml(tip.emoji || "🌾")}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
+          </div>
+          <div class="col-span-2">
+            <label class="text-xs font-bold block mb-1">ক্যাটাগরি</label>
+            <input name="categoryBn" value="${escapeHtml(tip.categoryBn || "কৃষি পরামর্শ")}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
+          </div>
+        </div>
+        <div>
+          <label class="text-xs font-bold block mb-1">শিরোনাম *</label>
+          <input name="titleBn" required value="${escapeHtml(tip.titleBn)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
+        </div>
+        <div>
+          <label class="text-xs font-bold block mb-1">বিস্তারিত টিপস *</label>
+          <textarea name="contentBn" rows="3" required class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm">${escapeHtml(tip.contentBn)}</textarea>
+        </div>
+        <label class="flex items-center gap-2 text-xs font-bold">
+          <input type="checkbox" name="isActive" ${tip.isActive !== false ? "checked" : ""} /> সক্রিয় রাখুন
+        </label>
+        <div class="flex gap-2 justify-end">
+          <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+          <button type="submit" class="px-4 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">সংরক্ষণ</button>
+        </div>
+      </form>
+    `);
+  },
+  async handleAdminEditDailyTipSubmit(e, tipId) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const ok = await adminSaveDailyTip({
+      id: tipId,
+      emoji: String(fd.get("emoji") || "🌾"),
+      categoryBn: String(fd.get("categoryBn") || "কৃষি পরামর্শ"),
+      titleBn: String(fd.get("titleBn") || ""),
+      contentBn: String(fd.get("contentBn") || ""),
+      isActive: fd.get("isActive") === "on"
+    });
+    if (ok) closeModal();
+  },
+  confirmDeleteDailyTip(tipId) {
+    const tip = state.dailyTips.find((t) => t.id === tipId);
+    if (!tip) return;
+    openModal(`
+      <h3 class="text-lg font-bold text-red-700 mb-2">🗑️ ডেইলি টিপস মুছবেন?</h3>
+      <p class="text-sm text-gray-700 mb-4">"${escapeHtml(tip.titleBn)}" স্থায়ীভাবে মুছে ফেলা হবে।</p>
+      <div class="flex gap-2 justify-end">
+        <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+        <button type="button" onclick="window.kbApp.deleteDailyTipConfirmed('${escapeHtml(tipId)}')" class="px-4 py-2 rounded-xl bg-red-600 text-white text-xs font-bold">হ্যাঁ, মুছুন</button>
+      </div>
+    `);
+  },
+  async deleteDailyTipConfirmed(tipId) {
+    closeModal();
+    await adminDeleteDailyTip(tipId);
   },
   adminResolveComplaint,
   exportCsvReport,

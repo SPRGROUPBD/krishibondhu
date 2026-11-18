@@ -69,6 +69,8 @@ fun AdminDashboardScreen(
     onUpdateProduct: (productId: String, nameBn: String, category: CategoryEntity, pricePerUnit: Double, availableQuantity: Double, descriptionBn: String, status: String) -> Unit = { _, _, _, _, _, _, _ -> },
     onDeleteProduct: (productId: String) -> Unit = {},
     onSaveAdConfig: (AdConfig) -> Unit = {},
+    onSaveDailyTip: (DailyTip) -> Unit = {},
+    onDeleteDailyTip: (String) -> Unit = {},
     onBuildCsvReport: () -> String
 ) {
     val context = LocalContext.current
@@ -85,7 +87,8 @@ fun AdminDashboardScreen(
         "ক্যাটাগরি",
         "এলাকা",
         "অডিট লগ",
-        "বিজ্ঞাপন ও সব নেটওয়ার্ক"
+        "বিজ্ঞাপন ও সব নেটওয়ার্ক",
+        "ডেইলি টিপস (${uiState.dailyTips.size})"
     )
 
     Scaffold(
@@ -186,6 +189,12 @@ fun AdminDashboardScreen(
                 8 -> AdminLocationsTab(uiState = uiState, onAddLocation = onAddLocation)
                 9 -> AdminAuditLogTab(uiState = uiState)
                 10 -> AdminAdMonetizationTab(adConfig = uiState.adConfig, onSaveAdConfig = onSaveAdConfig)
+                11 -> AdminDailyTipsTab(
+                    dailyTips = uiState.dailyTips,
+                    adConfig = uiState.adConfig,
+                    onSaveDailyTip = onSaveDailyTip,
+                    onDeleteDailyTip = onDeleteDailyTip
+                )
             }
         }
     }
@@ -2487,5 +2496,319 @@ private fun AdminAdMonetizationTab(
                 Text("বিজ্ঞাপন সেটিংস সেভ করুন (অ্যাপ + ওয়েবসাইট লাইভ)", fontWeight = FontWeight.Bold)
             }
         }
+    }
+}
+
+@Composable
+private fun AdminDailyTipsTab(
+    dailyTips: List<DailyTip>,
+    adConfig: AdConfig,
+    onSaveDailyTip: (DailyTip) -> Unit,
+    onDeleteDailyTip: (String) -> Unit
+) {
+    var editingTip by remember { mutableStateOf<DailyTip?>(null) }
+    var deletingTip by remember { mutableStateOf<DailyTip?>(null) }
+    var showFormDialog by remember { mutableStateOf(false) }
+
+    val emojiChoices = listOf("🌾", "🧅", "📦", "🚜", "🌱", "💧", "🌦️", "💰")
+    val activeCount = remember(dailyTips) { dailyTips.count { it.isActive } }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = HarvestGoldLight),
+                border = BorderStroke(1.dp, HarvestGold)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "ডেইলি টিপস ও Rewarded বিজ্ঞাপন ব্যবস্থাপনা",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkGreen
+                    )
+                    Text(
+                        text = "মোট টিপস: ${dailyTips.size}টি (সক্রিয়: ${activeCount}টি)। ব্যবহারকারীরা অ্যাপ ও ওয়েবসাইটে Rewarded Video দেখে এই টিপসগুলো আনলক করেন।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextCharcoal
+                    )
+                    Button(
+                        onClick = {
+                            editingTip = null
+                            showFormDialog = true
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin_add_daily_tip_button")
+                    ) {
+                        Icon(Icons.Filled.AddCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("নতুন ডেইলি টিপস যোগ করুন", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        if (dailyTips.isEmpty()) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("💡", style = MaterialTheme.typography.displaySmall)
+                        Text(
+                            text = "কোনো ডেইলি টিপস নেই",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "উপরের বাটনে ট্যাপ করে প্রথম ডেইলি কৃষি টিপস যোগ করুন।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        } else {
+            items(dailyTips, key = { it.id }) { tip ->
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(
+                        1.dp,
+                        if (tip.isActive) PrimaryGreen.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outline
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(tip.emoji.ifBlank { "🌾" }, style = MaterialTheme.typography.titleLarge)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = tip.titleBn,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = DarkGreen
+                                    )
+                                    if (tip.categoryBn.isNotBlank()) {
+                                        Text(
+                                            text = tip.categoryBn,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = PrimaryGreen
+                                        )
+                                    }
+                                }
+                            }
+                            Surface(
+                                color = if (tip.isActive) LightGreen else Color(0xFFF3F4F6),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = if (tip.isActive) "সক্রিয়" else "বন্ধ",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (tip.isActive) DarkGreen else Color(0xFF4B5563),
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+
+                        Text(
+                            text = tip.contentBn,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Switch(
+                                    checked = tip.isActive,
+                                    onCheckedChange = { checked ->
+                                        onSaveDailyTip(tip.copy(isActive = checked))
+                                    },
+                                    modifier = Modifier.testTag("admin_toggle_tip_${tip.id}")
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (tip.isActive) "সক্রিয়" else "বিরতি",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = {
+                                        editingTip = tip
+                                        showFormDialog = true
+                                    },
+                                    modifier = Modifier.testTag("admin_edit_tip_${tip.id}")
+                                ) {
+                                    Icon(Icons.Filled.Edit, contentDescription = "সম্পাদনা", modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("সম্পাদনা")
+                                }
+                                TextButton(
+                                    onClick = { deletingTip = tip },
+                                    colors = ButtonDefaults.textButtonColors(contentColor = AlertRed),
+                                    modifier = Modifier.testTag("admin_delete_tip_${tip.id}")
+                                ) {
+                                    Icon(Icons.Filled.Delete, contentDescription = "মুছুন", modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("মুছুন")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            AdBannerSection(
+                adConfig = adConfig,
+                placementTag = "admin_daily_tips"
+            )
+        }
+    }
+
+    if (showFormDialog) {
+        val current = editingTip
+        var emoji by remember(current) { mutableStateOf(current?.emoji?.ifBlank { "🌾" } ?: "🌾") }
+        var titleBn by remember(current) { mutableStateOf(current?.titleBn.orEmpty()) }
+        var categoryBn by remember(current) { mutableStateOf(current?.categoryBn ?: "পাইকারি পরামর্শ") }
+        var contentBn by remember(current) { mutableStateOf(current?.contentBn.orEmpty()) }
+        var isActive by remember(current) { mutableStateOf(current?.isActive ?: true) }
+        var formError by remember { mutableStateOf<String?>(null) }
+
+        AlertDialog(
+            onDismissRequest = { showFormDialog = false },
+            title = {
+                Text(if (current == null) "নতুন ডেইলি টিপস যোগ করুন" else "ডেইলি টিপস সম্পাদনা")
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("আইকন নির্বাচন", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(emojiChoices) { em ->
+                            FilterChip(
+                                selected = emoji == em,
+                                onClick = { emoji = em },
+                                label = { Text(em) }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = titleBn,
+                        onValueChange = {
+                            titleBn = it
+                            formError = null
+                        },
+                        label = { Text("শিরোনাম *") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("daily_tip_title_input")
+                    )
+                    OutlinedTextField(
+                        value = categoryBn,
+                        onValueChange = { categoryBn = it },
+                        label = { Text("ক্যাটাগরি (যেমন: সংরক্ষণ, বাজার দর)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("daily_tip_category_input")
+                    )
+                    OutlinedTextField(
+                        value = contentBn,
+                        onValueChange = {
+                            contentBn = it
+                            formError = null
+                        },
+                        label = { Text("বিস্তারিত টিপস *") },
+                        minLines = 3,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("daily_tip_content_input")
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("সক্রিয় রাখুন (Rewarded Ads-এ দেখাবে)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Switch(checked = isActive, onCheckedChange = { isActive = it })
+                    }
+                    if (!formError.isNullOrBlank()) {
+                        Text(formError!!, color = AlertRed, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleanTitle = titleBn.trim()
+                        val cleanContent = contentBn.trim()
+                        if (cleanTitle.isEmpty() || cleanContent.isEmpty()) {
+                            formError = "শিরোনাম এবং বিস্তারিত টিপস আবশ্যক"
+                            return@Button
+                        }
+                        val nextTip = (current ?: DailyTip()).copy(
+                            emoji = emoji.trim().ifBlank { "🌾" },
+                            titleBn = cleanTitle,
+                            categoryBn = categoryBn.trim().ifBlank { "কৃষি পরামর্শ" },
+                            contentBn = cleanContent,
+                            isActive = isActive
+                        )
+                        onSaveDailyTip(nextTip)
+                        showFormDialog = false
+                        editingTip = null
+                    },
+                    modifier = Modifier.testTag("daily_tip_save_button")
+                ) {
+                    Text("সংরক্ষণ করুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFormDialog = false }) { Text("বাতিল") }
+            }
+        )
+    }
+
+    deletingTip?.let { tip ->
+        AlertDialog(
+            onDismissRequest = { deletingTip = null },
+            title = { Text("ডেইলি টিপস মুছে ফেলবেন?") },
+            text = { Text("'${tip.titleBn}' স্থায়ীভাবে মুছে ফেলা হবে (অ্যাপ ও ওয়েবসাইট থেকে)।") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteDailyTip(tip.id)
+                        deletingTip = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AlertRed)
+                ) { Text("মুছে ফেলুন") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingTip = null }) { Text("বাতিল") }
+            }
+        )
     }
 }

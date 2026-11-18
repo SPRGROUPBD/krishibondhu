@@ -76,6 +76,12 @@ fun FarmerProfileScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             item {
+                AdBannerSection(
+                    adConfig = uiState.adConfig,
+                    placementTag = "farmer_profile_top"
+                )
+            }
+            item {
                 Card(
                     shape = RoundedCornerShape(20.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
@@ -232,7 +238,7 @@ fun FarmerProfileScreen(
                             onClick = { onProductClick(prod.id) },
                             onQuickAddToCart = { onQuickAddToCart(prod.id) }
                         )
-                        if ((idx + 1) % 3 == 0 && idx < farmerProducts.lastIndex && idx < 9) {
+                        if ((idx + 1) % 2 == 0 && idx < farmerProducts.lastIndex) {
                             AdBannerSection(
                                 adConfig = uiState.adConfig,
                                 placementTag = "farmer_profile_row_${idx + 1}"

@@ -45,6 +45,14 @@
       ".read": true,
       ".write": true
     },
+    "dailyTips": {
+      ".read": true,
+      ".write": true
+    },
+    "dailyTipsMeta": {
+      ".read": true,
+      ".write": true
+    },
     "activationPayments": {
       ".read": true,
       ".write": true,

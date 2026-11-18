@@ -9,7 +9,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.Calendar
 import java.util.UUID
 
@@ -48,6 +51,9 @@ class MarketplaceRepository(
 
     private val _adConfig = MutableStateFlow(AdConfig())
     val adConfig: StateFlow<AdConfig> = _adConfig.asStateFlow()
+
+    private val _dailyTips = MutableStateFlow(DefaultDailyTips.initialTips)
+    val dailyTips: StateFlow<List<DailyTip>> = _dailyTips.asStateFlow()
 
     fun observeFarmerPaymentSettings(farmerId: String): Flow<FarmerPaymentSettingsEntity?> =
         db.farmerPaymentSettingsDao().observeForFarmer(farmerId)
@@ -126,11 +132,22 @@ class MarketplaceRepository(
         onIncomingNotification: (NotificationEntity) -> Unit = {}
     ) {
         MasterCatalogSeeder.initialize(db)
+        runCatching {
+            val cachedTipsJson = prefs.sessionPrefs.first().dailyTipsJson
+            if (cachedTipsJson != null) {
+                _dailyTips.value = deserializeDailyTipsJson(cachedTipsJson)
+            }
+        }
         if (scope != null) {
             rtdbSync.startRealtimeListeners(
                 localDb = db,
                 scope = scope,
                 onAdConfigChanged = { _adConfig.value = it },
+                onDailyTipsChanged = { incoming ->
+                    if (incoming != null) {
+                        _dailyTips.value = incoming
+                    }
+                },
                 onSyncStateChanged = { syncing, err ->
                     _isSyncing.value = syncing
                     _syncError.value = err
@@ -150,7 +167,15 @@ class MarketplaceRepository(
 
     suspend fun syncNow(): Boolean {
         _isSyncing.value = true
-        val ok = rtdbSync.pullAllFromRest(db, onAdConfigChanged = { _adConfig.value = it })
+        val ok = rtdbSync.pullAllFromRest(
+            localDb = db,
+            onAdConfigChanged = { _adConfig.value = it },
+            onDailyTipsChanged = { incoming ->
+                if (incoming != null) {
+                    _dailyTips.value = incoming
+                }
+            }
+        )
         _isSyncing.value = false
         _syncError.value = if (ok) null else "সার্ভারের সাথে সংযোগ করতে সমস্যা হয়েছে। ইন্টারনেট চালু করে পুনরায় চেষ্টা করুন।"
         if (ok) {
@@ -2327,6 +2352,121 @@ class MarketplaceRepository(
             targetEntity = "AdConfig",
             targetId = "adConfig",
             detailsBn = "Android Ads: ${if (stamped.androidAdsEnabled) "চালু" else "বন্ধ"}, AdSense: ${if (stamped.adsenseEnabled) "চালু" else "বন্ধ"}, Adsterra: ${if (stamped.adsterraEnabled) "চালু" else "বন্ধ"}, Monetag: ${if (stamped.monetagEnabled) "চালু" else "বন্ধ"}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(Unit)
+    }
+
+    private fun serializeDailyTipsJson(tips: List<DailyTip>): String {
+        val arr = JSONArray()
+        tips.forEach { t ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", t.id)
+                    put("titleBn", t.titleBn)
+                    put("contentBn", t.contentBn)
+                    put("categoryBn", t.categoryBn)
+                    put("emoji", t.emoji)
+                    put("isActive", t.isActive)
+                    put("createdAt", t.createdAt)
+                    put("updatedAt", t.updatedAt)
+                }
+            )
+        }
+        return arr.toString()
+    }
+
+    private fun deserializeDailyTipsJson(json: String): List<DailyTip> {
+        val arr = runCatching { JSONArray(json) }.getOrNull() ?: return emptyList()
+        val list = mutableListOf<DailyTip>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id", "").ifBlank { continue }
+            val content = o.optString("contentBn", "").ifBlank { continue }
+            list.add(
+                DailyTip(
+                    id = id,
+                    titleBn = o.optString("titleBn", "কৃষি পরামর্শ").ifBlank { "কৃষি পরামর্শ" },
+                    contentBn = content,
+                    categoryBn = o.optString("categoryBn", "কৃষি টিপস").ifBlank { "কৃষি টিপস" },
+                    emoji = o.optString("emoji", "🌾").ifBlank { "🌾" },
+                    isActive = o.optBoolean("isActive", true),
+                    createdAt = o.optLong("createdAt", 0L),
+                    updatedAt = o.optLong("updatedAt", 0L)
+                )
+            )
+        }
+        return list.sortedByDescending { it.updatedAt }
+    }
+
+    suspend fun adminSaveDailyTip(admin: UserEntity, tip: DailyTip): Result<DailyTip> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন ডেইলি টিপস যুক্ত বা সম্পাদনা করতে পারেন।"))
+        }
+        val cleanTitle = tip.titleBn.trim()
+        val cleanContent = tip.contentBn.trim()
+        if (cleanTitle.isEmpty() || cleanContent.isEmpty()) {
+            return Result.failure(IllegalArgumentException("টিপসের শিরোনাম এবং বিস্তারিত পরামর্শ লিখুন।"))
+        }
+        val now = System.currentTimeMillis()
+        val isNew = tip.id.isBlank()
+        val existing = _dailyTips.value.firstOrNull { it.id == tip.id }
+        val saved = tip.copy(
+            id = tip.id.ifBlank { "tip_${UUID.randomUUID().toString().take(8)}" },
+            titleBn = cleanTitle,
+            contentBn = cleanContent,
+            categoryBn = tip.categoryBn.trim().ifBlank { "কৃষি টিপস" },
+            emoji = tip.emoji.trim().ifBlank { "🌾" },
+            createdAt = if (tip.createdAt > 0L) tip.createdAt else existing?.createdAt ?: now,
+            updatedAt = now
+        )
+        val wasUninitialized = prefs.sessionPrefs.first().dailyTipsJson == null
+        val updatedList = (_dailyTips.value.filterNot { it.id == saved.id } + saved)
+            .sortedByDescending { it.updatedAt }
+        _dailyTips.value = updatedList
+        prefs.setDailyTipsJson(serializeDailyTipsJson(updatedList))
+        if (wasUninitialized) {
+            updatedList.forEach { rtdbSync.pushDailyTip(it) }
+        } else {
+            rtdbSync.pushDailyTip(saved)
+        }
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = if (isNew) "ডেইলি টিপস যুক্ত" else "ডেইলি টিপস সম্পাদনা",
+            targetEntity = "DailyTip",
+            targetId = saved.id,
+            detailsBn = "${saved.emoji} ${saved.titleBn} (${if (saved.isActive) "সক্রিয়" else "নিষ্ক্রিয়"})"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(saved)
+    }
+
+    suspend fun adminDeleteDailyTip(admin: UserEntity, tipId: String): Result<Unit> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন ডেইলি টিপস মুছতে পারেন।"))
+        }
+        val target = _dailyTips.value.firstOrNull { it.id == tipId }
+            ?: return Result.failure(IllegalArgumentException("টিপসটি খুঁজে পাওয়া যায়নি।"))
+        val wasUninitialized = prefs.sessionPrefs.first().dailyTipsJson == null
+        val remaining = _dailyTips.value.filterNot { it.id == tipId }
+        _dailyTips.value = remaining
+        prefs.setDailyTipsJson(serializeDailyTipsJson(remaining))
+        if (wasUninitialized) {
+            remaining.forEach { rtdbSync.pushDailyTip(it) }
+        }
+        rtdbSync.deleteDailyTip(tipId)
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "ডেইলি টিপস মুছে ফেলা",
+            targetEntity = "DailyTip",
+            targetId = tipId,
+            detailsBn = "${target.emoji} ${target.titleBn} মুছে ফেলা হয়েছে"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)

@@ -1965,6 +1965,120 @@ class ExampleRobolectricTest {
         assertEquals(0, nextMonthSnap.totalClicks)
         assertTrue(nextMonthSnap.networkRevenueUsd.isEmpty())
     }
+
+    @Test
+    fun adminDailyTipsCrudSupportsAddEditToggleDeleteAndDoesNotResurrectEmptyList() = runBlocking {
+        repo.initializeCatalogsAndSync()
+        assertEquals(com.example.data.model.DefaultDailyTips.initialTips.size, repo.dailyTips.value.size)
+
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val buyer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "টিপস পরীক্ষক ক্রেতা",
+                phone = "01744440001",
+                rawPassword = "pass1234",
+                role = UserRole.BUYER,
+                division = "ঢাকা",
+                district = "ঢাকা",
+                upazila = "সাভার",
+                unionName = "",
+                village = "",
+                nidLastFour = "",
+                farmBio = ""
+            ).getOrThrow()
+        )
+
+        // Non-admin cannot add or delete daily tips
+        assertTrue(
+            repo.adminSaveDailyTip(
+                buyer,
+                com.example.data.model.DailyTip(
+                    titleBn = "অবৈধ টিপস",
+                    contentBn = "ক্রেতা টিপস যোগ করতে পারবে না"
+                )
+            ).isFailure
+        )
+        assertTrue(repo.adminDeleteDailyTip(buyer, repo.dailyTips.value.first().id).isFailure)
+
+        // Admin creates a new daily tip
+        val created = repo.adminSaveDailyTip(
+            admin,
+            com.example.data.model.DailyTip(
+                titleBn = "শীতকালীন সবজি প্যাকেজিং",
+                contentBn = "ছিদ্রযুক্ত প্লাস্টিক ক্রেটে টমেটো ও বেগুন পরিবহন করলে ক্ষতি ২৫% কমে।",
+                categoryBn = "প্যাকেজিং",
+                emoji = "🍅",
+                isActive = true
+            )
+        ).getOrThrow()
+        assertEquals(4, repo.dailyTips.value.size)
+        assertTrue(repo.dailyTips.value.any { it.id == created.id && it.isActive })
+
+        // Admin edits & pauses the tip
+        val edited = repo.adminSaveDailyTip(
+            admin,
+            created.copy(
+                titleBn = "টমেটো প্যাকেজিং আপডেট",
+                isActive = false
+            )
+        ).getOrThrow()
+        assertEquals("টমেটো প্যাকেজিং আপডেট", edited.titleBn)
+        assertFalse(repo.dailyTips.value.first { it.id == created.id }.isActive)
+
+        // Admin deletes all tips one by one -> persists empty list across re-initialization
+        val allIds = repo.dailyTips.value.map { it.id }
+        allIds.forEach { tipId ->
+            assertTrue(repo.adminDeleteDailyTip(admin, tipId).isSuccess)
+        }
+        assertTrue(repo.dailyTips.value.isEmpty())
+
+        val freshRepo = MarketplaceRepository(
+            db = db,
+            prefs = UserPreferences(context),
+            rtdbSync = FirebaseRealtimeSyncManager(enableRemoteSync = false)
+        )
+        freshRepo.initializeCatalogsAndSync()
+        assertTrue(freshRepo.dailyTips.value.isEmpty())
+    }
+
+    @Test
+    fun appOpenAdDefaultsUnitFallbackAndRouteBlockingWorkTogether() {
+        val defaultCfg = com.example.data.model.AdConfig().hydratedWithDefaults()
+        assertTrue(defaultCfg.appOpenEnabled)
+        assertEquals(
+            com.example.data.model.AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID,
+            com.example.ads.AdMonetizationManager.resolveEffectiveAppOpenUnitId(defaultCfg)
+        )
+
+        val customAppOpenCfg = defaultCfg.copy(androidAppOpenId = "AppOpen_Android")
+        assertEquals(
+            "AppOpen_Android",
+            com.example.ads.AdMonetizationManager.resolveEffectiveAppOpenUnitId(customAppOpenCfg)
+        )
+
+        val dirtyIosAppOpenCfg = defaultCfg.copy(androidAppOpenId = "AppOpen_iOS")
+        assertEquals(
+            com.example.data.model.AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID,
+            com.example.ads.AdMonetizationManager.resolveEffectiveAppOpenUnitId(dirtyIosAppOpenCfg)
+        )
+
+        com.example.ads.AdMonetizationManager.syncConfig(context, defaultCfg)
+        val appOpenMetric = com.example.ads.AdMonetizationManager.telemetry.value.formatMetrics[com.example.ads.AdFormatType.APP_OPEN]
+        assertNotNull(appOpenMetric)
+        assertTrue(appOpenMetric!!.enabled)
+        assertEquals(com.example.data.model.AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID, appOpenMetric.unitOrPlacementId)
+
+        // Check blocked vs allowed currentRoute tracking
+        listOf("splash", "cart", "sell", "sell?productId=p1", "order/ord_1", "activation", "login", "register", "register?role=FARMER")
+            .forEach { route ->
+                com.example.ads.AdMonetizationManager.setCurrentRoute(route)
+                assertTrue("Route $route should be ad-blocked", com.example.ads.AdMonetizationManager.isCurrentRouteAdBlocked())
+            }
+        listOf("home", "browse", "farmers", "orders", "profile", "farmer/f1", "product/p1", "admin")
+            .forEach { route ->
+                com.example.ads.AdMonetizationManager.setCurrentRoute(route)
+                assertFalse("Route $route should allow ads", com.example.ads.AdMonetizationManager.isCurrentRouteAdBlocked())
+            }
+    }
 }
-
-

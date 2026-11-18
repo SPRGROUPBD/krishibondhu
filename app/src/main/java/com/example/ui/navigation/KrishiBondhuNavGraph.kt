@@ -567,6 +567,8 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 onUpdateProduct = viewModel::adminUpdateProduct,
                                 onDeleteProduct = viewModel::deleteProduct,
                                 onSaveAdConfig = viewModel::adminSaveAdConfig,
+                                onSaveDailyTip = viewModel::adminSaveDailyTip,
+                                onDeleteDailyTip = viewModel::adminDeleteDailyTip,
                                 onBuildCsvReport = viewModel::buildCsvReport
                             )
                         } else {

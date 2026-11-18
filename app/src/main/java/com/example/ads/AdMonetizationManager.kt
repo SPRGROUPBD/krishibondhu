@@ -386,8 +386,11 @@ object AdMonetizationManager {
 
     private var appOpenAd: LevelPlayInterstitialAd? = null
     private var loadedAppOpenUnitId: String = ""
+    private var loadedDirectAppOpenId: String = ""
     private var isLoadingAppOpen = false
     private var lastAppOpenShownAt = 0L
+    @Volatile
+    private var pendingAppOpenOnLaunch = false
 
     private var startIoInterstitial: StartAppAd? = null
     private var startIoInterstitialReady = false
@@ -569,7 +572,15 @@ object AdMonetizationManager {
     }
 
     fun setCurrentRoute(route: String) {
+        val previousRoute = currentRoute
         currentRoute = route
+        if (isAdBlockedRoute(route) && route != "splash") {
+            pendingAppOpenOnLaunch = false
+            return
+        }
+        if (previousRoute == "splash" && route == "home" && pendingAppOpenOnLaunch) {
+            maybeShowAppOpenOnForeground(currentActivityRef?.get())
+        }
     }
 
     fun isCurrentRouteAdBlocked(): Boolean = isAdBlockedRoute(currentRoute)
@@ -952,7 +963,7 @@ object AdMonetizationManager {
                         network = "Start.io",
                         message = "Start.io SDK initialized"
                     )
-                    if (latestConfig.interstitialEnabled) {
+                    if (latestConfig.interstitialEnabled || latestConfig.appOpenEnabled) {
                         preloadStartIoInterstitial(appContext)
                     }
                     if (latestConfig.rewardedEnabled) {
@@ -988,7 +999,7 @@ object AdMonetizationManager {
 
     private fun preloadStartIoInterstitial(context: Context) {
         if (isTestEnvironment() || !startIoInitialized || isLoadingStartIoInterstitial || startIoInterstitialReady) return
-        if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || !latestConfig.interstitialEnabled) return
+        if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || (!latestConfig.interstitialEnabled && !latestConfig.appOpenEnabled)) return
         isLoadingStartIoInterstitial = true
         runCatching {
             val ad = StartAppAd(context.applicationContext)
@@ -997,7 +1008,10 @@ object AdMonetizationManager {
                 override fun onReceiveAd(adObj: Ad) {
                     isLoadingStartIoInterstitial = false
                     startIoInterstitialReady = true
-                    appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.INTERSTITIAL, "Start.io", "Start.io Interstitial ready")
+                    appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.INTERSTITIAL, "Start.io", "Start.io Interstitial / App Open ready")
+                    if (pendingAppOpenOnLaunch && latestConfig.appOpenEnabled && !isAdBlockedRoute(currentRoute)) {
+                        scope.launch { maybeShowAppOpenOnForeground() }
+                    }
                 }
 
                 override fun onFailedToReceiveAd(adObj: Ad?) {
@@ -1048,10 +1062,10 @@ object AdMonetizationManager {
             preloadRewarded(context, config.resolvedRewardedUnitId(), true)
         }
         if (config.appOpenEnabled) {
-            preloadAppOpen(context, config.resolvedAppOpenUnitId(), true)
+            preloadAppOpen(context, resolveEffectiveAppOpenUnitId(config), true)
         }
         if (startIoInitialized) {
-            if (config.interstitialEnabled) preloadStartIoInterstitial(context)
+            if (config.interstitialEnabled || config.appOpenEnabled) preloadStartIoInterstitial(context)
             if (config.rewardedEnabled) preloadStartIoRewarded(context)
         }
     }
@@ -1722,11 +1736,18 @@ object AdMonetizationManager {
         }
     }
 
+    internal fun resolveEffectiveAppOpenUnitId(config: AdConfig = latestConfig): String =
+        config.resolvedAppOpenUnitId().ifEmpty { config.resolvedInterstitialUnitId() }
+
     fun preloadAppOpen(context: Context, unitId: String, enabled: Boolean) {
-        val cleanId = unitId.trim()
+        val cleanId = unitId.trim().ifEmpty { latestConfig.resolvedInterstitialUnitId() }
         if (!enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
         if (cleanId.isEmpty()) {
-            markInvalidPlacement(AdFormatType.APP_OPEN, "App Open Ad Unit ID is blank")
+            if (isStartIoEnabledEffective()) {
+                preloadStartIoInterstitial(context)
+            } else {
+                markInvalidPlacement(AdFormatType.APP_OPEN, "App Open / Interstitial Ad Unit ID is blank")
+            }
             return
         }
         if (isTestEnvironment()) return
@@ -1734,10 +1755,56 @@ object AdMonetizationManager {
             appendLog(AdDebugEventCode.NETWORK_UNAVAILABLE, AdFormatType.APP_OPEN, message = "Offline: skipped app open preload")
             return
         }
-        if (!sdkInitialized || usesDirectUnityAds()) {
-            // LevelPlay App Open uses LevelPlayInterstitialAd; skip initialization loop if using Direct Unity mode
+        if (!sdkInitialized) {
+            initialize(context, latestConfig) {
+                preloadAppOpen(context, cleanId, latestConfig.appOpenEnabled)
+            }
             return
         }
+
+        if (usesDirectUnityAds()) {
+            if (loadedDirectAppOpenId == cleanId || isLoadingAppOpen) return
+            isLoadingAppOpen = true
+            updateFormatMetric(AdFormatType.APP_OPEN) {
+                it.copy(
+                    requestStatus = "Requesting",
+                    requestCount = it.requestCount + 1,
+                    unitOrPlacementId = cleanId
+                )
+            }
+            appendLog(AdDebugEventCode.AD_REQUEST_STARTED, AdFormatType.APP_OPEN, "Unity Ads", "Loading Unity App Open ($cleanId)")
+            runCatching {
+                UnityAds.load(cleanId, object : IUnityAdsLoadListener {
+                    override fun onUnityAdsAdLoaded(placementId: String) {
+                        isLoadingAppOpen = false
+                        loadedDirectAppOpenId = placementId
+                        trackFormatLoaded(AdFormatType.APP_OPEN, "Unity Ads")
+                        if (pendingAppOpenOnLaunch && !isAdBlockedRoute(currentRoute)) {
+                            scope.launch { maybeShowAppOpenOnForeground() }
+                        }
+                    }
+
+                    override fun onUnityAdsFailedToLoad(
+                        placementId: String,
+                        error: UnityAds.UnityAdsLoadError,
+                        message: String
+                    ) {
+                        isLoadingAppOpen = false
+                        loadedDirectAppOpenId = ""
+                        trackFormatFailed(AdFormatType.APP_OPEN, error.ordinal, "${error.name}: $message")
+                        scheduleRetry(context.applicationContext, AdFormatType.APP_OPEN) {
+                            preloadAppOpen(context.applicationContext, cleanId, latestConfig.appOpenEnabled)
+                        }
+                    }
+                })
+            }.onFailure { err ->
+                isLoadingAppOpen = false
+                loadedDirectAppOpenId = ""
+                appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.APP_OPEN, "Unity Ads", err.message ?: "Unity App Open load error")
+            }
+            return
+        }
+
         if ((appOpenAd?.isAdReady() == true && loadedAppOpenUnitId == cleanId) || isLoadingAppOpen) return
 
         isLoadingAppOpen = true
@@ -1766,6 +1833,9 @@ object AdMonetizationManager {
                         )
                     }
                     appendLog(AdDebugEventCode.AD_LOADED, AdFormatType.APP_OPEN, adInfo.adNetwork, "App Open ready")
+                    if (pendingAppOpenOnLaunch && !isAdBlockedRoute(currentRoute)) {
+                        scope.launch { maybeShowAppOpenOnForeground() }
+                    }
                 }
 
                 override fun onAdLoadFailed(error: LevelPlayAdError) {
@@ -1809,26 +1879,132 @@ object AdMonetizationManager {
         }
     }
 
+    private fun showDirectUnityAppOpen(activity: Activity, placementId: String) {
+        if (isShowingFullscreenAd) return
+        loadedDirectAppOpenId = ""
+        isShowingFullscreenAd = true
+        runCatching {
+            UnityAds.show(activity, placementId, UnityAdsShowOptions(), object : IUnityAdsShowListener {
+                override fun onUnityAdsShowFailure(
+                    placementId: String,
+                    error: UnityAds.UnityAdsShowError,
+                    message: String
+                ) {
+                    isShowingFullscreenAd = false
+                    updateFormatMetric(AdFormatType.APP_OPEN) {
+                        it.copy(failedCount = it.failedCount + 1, lastError = "${error.name}: $message")
+                    }
+                    appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.APP_OPEN, "Unity Ads", "${error.name}: $message")
+                    preloadAppOpen(activity.applicationContext, placementId, latestConfig.appOpenEnabled)
+                }
+
+                override fun onUnityAdsShowStart(placementId: String) {
+                    trackFormatDisplayed(AdFormatType.APP_OPEN, "Unity Ads")
+                }
+
+                override fun onUnityAdsShowClick(placementId: String) {
+                    trackFormatClicked(AdFormatType.APP_OPEN, "Unity Ads")
+                }
+
+                override fun onUnityAdsShowComplete(
+                    placementId: String,
+                    state: UnityAds.UnityAdsShowCompletionState
+                ) {
+                    isShowingFullscreenAd = false
+                    appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.APP_OPEN, "Unity Ads", "Unity App Open closed (${state.name})")
+                    preloadAppOpen(activity.applicationContext, placementId, latestConfig.appOpenEnabled)
+                }
+            })
+        }.onFailure { err ->
+            isShowingFullscreenAd = false
+            appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.APP_OPEN, "Unity Ads", err.message ?: "Unity App Open exception")
+        }
+    }
+
+    private fun showStartIoAppOpen(activity: Activity) {
+        val ad = startIoInterstitial ?: return
+        if (isShowingFullscreenAd) return
+        startIoInterstitialReady = false
+        isShowingFullscreenAd = true
+        val shown = runCatching {
+            ad.showAd(object : AdDisplayListener {
+                override fun adHidden(adObj: Ad) {
+                    isShowingFullscreenAd = false
+                    preloadStartIoInterstitial(activity.applicationContext)
+                }
+
+                override fun adDisplayed(adObj: Ad) {
+                    trackFormatDisplayed(AdFormatType.APP_OPEN, "Start.io")
+                }
+
+                override fun adClicked(adObj: Ad) {
+                    trackFormatClicked(AdFormatType.APP_OPEN, "Start.io")
+                }
+
+                override fun adNotDisplayed(adObj: Ad) {
+                    isShowingFullscreenAd = false
+                    preloadStartIoInterstitial(activity.applicationContext)
+                }
+            })
+        }.getOrDefault(false)
+        if (!shown) {
+            isShowingFullscreenAd = false
+            preloadStartIoInterstitial(activity.applicationContext)
+        }
+    }
+
     fun maybeShowAppOpenOnForeground(activity: Activity? = currentActivityRef?.get()) {
         val cfg = latestConfig
-        if (activity == null || activity.isFinishing || activity.isDestroyed) return
         if (isTestEnvironment() || !cfg.adsEnabled || !cfg.androidAdsEnabled || !cfg.appOpenEnabled) return
-        if (isAdBlockedRoute(currentRoute) || isShowingFullscreenAd) return
-        val cleanId = cfg.resolvedAppOpenUnitId()
-        if (cleanId.isEmpty()) return
-
-        val now = System.currentTimeMillis()
-        if (now - lastAppOpenShownAt < APP_OPEN_COOLDOWN_MS) return
-
-        val ad = appOpenAd
-        if (sdkInitialized && ad != null && loadedAppOpenUnitId == cleanId && ad.isAdReady()) {
-            lastAppOpenShownAt = now
-            isShowingFullscreenAd = true
-            runCatching { ad.showAd(activity, "app_open") }.onFailure {
-                isShowingFullscreenAd = false
+        if (currentRoute == "splash") {
+            pendingAppOpenOnLaunch = true
+            activity?.let { act ->
+                val cleanId = resolveEffectiveAppOpenUnitId(cfg)
+                if (cleanId.isNotEmpty()) preloadAppOpen(act, cleanId, true)
+                if (startIoInitialized) preloadStartIoInterstitial(act)
             }
-        } else {
-            preloadAppOpen(activity, cleanId, true)
+            return
+        }
+        if (isAdBlockedRoute(currentRoute) || isShowingFullscreenAd) return
+        if (activity == null || activity.isFinishing || activity.isDestroyed) return
+
+        val now = clockMillisProvider()
+        if (now - lastAppOpenShownAt < APP_OPEN_COOLDOWN_MS) {
+            pendingAppOpenOnLaunch = false
+            return
+        }
+
+        val cleanId = resolveEffectiveAppOpenUnitId(cfg)
+        val lpAd = appOpenAd
+        when {
+            !usesDirectUnityAds(cfg) && sdkInitialized && cleanId.isNotEmpty() && lpAd != null && loadedAppOpenUnitId == cleanId && lpAd.isAdReady() -> {
+                pendingAppOpenOnLaunch = false
+                lastAppOpenShownAt = now
+                isShowingFullscreenAd = true
+                runCatching { lpAd.showAd(activity, "app_open") }.onFailure {
+                    isShowingFullscreenAd = false
+                }
+            }
+            usesDirectUnityAds(cfg) && sdkInitialized && cleanId.isNotEmpty() && loadedDirectAppOpenId == cleanId -> {
+                pendingAppOpenOnLaunch = false
+                lastAppOpenShownAt = now
+                showDirectUnityAppOpen(activity, cleanId)
+            }
+            usesDirectUnityAds(cfg) && sdkInitialized && cleanId.isNotEmpty() && loadedDirectInterstitialId == cleanId -> {
+                pendingAppOpenOnLaunch = false
+                lastAppOpenShownAt = now
+                loadedDirectInterstitialId = ""
+                showDirectUnityAppOpen(activity, cleanId)
+            }
+            startIoInitialized && startIoInterstitialReady && startIoInterstitial != null -> {
+                pendingAppOpenOnLaunch = false
+                lastAppOpenShownAt = now
+                showStartIoAppOpen(activity)
+            }
+            else -> {
+                if (cleanId.isNotEmpty()) preloadAppOpen(activity, cleanId, true)
+                if (startIoInitialized) preloadStartIoInterstitial(activity)
+            }
         }
     }
 
@@ -2097,8 +2273,10 @@ object AdMonetizationManager {
         pendingDirectRewardShowActivity = null
         appOpenAd = null
         loadedAppOpenUnitId = ""
+        loadedDirectAppOpenId = ""
         isLoadingAppOpen = false
         lastAppOpenShownAt = 0L
+        pendingAppOpenOnLaunch = false
         startIoInterstitial = null
         startIoInterstitialReady = false
         isLoadingStartIoInterstitial = false
@@ -2173,7 +2351,7 @@ object AdMonetizationManager {
             updatedFormats[AdFormatType.REWARDED] = (updatedFormats[AdFormatType.REWARDED] ?: AdFormatTelemetry(AdFormatType.REWARDED))
                 .copy(enabled = config.rewardedEnabled, unitOrPlacementId = config.resolvedRewardedUnitId())
             updatedFormats[AdFormatType.APP_OPEN] = (updatedFormats[AdFormatType.APP_OPEN] ?: AdFormatTelemetry(AdFormatType.APP_OPEN))
-                .copy(enabled = config.appOpenEnabled, unitOrPlacementId = config.resolvedAppOpenUnitId())
+                .copy(enabled = config.appOpenEnabled, unitOrPlacementId = resolveEffectiveAppOpenUnitId(config))
 
             val directMode = usesDirectUnityAds(config)
             val resolvedAppKey = resolveMediationAppKey(config)

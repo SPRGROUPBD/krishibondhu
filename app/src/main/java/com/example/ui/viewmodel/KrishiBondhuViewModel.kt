@@ -45,6 +45,7 @@ data class MarketplaceUiState(
     val wholesaleOnly: Boolean? = true,
     val priceSort: PriceSort = PriceSort.NEWEST,
     val adConfig: AdConfig = AdConfig(),
+    val dailyTips: List<DailyTip> = DefaultDailyTips.initialTips,
     val toastMessage: String? = null
 ) {
     val activeRole: UserRole?
@@ -246,10 +247,11 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     private val syncExtrasFlow = combine(
         NetworkMonitor.observeIsOnline(application),
         repo.adConfig,
+        repo.dailyTips,
         repo.isSyncing,
         repo.syncError
-    ) { online, adCfg, syncing, syncErr ->
-        SyncStatusBundle(online, adCfg, syncing, syncErr)
+    ) { online, adCfg, tips, syncing, syncErr ->
+        SyncStatusBundle(online, adCfg, tips, syncing, syncErr)
     }
 
     private val paymentBundlesFlow = combine(
@@ -276,6 +278,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             toast = toast,
             online = syncBundle.online,
             adConfig = syncBundle.adConfig,
+            dailyTips = syncBundle.dailyTips,
             isSyncing = syncBundle.isSyncing,
             syncError = syncBundle.syncError
         )
@@ -325,6 +328,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             wholesaleOnly = true,
             priceSort = filter.priceSort,
             adConfig = extras.adConfig,
+            dailyTips = extras.dailyTips,
             toastMessage = extras.toast
         )
     }.stateIn(
@@ -993,6 +997,26 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    fun adminSaveDailyTip(tip: DailyTip) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminSaveDailyTip(admin, tip)
+                .onSuccess { showToast("ডেইলি টিপস সংরক্ষিত হয়েছে ও সবার জন্য লাইভ হয়েছে ✓") }
+                .onFailure { showToast(it.message ?: "ডেইলি টিপস সংরক্ষণ ব্যর্থ হয়েছে") }
+        }
+    }
+
+    fun adminDeleteDailyTip(tipId: String) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminDeleteDailyTip(admin, tipId)
+                .onSuccess { showToast("ডেইলি টিপস মুছে ফেলা হয়েছে") }
+                .onFailure { showToast(it.message ?: "ডেইলি টিপস মুছা যায়নি") }
+        }
+    }
+
     fun markAllNotificationsRead() {
         viewModelScope.launch { repo.markNotificationsRead(uiState.value.activeUser) }
     }
@@ -1024,6 +1048,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     private data class SyncStatusBundle(
         val online: Boolean,
         val adConfig: AdConfig,
+        val dailyTips: List<DailyTip>,
         val isSyncing: Boolean,
         val syncError: String?
     )
@@ -1043,6 +1068,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         val toast: String?,
         val online: Boolean,
         val adConfig: AdConfig,
+        val dailyTips: List<DailyTip>,
         val isSyncing: Boolean,
         val syncError: String?
     )

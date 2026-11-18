@@ -187,7 +187,7 @@ data class AdConfig(
     val androidInterstitialId: String = DEFAULT_UNITY_INTERSTITIAL_ID,
     val rewardedEnabled: Boolean = true,
     val androidRewardedId: String = DEFAULT_UNITY_REWARDED_ID,
-    val appOpenEnabled: Boolean = false,
+    val appOpenEnabled: Boolean = true,
     val androidAppOpenId: String = "",
     // 8 Supported Mediation Networks (Zero AdMob)
     val unityAdsEnabled: Boolean = true,
@@ -287,6 +287,52 @@ data class AdConfig(
             androidRewardedId = cleanRewarded.ifBlank { DEFAULT_UNITY_REWARDED_ID }
         )
     }
+}
+
+data class DailyTip(
+    val id: String = "",
+    val titleBn: String = "",
+    val contentBn: String = "",
+    val categoryBn: String = "কৃষি টিপস",
+    val emoji: String = "🌾",
+    val isActive: Boolean = true,
+    val createdAt: Long = 0L,
+    val updatedAt: Long = 0L
+)
+
+object DefaultDailyTips {
+    val initialTips: List<DailyTip> = listOf(
+        DailyTip(
+            id = "tip_seed_01",
+            titleBn = "ধান ও ভুট্টা সংরক্ষণ পরামর্শ",
+            contentBn = "মণ প্রতি আর্দ্রতা ১৪% এর নিচে থাকলে ধান ও ভুট্টা সংরক্ষণে ভালো পাইকারি দাম পাওয়া যায়।",
+            categoryBn = "পাইকারি সংরক্ষণ",
+            emoji = "🌾",
+            isActive = true,
+            createdAt = 1763424000000L,
+            updatedAt = 1763424000000L
+        ),
+        DailyTip(
+            id = "tip_seed_02",
+            titleBn = "পেঁয়াজ ও আলু পচন রোধ",
+            contentBn = "পেঁয়াজ ও আলু ছায়াযুক্ত ও বাতাস চলাচল করে এমন মাচায় রাখলে পচন ৩০% পর্যন্ত কমে।",
+            categoryBn = "ফসল সংরক্ষণ",
+            emoji = "🧅",
+            isActive = true,
+            createdAt = 1763424001000L,
+            updatedAt = 1763424001000L
+        ),
+        DailyTip(
+            id = "tip_seed_03",
+            titleBn = "সরাসরি খামার পিকআপ সাশ্রয়",
+            contentBn = "সরাসরি খামার থেকে পাইকারি পিকআপে মধ্যস্বত্বভোগীর ৫–১২% খরচ সাশ্রয় হয়।",
+            categoryBn = "পরিবহন ও বাজার",
+            emoji = "📦",
+            isActive = true,
+            createdAt = 1763424002000L,
+            updatedAt = 1763424002000L
+        )
+    )
 }
 
 fun Double.formatBdt(): String {

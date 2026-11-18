@@ -647,6 +647,12 @@ fun BrowseScreen(
 
         Spacer(modifier = Modifier.height(6.dp))
 
+        AdBannerSection(
+            adConfig = uiState.adConfig,
+            placementTag = if (showFarmersTab) "browse_farmers_top" else "browse_crops_top",
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+        )
+
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val useListLayout = maxWidth < 540.dp
 
@@ -705,7 +711,7 @@ fun BrowseScreen(
                                     onQuickAddToCart = { onQuickAddToCart(prod.id) },
                                     showQuickAdd = !isFarmerRole
                                 )
-                                if ((idx + 1) % 3 == 0 && idx < uiState.filteredProducts.lastIndex && idx < 9) {
+                                if ((idx + 1) % 2 == 0 && idx < uiState.filteredProducts.lastIndex) {
                                     AdBannerSection(
                                         adConfig = uiState.adConfig,
                                         placementTag = "browse_crops_row_${idx + 1}",
@@ -730,7 +736,7 @@ fun BrowseScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        val gridChunkSize = 4
+                        val gridChunkSize = 2
                         val productChunks = uiState.filteredProducts.chunked(gridChunkSize)
                         productChunks.forEachIndexed { chunkIdx, chunk ->
                             items(chunk, key = { it.id }) { prod ->
@@ -743,7 +749,7 @@ fun BrowseScreen(
                                     showQuickAdd = !isFarmerRole
                                 )
                             }
-                            if (chunkIdx < productChunks.lastIndex && chunkIdx < 3) {
+                            if (chunkIdx < productChunks.lastIndex) {
                                 item(
                                     key = "browse_crops_grid_ad_$chunkIdx",
                                     span = { GridItemSpan(maxLineSpan) }
@@ -819,7 +825,7 @@ fun BrowseScreen(
                                     language = lang,
                                     onClick = { onFarmerClick(farmer.id) }
                                 )
-                                if ((idx + 1) % 3 == 0 && idx < uiState.filteredFarmers.lastIndex && idx < 9) {
+                                if ((idx + 1) % 2 == 0 && idx < uiState.filteredFarmers.lastIndex) {
                                     AdBannerSection(
                                         adConfig = uiState.adConfig,
                                         placementTag = "browse_farmers_row_${idx + 1}",

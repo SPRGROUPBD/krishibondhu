@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
@@ -225,110 +226,124 @@ fun OrdersScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(visibleOrders, key = { it.id }) { order ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("order_card_${order.id}")
-                            .clickable { onOrderClick(order.id) },
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                item {
+                    AdBannerSection(
+                        adConfig = uiState.adConfig,
+                        placementTag = "orders_top"
+                    )
+                }
+                itemsIndexed(visibleOrders, key = { _, order -> order.id }) { idx, order ->
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("order_card_${order.id}")
+                                .clickable { onOrderClick(order.id) },
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                            Column(
+                                modifier = Modifier.padding(14.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.ReceiptLong,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = order.orderCode,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                                OrderStatusChip(order.status, lang)
-                            }
-                            Text(
-                                text = order.itemsSummary,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                            Text(
-                                text = if (isFarmer && showIncomingForFarmer)
-                                    "ক্রেতা: ${order.buyerName} (${order.upazila})"
-                                else
-                                    "কৃষক: ${order.farmerName} (${order.upazila})",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            HorizontalDivider()
-                            val due = kotlin.math.max(0.0, order.grandTotal - order.verifiedAdvanceTotal)
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column {
-                                    Text(
-                                        text = "নিশ্চিত অগ্রিম: ${order.verifiedAdvanceTotal.formatBdt()}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = DarkGreen,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Text(
-                                        text = "বকেয়া: ${due.formatBdt()}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.ReceiptLong,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = order.orderCode,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                    OrderStatusChip(order.status, lang)
                                 }
                                 Text(
-                                    text = order.grandTotal.formatBdt(),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
+                                    text = order.itemsSummary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
                                 )
-                            }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Surface(
-                                    color = if (order.farmerPaymentConfirmed) LightGreen else HarvestGoldLight,
-                                    shape = RoundedCornerShape(6.dp)
+                                Text(
+                                    text = if (isFarmer && showIncomingForFarmer)
+                                        "ক্রেতা: ${order.buyerName} (${order.upazila})"
+                                    else
+                                        "কৃষক: ${order.farmerName} (${order.upazila})",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                HorizontalDivider()
+                                val due = kotlin.math.max(0.0, order.grandTotal - order.verifiedAdvanceTotal)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
+                                    Column {
+                                        Text(
+                                            text = "নিশ্চিত অগ্রিম: ${order.verifiedAdvanceTotal.formatBdt()}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = DarkGreen,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = "বকেয়া: ${due.formatBdt()}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                     Text(
-                                        text = if (order.farmerPaymentConfirmed) "✓ কৃষক কর্তৃক অনুমোদিত" else "যাচাই / অনুমোদন অপেক্ষমাণ",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (order.farmerPaymentConfirmed) DarkGreen else androidx.compose.ui.graphics.Color(0xFF92400E),
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        text = order.grandTotal.formatBdt(),
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
                                     )
                                 }
-                                Surface(
-                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                    shape = RoundedCornerShape(6.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text(
-                                        text = "সরাসরি পেমেন্ট (${order.paymentMethod})",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        fontWeight = FontWeight.SemiBold,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
+                                    Surface(
+                                        color = if (order.farmerPaymentConfirmed) LightGreen else HarvestGoldLight,
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = if (order.farmerPaymentConfirmed) "✓ কৃষক কর্তৃক অনুমোদিত" else "যাচাই / অনুমোদন অপেক্ষমাণ",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (order.farmerPaymentConfirmed) DarkGreen else androidx.compose.ui.graphics.Color(0xFF92400E),
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "সরাসরি পেমেন্ট (${order.paymentMethod})",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
                                 }
                             }
+                        }
+                        if ((idx + 1) % 3 == 0 && idx < visibleOrders.lastIndex) {
+                            AdBannerSection(
+                                adConfig = uiState.adConfig,
+                                placementTag = "orders_row_${idx + 1}"
+                            )
                         }
                     }
                 }

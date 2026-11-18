@@ -5,6 +5,7 @@ import android.util.Log
 import com.example.data.local.*
 import com.example.data.model.AccountStatus
 import com.example.data.model.AdConfig
+import com.example.data.model.DailyTip
 import com.example.data.model.UserRole
 import com.example.data.model.normalizeBn
 import com.google.firebase.FirebaseApp
@@ -81,6 +82,7 @@ class FirebaseRealtimeSyncManager(
         localDb: KrishiBondhuDatabase,
         scope: CoroutineScope,
         onAdConfigChanged: (AdConfig) -> Unit = {},
+        onDailyTipsChanged: (List<DailyTip>?) -> Unit = {},
         onSyncStateChanged: (isSyncing: Boolean, error: String?) -> Unit = { _, _ -> },
         onIncomingNotification: (NotificationEntity) -> Unit
     ) {
@@ -90,10 +92,10 @@ class FirebaseRealtimeSyncManager(
         // Always launch REST immediate pull + fast initial retry + periodic live mirror loop
         scope.launch(Dispatchers.IO) {
             onSyncStateChanged(true, null)
-            var ok = pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+            var ok = pullAllFromRest(localDb, onAdConfigChanged, onDailyTipsChanged, onIncomingNotification)
             if (!ok) {
                 delay(1_800L)
-                ok = pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+                ok = pullAllFromRest(localDb, onAdConfigChanged, onDailyTipsChanged, onIncomingNotification)
             }
             onSyncStateChanged(
                 false,
@@ -101,7 +103,7 @@ class FirebaseRealtimeSyncManager(
             )
             while (isActive) {
                 delay(12_000L)
-                val pollOk = pullAllFromRest(localDb, onAdConfigChanged, onIncomingNotification)
+                val pollOk = pullAllFromRest(localDb, onAdConfigChanged, onDailyTipsChanged, onIncomingNotification)
                 if (pollOk) {
                     onSyncStateChanged(false, null)
                 }
@@ -265,6 +267,27 @@ class FirebaseRealtimeSyncManager(
 
             override fun onCancelled(error: DatabaseError) {
                 Log.w(TAG, "adConfig listener cancelled: ${error.message}")
+            }
+        })
+
+        // 6c. Admin-Managed Daily Tips listener
+        root.child("dailyTips").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (snapshot.exists()) {
+                    val tips = snapshot.children.mapNotNull { snapToDailyTip(it) }
+                        .sortedByDescending { it.updatedAt }
+                    onDailyTipsChanged(tips)
+                } else {
+                    root.child("dailyTipsMeta").child("managed").get().addOnSuccessListener { metaSnap ->
+                        if (metaSnap.getValue(Boolean::class.java) == true) {
+                            onDailyTipsChanged(emptyList())
+                        }
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "dailyTips listener cancelled: ${error.message}")
             }
         })
 
@@ -498,6 +521,7 @@ class FirebaseRealtimeSyncManager(
     suspend fun pullAllFromRest(
         localDb: KrishiBondhuDatabase,
         onAdConfigChanged: (AdConfig) -> Unit = {},
+        onDailyTipsChanged: (List<DailyTip>?) -> Unit = {},
         onIncomingNotification: (NotificationEntity) -> Unit = {}
     ): Boolean = syncMutex.withLock {
         if (!enableRemoteSync) return@withLock false
@@ -528,11 +552,14 @@ class FirebaseRealtimeSyncManager(
                     cmpRes = RestGetOutcome(true, rootObj.optJSONObject("complaints")?.toString() ?: "null"),
                     audRes = RestGetOutcome(true, rootObj.optJSONObject("auditLogs")?.toString() ?: "null"),
                     adRes = RestGetOutcome(true, rootObj.optJSONObject("adConfig")?.toString() ?: "null"),
+                    tipsRes = RestGetOutcome(true, rootObj.optJSONObject("dailyTips")?.toString() ?: "null"),
+                    tipsMetaRes = RestGetOutcome(true, rootObj.optJSONObject("dailyTipsMeta")?.toString() ?: "null"),
                     payRes = RestGetOutcome(true, rootObj.optJSONObject("activationPayments")?.toString() ?: "null"),
                     psRes = RestGetOutcome(true, rootObj.optJSONObject("paymentSettings")?.toString() ?: "null"),
                     fpsRes = RestGetOutcome(true, rootObj.optJSONObject("farmerPaymentSettings")?.toString() ?: "null"),
                     opRes = RestGetOutcome(true, rootObj.optJSONObject("orderPayments")?.toString() ?: "null"),
                     onAdConfigChanged = onAdConfigChanged,
+                    onDailyTipsChanged = onDailyTipsChanged,
                     onIncomingNotification = onIncomingNotification
                 )
                 return@withLock true
@@ -551,6 +578,8 @@ class FirebaseRealtimeSyncManager(
             val cmpD = async(Dispatchers.IO) { restGetJsonWithStatus("complaints.json") }
             val audD = async(Dispatchers.IO) { restGetJsonWithStatus("auditLogs.json") }
             val adD = async(Dispatchers.IO) { restGetJsonWithStatus("adConfig.json") }
+            val tipsD = async(Dispatchers.IO) { restGetJsonWithStatus("dailyTips.json") }
+            val tipsMetaD = async(Dispatchers.IO) { restGetJsonWithStatus("dailyTipsMeta.json") }
             val payD = async(Dispatchers.IO) { restGetJsonWithStatus("activationPayments.json") }
             val psD = async(Dispatchers.IO) { restGetJsonWithStatus("paymentSettings.json") }
             val fpsD = async(Dispatchers.IO) { restGetJsonWithStatus("farmerPaymentSettings.json") }
@@ -566,6 +595,8 @@ class FirebaseRealtimeSyncManager(
             val cmpRes = cmpD.await()
             val audRes = audD.await()
             val adRes = adD.await()
+            val tipsRes = tipsD.await()
+            val tipsMetaRes = tipsMetaD.await()
             val payRes = payD.await()
             val psRes = psD.await()
             val fpsRes = fpsD.await()
@@ -583,11 +614,14 @@ class FirebaseRealtimeSyncManager(
                 cmpRes = cmpRes,
                 audRes = audRes,
                 adRes = adRes,
+                tipsRes = tipsRes,
+                tipsMetaRes = tipsMetaRes,
                 payRes = payRes,
                 psRes = psRes,
                 fpsRes = fpsRes,
                 opRes = opRes,
                 onAdConfigChanged = onAdConfigChanged,
+                onDailyTipsChanged = onDailyTipsChanged,
                 onIncomingNotification = onIncomingNotification
             )
             prodsRes.ok || usersRes.ok
@@ -613,11 +647,14 @@ class FirebaseRealtimeSyncManager(
         cmpRes: RestGetOutcome,
         audRes: RestGetOutcome,
         adRes: RestGetOutcome,
+        tipsRes: RestGetOutcome,
+        tipsMetaRes: RestGetOutcome,
         payRes: RestGetOutcome,
         psRes: RestGetOutcome,
         fpsRes: RestGetOutcome,
         opRes: RestGetOutcome,
         onAdConfigChanged: (AdConfig) -> Unit,
+        onDailyTipsChanged: (List<DailyTip>?) -> Unit,
         onIncomingNotification: (NotificationEntity) -> Unit
     ) {
         // 1. Categories first (FK target of products)
@@ -792,6 +829,18 @@ class FirebaseRealtimeSyncManager(
                 onAdConfigChanged(AdConfig())
             } else {
                 jsonToAdConfig(adObj)?.let { onAdConfigChanged(it) }
+            }
+        }
+
+        // 8b. Daily Tips
+        val tipsManaged = parseJsonObjectOrNull(tipsMetaRes)?.optBoolean("managed", false) == true
+        parseJsonObjectOrNull(tipsRes)?.let { tipsObj ->
+            if (tipsObj.length() > 0) {
+                val list = parseJsonMap(tipsObj) { id, obj -> jsonToDailyTip(id, obj) }
+                    .sortedByDescending { it.updatedAt }
+                onDailyTipsChanged(list)
+            } else if (tipsManaged) {
+                onDailyTipsChanged(emptyList())
             }
         }
 
@@ -1016,6 +1065,36 @@ class FirebaseRealtimeSyncManager(
         val map = adConfigToMap(config)
         pushNode("adConfig", map) { root ->
             root.child("adConfig").setValue(map).await()
+        }
+    }
+
+    suspend fun markDailyTipsManaged() {
+        val meta = mapOf("managed" to true, "updatedAt" to System.currentTimeMillis())
+        pushNode("dailyTipsMeta", meta) { root ->
+            root.child("dailyTipsMeta").setValue(meta).await()
+        }
+    }
+
+    suspend fun pushDailyTip(tip: DailyTip) {
+        val map = dailyTipToMap(tip)
+        pushNode("dailyTips/${tip.id}", map) { root ->
+            root.child("dailyTips").child(tip.id).setValue(map).await()
+        }
+        markDailyTipsManaged()
+    }
+
+    suspend fun deleteDailyTip(tipId: String) {
+        if (!enableRemoteSync || tipId.isBlank()) return
+        markDailyTipsManaged()
+        val sdkOk = withTimeoutOrNull(3000L) {
+            runCatching {
+                val root = rootRefOrNull() ?: return@runCatching false
+                root.child("dailyTips").child(tipId).removeValue().await()
+                true
+            }.getOrDefault(false)
+        } ?: false
+        if (!sdkOk) {
+            restDelete("dailyTips/$tipId.json")
         }
     }
 
@@ -1913,7 +1992,7 @@ class FirebaseRealtimeSyncManager(
             androidInterstitialId = s.str("androidInterstitialId") ?: AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID,
             rewardedEnabled = s.bool("rewardedEnabled") ?: true,
             androidRewardedId = s.str("androidRewardedId") ?: AdConfig.DEFAULT_UNITY_REWARDED_ID,
-            appOpenEnabled = s.bool("appOpenEnabled") ?: false,
+            appOpenEnabled = s.bool("appOpenEnabled") ?: true,
             androidAppOpenId = s.str("androidAppOpenId") ?: "",
             unityAdsEnabled = s.bool("unityAdsEnabled") ?: true,
             unityGameId = s.str("unityGameId") ?: AdConfig.DEFAULT_UNITY_GAME_ID,
@@ -1983,7 +2062,7 @@ class FirebaseRealtimeSyncManager(
             androidInterstitialId = o.optString("androidInterstitialId", AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID),
             rewardedEnabled = o.optBoolean("rewardedEnabled", true),
             androidRewardedId = o.optString("androidRewardedId", AdConfig.DEFAULT_UNITY_REWARDED_ID),
-            appOpenEnabled = o.optBoolean("appOpenEnabled", false),
+            appOpenEnabled = o.optBoolean("appOpenEnabled", true),
             androidAppOpenId = o.optString("androidAppOpenId", ""),
             unityAdsEnabled = o.optBoolean("unityAdsEnabled", true),
             unityGameId = o.optString("unityGameId", AdConfig.DEFAULT_UNITY_GAME_ID),
@@ -2278,6 +2357,48 @@ class FirebaseRealtimeSyncManager(
             rejectionReason = o.optString("rejectionReason", ""),
             verifiedBy = o.optString("verifiedBy", ""),
             verifiedAt = o.optLong("verifiedAt", 0L),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
+        )
+    }
+
+    private fun dailyTipToMap(t: DailyTip): Map<String, Any?> = mapOf(
+        "id" to t.id,
+        "titleBn" to t.titleBn,
+        "contentBn" to t.contentBn,
+        "categoryBn" to t.categoryBn,
+        "emoji" to t.emoji,
+        "isActive" to t.isActive,
+        "createdAt" to t.createdAt,
+        "updatedAt" to t.updatedAt
+    )
+
+    private fun snapToDailyTip(s: DataSnapshot): DailyTip? {
+        val id = s.str("id") ?: s.key ?: return null
+        val contentBn = s.str("contentBn") ?: return null
+        return DailyTip(
+            id = id,
+            titleBn = s.str("titleBn") ?: "কৃষি পরামর্শ",
+            contentBn = contentBn,
+            categoryBn = s.str("categoryBn") ?: "কৃষি টিপস",
+            emoji = s.str("emoji") ?: "🌾",
+            isActive = s.bool("isActive") ?: true,
+            createdAt = s.lng("createdAt") ?: System.currentTimeMillis(),
+            updatedAt = s.lng("updatedAt") ?: System.currentTimeMillis()
+        )
+    }
+
+    private fun jsonToDailyTip(key: String, o: JSONObject): DailyTip? {
+        val id = o.optString("id", key).ifBlank { key }
+        val contentBn = o.optString("contentBn", "")
+        if (contentBn.isBlank()) return null
+        return DailyTip(
+            id = id,
+            titleBn = o.optString("titleBn", "কৃষি পরামর্শ").ifBlank { "কৃষি পরামর্শ" },
+            contentBn = contentBn,
+            categoryBn = o.optString("categoryBn", "কৃষি টিপস").ifBlank { "কৃষি টিপস" },
+            emoji = o.optString("emoji", "🌾").ifBlank { "🌾" },
+            isActive = o.optBoolean("isActive", true),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
         )

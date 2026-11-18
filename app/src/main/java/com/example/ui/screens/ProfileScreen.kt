@@ -183,6 +183,13 @@ fun ProfileScreen(
             }
         }
 
+        item {
+            AdBannerSection(
+                adConfig = uiState.adConfig,
+                placementTag = "profile_top"
+            )
+        }
+
         // Account Authentication / Session Card
         item {
             Card(

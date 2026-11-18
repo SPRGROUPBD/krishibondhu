@@ -14,13 +14,15 @@ private val Context.dataStore by preferencesDataStore(name = "krishi_bondhu_pref
 data class UserSessionPrefs(
     val activeUserId: String = "",
     val language: AppLanguage = AppLanguage.BENGALI,
-    val darkMode: Boolean = false
+    val darkMode: Boolean = false,
+    val dailyTipsJson: String? = null
 )
 
 class UserPreferences(private val context: Context) {
     private val keyUserId = stringPreferencesKey("active_user_id")
     private val keyLanguage = stringPreferencesKey("app_language")
     private val keyDarkMode = booleanPreferencesKey("dark_mode")
+    private val keyDailyTipsJson = stringPreferencesKey("daily_tips_json")
 
     val sessionPrefs: Flow<UserSessionPrefs> = context.dataStore.data.map { prefs ->
         val langName = prefs[keyLanguage] ?: AppLanguage.BENGALI.name
@@ -31,7 +33,8 @@ class UserPreferences(private val context: Context) {
         UserSessionPrefs(
             activeUserId = cleanUid,
             language = lang,
-            darkMode = prefs[keyDarkMode] ?: false
+            darkMode = prefs[keyDarkMode] ?: false,
+            dailyTipsJson = prefs[keyDailyTipsJson]
         )
     }
 
@@ -45,5 +48,9 @@ class UserPreferences(private val context: Context) {
 
     suspend fun setDarkMode(enabled: Boolean) {
         context.dataStore.edit { it[keyDarkMode] = enabled }
+    }
+
+    suspend fun setDailyTipsJson(json: String) {
+        context.dataStore.edit { it[keyDailyTipsJson] = json }
     }
 }

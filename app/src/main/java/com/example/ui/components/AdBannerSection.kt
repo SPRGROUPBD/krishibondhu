@@ -45,6 +45,8 @@ import coil.compose.AsyncImage
 import com.example.ads.AdFormatType
 import com.example.ads.AdMonetizationManager
 import com.example.data.model.AdConfig
+import com.example.data.model.DailyTip
+import com.example.data.model.DefaultDailyTips
 import com.example.ui.theme.DarkGreen
 import com.example.ui.theme.HarvestGoldLight
 import com.example.ui.theme.LightGreen
@@ -714,6 +716,7 @@ private fun StartIoBannerAdCard(
 @Composable
 fun RewardedMarketTipCard(
     adConfig: AdConfig,
+    dailyTips: List<DailyTip> = DefaultDailyTips.initialTips,
     modifier: Modifier = Modifier
 ) {
     if (!adConfig.adsEnabled || !adConfig.androidAdsEnabled || !adConfig.rewardedEnabled) return
@@ -727,15 +730,17 @@ fun RewardedMarketTipCard(
     if (!hasAdConfig) return
 
     val context = LocalContext.current
-    var unlockedTip by remember { mutableStateOf<String?>(null) }
+    val activeTips = remember(dailyTips) { dailyTips.filter { it.isActive } }
+    var unlockedTip by remember { mutableStateOf<DailyTip?>(null) }
+    var nextTipIndex by remember { mutableIntStateOf(0) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    val tips = remember {
-        listOf(
-            "🌾 পাইকারি পরামর্শ: মণ প্রতি আর্দ্রতা ১৪% এর নিচে থাকলে ধান ও ভুট্টা সংরক্ষণে ভালো পাইকারি দাম পাওয়া যায়।",
-            "🧅 সংরক্ষণ টিপস: পেঁয়াজ ও আলু ছায়াযুক্ত ও বাতাস চলাচল করে এমন মাচায় রাখলে পচন ৩০% পর্যন্ত কমে।",
-            "📦 পরিবহন টিপস: সরাসরি খামার থেকে পাইকারি পিকআপে মধ্যস্বত্বভোগীর ৫–১২% খরচ সাশ্রয় হয়।"
-        )
+    LaunchedEffect(activeTips) {
+        val current = unlockedTip
+        if (current != null) {
+            val refreshed = activeTips.firstOrNull { it.id == current.id }
+            unlockedTip = refreshed
+        }
     }
 
     Card(
@@ -756,7 +761,7 @@ fun RewardedMarketTipCard(
                     Icon(Icons.Filled.PlayCircle, contentDescription = null, tint = DarkGreen)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "দৈনিক পাইকারি কৃষি টিপস (Rewarded Video)",
+                        text = "দৈনিক কৃষি টিপস (${activeTips.size}টি) • Rewarded Video",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = DarkGreen
@@ -774,16 +779,57 @@ fun RewardedMarketTipCard(
                 }
             }
 
-            if (unlockedTip != null) {
+            if (activeTips.isEmpty()) {
                 Text(
-                    text = unlockedTip!!,
+                    text = "বর্তমানে কোনো সক্রিয় ডেইলি টিপস নেই — অ্যাডমিন নতুন টিপস যোগ করলে ভিডিও দেখে আনলক করতে পারবেন।",
                     style = MaterialTheme.typography.bodySmall,
-                    color = DarkGreen,
-                    fontWeight = FontWeight.SemiBold
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            } else if (unlockedTip != null) {
+                val tip = unlockedTip!!
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.25f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${tip.emoji.ifBlank { "🌱" }} ${tip.titleBn}",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = DarkGreen,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (tip.categoryBn.isNotBlank()) {
+                                Surface(color = LightGreen, shape = RoundedCornerShape(6.dp)) {
+                                    Text(
+                                        text = tip.categoryBn,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = DarkGreen,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            text = tip.contentBn,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
             } else {
                 Text(
-                    text = "একটি ছোট ভিডিও বিজ্ঞাপন দেখে আজকের ফসল সংরক্ষণ ও পাইকারি বাজারের বিশেষ টিপস দেখুন।",
+                    text = "একটি ছোট ভিডিও বিজ্ঞাপন দেখে আজকের ফসল সংরক্ষণ ও পাইকারি বাজারের বিশেষ ডেইলি টিপস আনলক করুন।",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -797,28 +843,32 @@ fun RewardedMarketTipCard(
                 )
             }
 
-            Button(
-                onClick = {
-                    statusMessage = "বিজ্ঞাপন লোড হচ্ছে..."
-                    AdMonetizationManager.showRewardedAd(
-                        activity = context.findActivity(),
-                        placementName = rewardedId
-                    ) { rewarded, detail ->
-                        if (rewarded) {
-                            unlockedTip = tips.random()
-                            statusMessage = "✓ ধন্যবাদ! টিপস আনলক হয়েছে।"
-                        } else {
-                            statusMessage = detail
+            if (activeTips.isNotEmpty()) {
+                Button(
+                    onClick = {
+                        statusMessage = "বিজ্ঞাপন লোড হচ্ছে..."
+                        AdMonetizationManager.showRewardedAd(
+                            activity = context.findActivity(),
+                            placementName = rewardedId
+                        ) { rewarded, detail ->
+                            if (rewarded) {
+                                val chosen = activeTips[nextTipIndex % activeTips.size]
+                                nextTipIndex += 1
+                                unlockedTip = chosen
+                                statusMessage = "✓ ধন্যবাদ! আজকের টিপস আনলক হয়েছে।"
+                            } else {
+                                statusMessage = detail
+                            }
                         }
-                    }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("watch_rewarded_ad_button")
-            ) {
-                Icon(Icons.Filled.PlayCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(if (unlockedTip == null) "ভিডিও দেখে টিপস আনলক করুন" else "আরেকটি টিপস দেখুন")
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("watch_rewarded_ad_button")
+                ) {
+                    Icon(Icons.Filled.PlayCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(if (unlockedTip == null) "ভিডিও দেখে ডেইলি টিপস আনলক করুন" else "আরেকটি ডেইলি টিপস দেখুন")
+                }
             }
         }
     }

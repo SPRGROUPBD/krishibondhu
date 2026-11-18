@@ -130,6 +130,13 @@ fun ProductDetailScreen(
             contentPadding = PaddingValues(bottom = 28.dp)
         ) {
             item {
+                AdBannerSection(
+                    adConfig = uiState.adConfig,
+                    placementTag = "product_detail_top",
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+            item {
                 ProductVisualArtwork(
                     product = product,
                     categoryEmoji = category?.emoji ?: "🌾",

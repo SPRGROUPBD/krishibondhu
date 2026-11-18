@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -279,6 +280,13 @@ private fun FarmerHomeWorkspace(
             }
         }
 
+        item {
+            AdBannerSection(
+                adConfig = uiState.adConfig,
+                placementTag = "farmer_home_top"
+            )
+        }
+
         // 3. Pending Orders Requiring Farmer Action
         item {
             SectionHeader(
@@ -399,44 +407,53 @@ private fun FarmerHomeWorkspace(
                 )
             }
         } else {
-            items(myProducts.take(5), key = { "fprod_${it.id}" }) { prod ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onProductClick(prod.id) },
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
-                ) {
-                    Row(
+            val previewCrops = myProducts.take(6)
+            itemsIndexed(previewCrops, key = { _, prod -> "fprod_${prod.id}" }) { idx, prod ->
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .clickable { onProductClick(prod.id) },
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
                     ) {
-                        Box(
+                        Row(
                             modifier = Modifier
-                                .size(50.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(LightGreen),
-                            contentAlignment = Alignment.Center
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(categoryEmojiMap[prod.categoryId] ?: "🌾", fontSize = 24.sp)
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(prod.nameBn, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Box(
+                                modifier = Modifier
+                                    .size(50.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(LightGreen),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(categoryEmojiMap[prod.categoryId] ?: "🌾", fontSize = 24.sp)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(prod.nameBn, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = "মজুত: ${prod.availableQuantity.formatQty()} ${prod.unit} • ${prod.status}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text(
-                                text = "মজুত: ${prod.availableQuantity.formatQty()} ${prod.unit} • ${prod.status}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = "${prod.pricePerUnit.formatBdt()}/${prod.unit}",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        Text(
-                            text = "${prod.pricePerUnit.formatBdt()}/${prod.unit}",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
+                    }
+                    if ((idx + 1) % 2 == 0 && idx < previewCrops.lastIndex) {
+                        AdBannerSection(
+                            adConfig = uiState.adConfig,
+                            placementTag = "farmer_crops_row_${idx + 1}"
                         )
                     }
                 }
@@ -473,6 +490,13 @@ private fun FarmerHomeWorkspace(
                     Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 }
             }
+        }
+
+        item {
+            RewardedMarketTipCard(
+                adConfig = uiState.adConfig,
+                dailyTips = uiState.dailyTips
+            )
         }
 
         item {
@@ -685,6 +709,14 @@ private fun MarketplaceHomeContent(
                     )
                 }
             }
+        }
+
+        item {
+            AdBannerSection(
+                adConfig = uiState.adConfig,
+                placementTag = "home_top",
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
         }
 
         // 2. Hero Banner Card
@@ -931,6 +963,14 @@ private fun MarketplaceHomeContent(
                 }
             }
 
+            item {
+                AdBannerSection(
+                    adConfig = uiState.adConfig,
+                    placementTag = "home_crops_mid",
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+
             if (popularProducts.isNotEmpty()) {
                 item {
                     SectionHeader(
@@ -984,6 +1024,7 @@ private fun MarketplaceHomeContent(
             }
 
             item {
+                val recentPreview = recentProducts.take(6)
                 SectionHeader(
                     title = if (lang == AppLanguage.BENGALI) "সম্প্রতি যুক্ত পাইকারি ফসল" else "Recently Listed Wholesale Crops",
                     actionLabel = if (lang == AppLanguage.BENGALI) "সব ফসল" else "All Crops",
@@ -994,7 +1035,7 @@ private fun MarketplaceHomeContent(
                     modifier = Modifier.padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    recentProducts.take(5).forEach { prod ->
+                    recentPreview.forEachIndexed { idx, prod ->
                         Surface(
                             onClick = { onProductClick(prod.id) },
                             shape = RoundedCornerShape(14.dp),
@@ -1037,6 +1078,12 @@ private fun MarketplaceHomeContent(
                                 )
                             }
                         }
+                        if ((idx + 1) % 2 == 0 && idx < recentPreview.lastIndex) {
+                            AdBannerSection(
+                                adConfig = uiState.adConfig,
+                                placementTag = "home_recent_crops_row_${idx + 1}"
+                            )
+                        }
                     }
                 }
             }
@@ -1057,81 +1104,100 @@ private fun MarketplaceHomeContent(
                     actionLabel = if (lang == AppLanguage.BENGALI) "সব কৃষক" else "All Farmers",
                     onActionClick = onFindFarmersTap
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(verifiedFarmers, key = { it.id }) { farmer ->
-                        val count = uiState.products.count { it.farmerId == farmer.id && it.status == "ACTIVE" }
-                        Card(
-                            modifier = Modifier
-                                .width(220.dp)
-                                .clickable { onFarmerClick(farmer.id) },
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
-                        ) {
-                            Column(modifier = Modifier.padding(14.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    UserAvatar(
-                                        imageUri = farmer.profileImageUri,
-                                        role = farmer.role,
-                                        size = 44.dp
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(
-                                                text = farmer.fullName,
-                                                style = MaterialTheme.typography.titleSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f, fill = false)
-                                            )
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Icon(
-                                                imageVector = Icons.Filled.Verified,
-                                                contentDescription = "যাচাইকৃত",
-                                                tint = PrimaryGreen,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(
-                                                imageVector = Icons.Filled.LocationOn,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.primary,
-                                                modifier = Modifier.size(12.dp)
-                                            )
-                                            Text(
-                                                text = "${farmer.upazila}, ${farmer.district}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+            }
+
+            val farmerChunks = verifiedFarmers.take(6).chunked(2)
+            farmerChunks.forEachIndexed { chunkIdx, pair ->
+                item(key = "home_farmer_chunk_$chunkIdx") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        pair.forEach { farmer ->
+                            val count = uiState.products.count { it.farmerId == farmer.id && it.status == "ACTIVE" }
+                            Card(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onFarmerClick(farmer.id) },
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        UserAvatar(
+                                            imageUri = farmer.profileImageUri,
+                                            role = farmer.role,
+                                            size = 40.dp
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(
+                                                    text = farmer.fullName,
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
+                                                Icon(
+                                                    imageVector = Icons.Filled.Verified,
+                                                    contentDescription = "যাচাইকৃত",
+                                                    tint = PrimaryGreen,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.LocationOn,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(12.dp)
+                                                )
+                                                Text(
+                                                    text = "${farmer.upazila}, ${farmer.district}",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
                                         }
                                     }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = farmer.farmBio,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "★ ${farmer.rating} • $count টি ফসল",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = farmer.farmBio,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = "★ ${farmer.rating} • $count টি ফসল",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.Bold
-                                )
                             }
                         }
+                        if (pair.size == 1) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+                if (chunkIdx < farmerChunks.lastIndex) {
+                    item(key = "home_farmer_ad_$chunkIdx") {
+                        AdBannerSection(
+                            adConfig = uiState.adConfig,
+                            placementTag = "home_farmers_mid_${chunkIdx + 1}",
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
                     }
                 }
             }
@@ -1140,6 +1206,7 @@ private fun MarketplaceHomeContent(
         item {
             RewardedMarketTipCard(
                 adConfig = uiState.adConfig,
+                dailyTips = uiState.dailyTips,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
         }

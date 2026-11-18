@@ -34,7 +34,7 @@ export const DEFAULT_AD_CONFIG = {
   androidInterstitialId: "Interstitial_Android",
   rewardedEnabled: true,
   androidRewardedId: "Rewarded_Android",
-  appOpenEnabled: false,
+  appOpenEnabled: true,
   androidAppOpenId: "",
   unityAdsEnabled: true,
   unityGameId: "6227313",
@@ -589,3 +589,37 @@ export function resolveLocationFromCoords(lat, lng, rawText = "") {
     addressLine: rawText && String(rawText).trim() ? String(rawText).trim() : `${matchedUpazila}, ${distObj.districtBn}, ${distObj.divisionBn}`
   };
 }
+
+export const DEFAULT_DAILY_TIPS = [
+  {
+    id: "tip_seed_01",
+    titleBn: "ধান ও ভুট্টা সংরক্ষণ পরামর্শ",
+    contentBn: "মণ প্রতি আর্দ্রতা ১৪% এর নিচে থাকলে ধান ও ভুট্টা সংরক্ষণে ভালো পাইকারি দাম পাওয়া যায়।",
+    categoryBn: "পাইকারি সংরক্ষণ",
+    emoji: "🌾",
+    isActive: true,
+    createdAt: 1763424000000,
+    updatedAt: 1763424000000
+  },
+  {
+    id: "tip_seed_02",
+    titleBn: "পেঁয়াজ ও আলু পচন রোধ",
+    contentBn: "পেঁয়াজ ও আলু ছায়াযুক্ত ও বাতাস চলাচল করে এমন মাচায় রাখলে পচন ৩০% পর্যন্ত কমে।",
+    categoryBn: "ফসল সংরক্ষণ",
+    emoji: "🧅",
+    isActive: true,
+    createdAt: 1763424001000,
+    updatedAt: 1763424001000
+  },
+  {
+    id: "tip_seed_03",
+    titleBn: "সরাসরি খামার পিকআপ সাশ্রয়",
+    contentBn: "সরাসরি খামার থেকে পাইকারি পিকআপে মধ্যস্বত্বভোগীর ৫–১২% খরচ সাশ্রয় হয়।",
+    categoryBn: "পরিবহন ও বাজার",
+    emoji: "📦",
+    isActive: true,
+    createdAt: 1763424002000,
+    updatedAt: 1763424002000
+  }
+];
+
