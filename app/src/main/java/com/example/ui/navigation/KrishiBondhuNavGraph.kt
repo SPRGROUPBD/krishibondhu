@@ -86,6 +86,10 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route ?: Routes.SPLASH
 
+    LaunchedEffect(currentRoute) {
+        AdMonetizationManager.setCurrentRoute(currentRoute)
+    }
+
     val topLevelRoutes = setOf(Routes.HOME, Routes.BROWSE, Routes.FARMERS, Routes.SELL, Routes.ORDERS, Routes.PROFILE)
     val isTopLevel = topLevelRoutes.any { currentRoute.startsWith(it.substringBefore("?")) }
 
@@ -158,6 +162,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         activeRole = uiState.activeRole,
                         verificationStatus = uiState.activeUser?.verificationStatus ?: "",
                         accountStatus = uiState.activeUser?.accountStatus ?: "",
+                        profileImageUri = uiState.activeUser?.profileImageUri.orEmpty(),
                         onCartClick = { navController.navigate(Routes.CART) },
                         onNotificationsClick = { navController.navigate(Routes.NOTIFICATIONS) },
                         onLanguageToggle = { viewModel.toggleLanguage() }
@@ -370,11 +375,20 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                     }
 
                     composable(Routes.SELL) {
+                        val activeFarmerId = uiState.activeUser?.id.orEmpty()
+                        val farmerPaySettings by remember(activeFarmerId) {
+                            viewModel.observeFarmerPaymentSettings(activeFarmerId)
+                        }.collectAsStateWithLifecycle(initialValue = null)
+
                         SellScreen(
                             uiState = uiState,
+                            farmerPaymentSettings = farmerPaySettings,
                             onLoginFarmer = { navController.navigate(Routes.LOGIN) },
                             onRegisterFarmer = { navController.navigate(Routes.register(UserRole.FARMER)) },
                             onOpenActivation = { navController.navigate(Routes.ACTIVATION) },
+                            onSavePaymentSettings = { bKash, nagad, rocket, bank ->
+                                viewModel.saveFarmerPaymentSettings(bKash, nagad, rocket, bank)
+                            },
                             onAddProduct = { cat, name, desc, uri, qty, unit, price, harvest, avail, addr, pickup, deliv, fee, wholesale ->
                                 viewModel.addFarmerProduct(
                                     cat, name, desc, uri, qty, unit, price,
@@ -434,8 +448,10 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 navController.popBackStack()
                                 AdMonetizationManager.maybeShowInterstitial(
                                     activity = activity,
-                                    overrideUnitId = uiState.adConfig.androidInterstitialId,
-                                    enabled = uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled
+                                    overrideUnitId = uiState.adConfig.resolvedInterstitialUnitId(),
+                                    enabled = uiState.adConfig.adsEnabled &&
+                                        uiState.adConfig.androidAdsEnabled &&
+                                        uiState.adConfig.interstitialEnabled
                                 )
                             },
                             onFarmerClick = { fid -> navController.navigate(Routes.farmerProfile(fid)) },
@@ -473,22 +489,20 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onBrowseClick = { navController.navigate(Routes.browse(false)) },
                             onUpdateQty = viewModel::updateCartQty,
                             onRemoveItem = viewModel::removeCartItem,
-                            onPlaceOrder = { deliveryOpt, addr, payMethod, txnRef ->
+                            onPlaceOrder = { deliveryOpt, addr, payMethod, txnRef, advanceByFarmer, senderNum, refNote ->
                                 viewModel.placeOrders(
                                     deliveryOption = deliveryOpt,
                                     deliveryAddress = addr,
                                     paymentMethod = payMethod,
                                     transactionRef = txnRef,
+                                    advanceByFarmer = advanceByFarmer,
+                                    senderNumber = senderNum,
+                                    paymentReferenceNote = refNote,
                                     onRequireAuth = { navController.navigate(Routes.LOGIN) }
                                 ) {
                                     navController.navigate(Routes.ORDERS) {
                                         popUpTo(Routes.HOME)
                                     }
-                                    AdMonetizationManager.maybeShowInterstitial(
-                                        activity = activity,
-                                        overrideUnitId = uiState.adConfig.androidInterstitialId,
-                                        enabled = uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled
-                                    )
                                 }
                             },
                             onOpenActivation = { navController.navigate(Routes.ACTIVATION) }
@@ -497,16 +511,22 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
 
                     composable(Routes.ORDER_DETAIL) { backStack ->
                         val oid = backStack.arguments?.getString("orderId") ?: ""
+                        val orderFarmerId = uiState.orders.firstOrNull { it.id == oid }?.farmerId.orEmpty()
                         OrderDetailScreen(
                             orderId = oid,
                             uiState = uiState,
                             orderItemsFlow = viewModel.observeOrderItems(oid),
+                            orderPaymentsFlow = viewModel.observeOrderPayments(oid),
+                            farmerPaymentSettingsFlow = viewModel.observeFarmerPaymentSettings(orderFarmerId),
                             onBack = { navController.popBackStack() },
                             onUpdateStatus = { newStatus -> viewModel.updateOrderStatus(oid, newStatus) },
-                            onSubmitOrderPayment = { method, sender, txRef, receiptUri ->
-                                viewModel.submitOrderPayment(oid, method, sender, txRef, receiptUri)
+                            onSubmitOrderAdvancePayment = { amt, method, sender, txId, note ->
+                                viewModel.submitOrderAdvancePayment(oid, amt, method, sender, txId, note)
                             },
-                            onFarmerConfirmPaymentReceived = { viewModel.farmerConfirmPaymentReceived(oid) },
+                            onFarmerVerifyOrderPayment = { payId, approved, reason ->
+                                viewModel.farmerVerifyOrderPayment(payId, approved, reason)
+                            },
+                            onApproveZeroAdvanceOrder = { viewModel.approveZeroAdvanceOrder(oid) },
                             onSubmitReview = { prodId, rating, comment ->
                                 uiState.orders.firstOrNull { it.id == oid }?.let { ord ->
                                     viewModel.submitReview(ord, prodId, rating, comment)
@@ -568,6 +588,9 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                         }
                                     }
                                 }
+                            },
+                            onResetPassword = { phone, newPass, onDone ->
+                                viewModel.resetPassword(phone, newPass, onDone)
                             },
                             onGoToRegister = {
                                 navController.navigate(Routes.register(UserRole.BUYER))

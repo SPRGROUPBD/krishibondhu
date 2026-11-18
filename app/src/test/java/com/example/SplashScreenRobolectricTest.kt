@@ -32,7 +32,7 @@ class SplashScreenRobolectricTest {
                     isAppLoading = false,
                     onSplashComplete = {},
                     appVersion = BuildConfig.VERSION_NAME,
-                    buildVersion = BuildConfig.VERSION_CODE.toString()
+                    buildVersion = BuildConfig.BUILD_VERSION
                 )
             }
         }
@@ -57,7 +57,7 @@ class SplashScreenRobolectricTest {
         ).assertIsDisplayed()
 
         composeTestRule.onNodeWithText(
-            "Build ${BuildConfig.VERSION_CODE}"
+            "Build ${BuildConfig.BUILD_VERSION}"
         ).assertIsDisplayed()
 
         val rootBounds = composeTestRule.onNodeWithTag("splash_screen")

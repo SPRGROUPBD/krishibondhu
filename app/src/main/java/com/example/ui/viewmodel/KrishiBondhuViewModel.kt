@@ -34,13 +34,15 @@ data class MarketplaceUiState(
     val auditLogs: List<AuditLogEntity> = emptyList(),
     val activationPayments: List<ActivationPaymentEntity> = emptyList(),
     val paymentSettings: PaymentSettingsEntity = PaymentSettingsEntity(),
+    val farmerPaymentSettings: List<FarmerPaymentSettingsEntity> = emptyList(),
+    val orderPayments: List<OrderPaymentEntity> = emptyList(),
     val searchQuery: String = "",
     val selectedCategoryId: String? = null,
     val selectedDivision: String? = null,
     val selectedDistrict: String? = null,
     val selectedUpazila: String? = null,
     val selectedUnion: String? = null,
-    val wholesaleOnly: Boolean? = null,
+    val wholesaleOnly: Boolean? = true,
     val priceSort: PriceSort = PriceSort.NEWEST,
     val adConfig: AdConfig = AdConfig(),
     val toastMessage: String? = null
@@ -96,8 +98,7 @@ data class MarketplaceUiState(
                     p.unionName.equalsBn(union) ||
                     p.village.containsBn(union) ||
                     p.pickupAddress.containsBn(union)
-                val matchesWholesale = wholesaleOnly == null || p.isWholesale == wholesaleOnly
-                matchesQuery && matchesCat && matchesDiv && matchesDist && matchesUpazila && matchesUnion && matchesWholesale &&
+                matchesQuery && matchesCat && matchesDiv && matchesDist && matchesUpazila && matchesUnion &&
                     p.status.equals("ACTIVE", ignoreCase = true)
             }
             return when (priceSort) {
@@ -165,10 +166,13 @@ data class MarketplaceUiState(
             val activeAcc = nonAdmins.count { it.isMarketplaceActive() }
             val expiredAcc = nonAdmins.count { it.accountStatus == AccountStatus.EXPIRED.name }
             val suspendedAcc = nonAdmins.count { it.accountStatus == AccountStatus.SUSPENDED.name }
-            val pendingOrderVerifs = orders.count {
-                it.status !in setOf(OrderStatus.PENDING.name, OrderStatus.CANCELLED.name, OrderStatus.REJECTED.name, OrderStatus.COMPLETED.name) &&
-                    !it.farmerPaymentConfirmed
+            val pendingPaymentVerifs = orderPayments.count { it.status == OrderPaymentStatus.PENDING_VERIFICATION.name }
+            val legacyUnconfirmed = orders.count {
+                it.status !in setOf(OrderStatus.PENDING.name, OrderStatus.PAYMENT_PENDING.name, OrderStatus.CANCELLED.name, OrderStatus.REJECTED.name, OrderStatus.COMPLETED.name) &&
+                    !it.farmerPaymentConfirmed &&
+                    orderPayments.none { op -> op.orderId == it.id }
             }
+            val pendingOrderVerifs = pendingPaymentVerifs + legacyUnconfirmed
             return AdminDashboardStats(
                 totalFarmers = totalFarmers,
                 verifiedFarmers = verifiedFarmers,
@@ -245,17 +249,27 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         SyncStatusBundle(online, adCfg, syncing, syncErr)
     }
 
+    private val paymentBundlesFlow = combine(
+        repo.paymentSettings,
+        repo.farmerPaymentSettings,
+        repo.orderPayments
+    ) { paySettings, farmerPaySettings, ordPayments ->
+        PaymentBundle(paySettings, farmerPaySettings, ordPayments)
+    }
+
     private val extrasFlow = combine(
         repo.auditLogs,
         repo.activationPayments,
-        repo.paymentSettings,
+        paymentBundlesFlow,
         toastFlow,
         syncExtrasFlow
-    ) { audits, actPayments, paySettings, toast, syncBundle ->
+    ) { audits, actPayments, payBundle, toast, syncBundle ->
         ExtrasBundle(
             audits = audits,
             activationPayments = actPayments,
-            paymentSettings = paySettings,
+            paymentSettings = payBundle.paymentSettings,
+            farmerPaymentSettings = payBundle.farmerPaymentSettings,
+            orderPayments = payBundle.orderPayments,
             toast = toast,
             online = syncBundle.online,
             adConfig = syncBundle.adConfig,
@@ -297,13 +311,15 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             auditLogs = extras.audits,
             activationPayments = extras.activationPayments,
             paymentSettings = extras.paymentSettings,
+            farmerPaymentSettings = extras.farmerPaymentSettings,
+            orderPayments = extras.orderPayments,
             searchQuery = filter.query,
             selectedCategoryId = filter.categoryId,
             selectedDivision = filter.division,
             selectedDistrict = filter.district,
             selectedUpazila = filter.upazila,
             selectedUnion = filter.unionName,
-            wholesaleOnly = filter.wholesaleOnly,
+            wholesaleOnly = true,
             priceSort = filter.priceSort,
             adConfig = extras.adConfig,
             toastMessage = extras.toast
@@ -353,6 +369,12 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
 
     fun observeOrderItems(orderId: String): Flow<List<OrderItemEntity>> =
         repo.observeOrderItems(orderId)
+
+    fun observeOrderPayments(orderId: String): Flow<List<OrderPaymentEntity>> =
+        repo.observeOrderPayments(orderId)
+
+    fun observeFarmerPaymentSettings(farmerId: String): Flow<FarmerPaymentSettingsEntity?> =
+        repo.observeFarmerPaymentSettings(farmerId)
 
     fun consumeToast() {
         toastFlow.value = null
@@ -638,11 +660,32 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch { repo.removeFromCart(itemId) }
     }
 
+    fun saveFarmerPaymentSettings(
+        bKashNumber: String,
+        nagadNumber: String,
+        rocketNumber: String,
+        bankAccountInfo: String,
+        onSuccess: () -> Unit = {}
+    ) {
+        val farmer = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.saveFarmerPaymentSettings(farmer, bKashNumber, nagadNumber, rocketNumber, bankAccountInfo)
+                .onSuccess {
+                    showToast("সরাসরি পেমেন্ট নম্বর (bKash / Nagad / Rocket / Bank) সংরক্ষিত হয়েছে ✓")
+                    onSuccess()
+                }
+                .onFailure { showToast(it.message ?: "পেমেন্ট সেটিংস সংরক্ষণ করা যায়নি") }
+        }
+    }
+
     fun placeOrders(
         deliveryOption: DeliveryOption,
         deliveryAddress: String,
         paymentMethod: PaymentMethod,
         transactionRef: String,
+        advanceByFarmer: Map<String, Double> = emptyMap(),
+        senderNumber: String = "",
+        paymentReferenceNote: String = "",
         onRequireAuth: () -> Unit,
         onSuccess: (List<OrderEntity>) -> Unit
     ) {
@@ -653,9 +696,18 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             return
         }
         viewModelScope.launch {
-            repo.placeOrdersFromCart(buyer, deliveryOption, deliveryAddress, paymentMethod, transactionRef)
+            repo.placeOrdersFromCart(
+                buyer = buyer,
+                deliveryOption = deliveryOption,
+                deliveryAddress = deliveryAddress,
+                paymentMethod = paymentMethod,
+                transactionRef = transactionRef,
+                advanceByFarmer = advanceByFarmer,
+                senderNumber = senderNumber,
+                paymentReferenceNote = paymentReferenceNote
+            )
                 .onSuccess { orders ->
-                    showToast("${orders.size}টি অর্ডার সম্পন্ন হয়েছে ও কৃষককে নোটিফিকেশন পাঠানো হয়েছে!")
+                    showToast("${orders.size}টি পাইকারি অর্ডার পাঠানো হয়েছে ও কৃষককে নোটিফিকেশন পাঠানো হয়েছে!")
                     onSuccess(orders)
                 }
                 .onFailure { showToast(it.message ?: "অর্ডার সম্পন্ন হয়নি") }
@@ -746,6 +798,63 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
                     showToast("টাকা প্রাপ্তি নিশ্চিত ও অনুমোদিত হয়েছে — অর্ডার চূড়ান্ত Confirmed সম্পন্ন ✓")
                 }
                 .onFailure { showToast(it.message ?: "নিশ্চিতকরণ করা যায়নি") }
+        }
+    }
+
+    fun submitOrderAdvancePayment(
+        orderId: String,
+        amount: Double,
+        paymentMethod: PaymentMethod,
+        senderNumber: String,
+        transactionId: String,
+        referenceNote: String = "",
+        onSuccess: () -> Unit = {}
+    ) {
+        val buyer = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.submitOrderAdvancePayment(
+                orderId = orderId,
+                buyer = buyer,
+                amount = amount,
+                paymentMethod = paymentMethod,
+                senderNumber = senderNumber,
+                transactionId = transactionId,
+                referenceNote = referenceNote
+            )
+                .onSuccess {
+                    showToast("অগ্রিম/আংশিক পেমেন্ট (${it.amount.formatBdt()}) জমা হয়েছে! কৃষক যাচাইয়ের পর যুক্ত হবে ✓")
+                    onSuccess()
+                }
+                .onFailure { showToast(it.message ?: "পেমেন্ট জমা দেওয়া যায়নি") }
+        }
+    }
+
+    fun farmerVerifyOrderPayment(
+        paymentId: String,
+        approved: Boolean,
+        rejectionReason: String = ""
+    ) {
+        val farmer = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.farmerVerifyOrderPayment(paymentId, farmer, approved, rejectionReason)
+                .onSuccess { updated ->
+                    showToast(
+                        if (approved) "পেমেন্ট নিশ্চিত হয়েছে ✓ অবশিষ্ট বকেয়া: ${updated.remainingDue.formatBdt()}"
+                        else "পেমেন্ট প্রত্যাখ্যাত হয়েছে"
+                    )
+                }
+                .onFailure { showToast(it.message ?: "যাচাই করা যায়নি") }
+        }
+    }
+
+    fun approveZeroAdvanceOrder(orderId: String) {
+        val farmer = uiState.value.activeUser ?: return
+        viewModelScope.launch {
+            repo.approveZeroAdvanceOrder(orderId, farmer)
+                .onSuccess { updated ->
+                    showToast("শূন্য-অগ্রিম অর্ডার অনুমোদিত ও Confirmed হয়েছে ✓ (বকেয়া: ${updated.remainingDue.formatBdt()})")
+                }
+                .onFailure { showToast(it.message ?: "অনুমোদন করা যায়নি") }
         }
     }
 
@@ -877,10 +986,18 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         val syncError: String?
     )
 
+    private data class PaymentBundle(
+        val paymentSettings: PaymentSettingsEntity,
+        val farmerPaymentSettings: List<FarmerPaymentSettingsEntity>,
+        val orderPayments: List<OrderPaymentEntity>
+    )
+
     private data class ExtrasBundle(
         val audits: List<AuditLogEntity>,
         val activationPayments: List<ActivationPaymentEntity>,
         val paymentSettings: PaymentSettingsEntity,
+        val farmerPaymentSettings: List<FarmerPaymentSettingsEntity>,
+        val orderPayments: List<OrderPaymentEntity>,
         val toast: String?,
         val online: Boolean,
         val adConfig: AdConfig,

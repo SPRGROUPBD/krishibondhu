@@ -28,7 +28,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import com.example.ads.*
 import com.example.data.local.ActivationPaymentEntity
 import com.example.data.local.PaymentSettingsEntity
 import com.example.data.model.*
@@ -39,6 +41,7 @@ import com.example.ui.components.formatDateBn
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.MarketplaceUiState
 import com.example.util.MediaCaptureHelper
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -730,6 +733,9 @@ private fun AdminOrdersComplaintsTab(
     val trackedOrders = remember(uiState.orders) {
         uiState.orders.sortedByDescending { it.createdAt }
     }
+    val paymentHistory = remember(uiState.orderPayments) {
+        uiState.orderPayments.sortedByDescending { it.createdAt }
+    }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
@@ -743,13 +749,13 @@ private fun AdminOrdersComplaintsTab(
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        text = "অর্ডার ও পেমেন্ট নিরাপত্তা নীতি",
+                        text = "পাইকারি অর্ডার ও সরাসরি অগ্রিম পেমেন্ট নীতি",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = DarkGreen
                     )
                     Text(
-                        text = "শুধুমাত্র কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ এবং কৃষকের পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed হয় — অ্যাডমিনের আলাদা অনুমোদনের প্রয়োজন নেই।",
+                        text = "সব পণ্য শুধুমাত্র পাইকারি দামে বিক্রি হয়। ক্রেতা সরাসরি কৃষকের বিকাশ/নগদ/রকেট নম্বরে অগ্রিম পাঠান — প্ল্যাটফর্ম বা অ্যাডমিন কোনো টাকা গ্রহণ বা অনুমোদন করে না; শুধুমাত্র কৃষক নিজের অ্যাকাউন্ট যাচাই করে পেমেন্ট নিশ্চিত করেন।",
                         style = MaterialTheme.typography.bodySmall,
                         color = DarkGreen
                     )
@@ -759,7 +765,7 @@ private fun AdminOrdersComplaintsTab(
 
         item {
             Text(
-                text = "সকল অর্ডার পর্যবেক্ষণ (${trackedOrders.size})",
+                text = "পাইকারি অর্ডার ও অগ্রিম হিসাব (${trackedOrders.size})",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = DarkGreen
@@ -779,6 +785,7 @@ private fun AdminOrdersComplaintsTab(
         }
 
         items(trackedOrders, key = { "opay_${it.id}" }) { ord ->
+            val effectiveDue = (ord.grandTotal - ord.verifiedAdvanceTotal).coerceAtLeast(0.0)
             Card(
                 shape = RoundedCornerShape(14.dp),
                 border = BorderStroke(1.dp, if (ord.farmerPaymentConfirmed) PrimaryGreen.copy(alpha = 0.45f) else InfoBlue.copy(alpha = 0.35f)),
@@ -786,16 +793,22 @@ private fun AdminOrdersComplaintsTab(
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("${ord.orderCode} • ${ord.grandTotal.formatBdt()}", fontWeight = FontWeight.Bold)
+                        Text("${ord.orderCode} • মোট পাইকারি: ${ord.grandTotal.formatBdt()}", fontWeight = FontWeight.Bold)
                         OrderStatusChip(ord.status, uiState.language)
                     }
                     Text("ক্রেতা: ${ord.buyerName} -> কৃষক: ${ord.farmerName}", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        text = "যাচাইকৃত অগ্রিম: ${ord.verifiedAdvanceTotal.formatBdt()} • বাকি বকেয়া: ${effectiveDue.formatBdt()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DarkGreen
+                    )
                     Text(
                         text = "পদ্ধতি: ${ord.paymentMethod} • TxID: ${ord.transactionReference.ifBlank { "—" }} • প্রেরক: ${ord.paymentSenderNumber.ifBlank { "—" }}",
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        text = if (ord.farmerPaymentConfirmed) "✓ কৃষক টাকা বুঝে পেয়ে পেমেন্ট অনুমোদন দিয়েছেন (Confirmed)" else "⏳ কৃষকের টাকা প্রাপ্তি ও অনুমোদন অপেক্ষমান",
+                        text = if (ord.farmerPaymentConfirmed) "✓ কৃষক অগ্রিম/পেমেন্ট যাচাই করে অর্ডার নিশ্চিত করেছেন" else "⏳ কৃষকের পেমেন্ট যাচাই অপেক্ষমাণ (অ্যাডমিন থেকে পরিবর্তনযোগ্য নয়)",
                         style = MaterialTheme.typography.labelSmall,
                         color = if (ord.farmerPaymentConfirmed) PrimaryGreen else Color(0xFFB45309),
                         fontWeight = FontWeight.Bold
@@ -803,6 +816,50 @@ private fun AdminOrdersComplaintsTab(
                     if (ord.paymentReceiptUri.isNotBlank()) {
                         OutlinedButton(onClick = { receiptUriPreview = ord.paymentReceiptUri }) {
                             Text("রসিদ দেখুন")
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "অগ্রিম ও আংশিক পেমেন্ট অডিট লগ (${paymentHistory.size})",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = DarkGreen
+            )
+        }
+        if (paymentHistory.isEmpty()) {
+            item {
+                Card(shape = RoundedCornerShape(14.dp)) {
+                    Text("কোনো অগ্রিম পেমেন্ট লগ এখনো নেই।", modifier = Modifier.padding(14.dp), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        } else {
+            items(paymentHistory.take(40), key = { "op_audit_${it.id}" }) { pay ->
+                val statusColor = when (pay.status) {
+                    OrderPaymentStatus.CONFIRMED.name -> PrimaryGreen
+                    OrderPaymentStatus.REJECTED.name -> AlertRed
+                    else -> Color(0xFFB45309)
+                }
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f)),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("${pay.orderCode} • ${pay.amount.formatBdt()} (${pay.paymentMethod})", fontWeight = FontWeight.Bold)
+                            Text(pay.status, color = statusColor, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
+                        }
+                        Text("${pay.buyerName} -> ${pay.farmerName} • TxID: ${pay.transactionId}", style = MaterialTheme.typography.bodySmall)
+                        if (pay.receiverNumber.isNotBlank() || pay.senderNumber.isNotBlank()) {
+                            Text("প্রাপক (কৃষক): ${pay.receiverNumber.ifBlank { "—" }} • প্রেরক: ${pay.senderNumber.ifBlank { "—" }}", style = MaterialTheme.typography.labelSmall)
+                        }
+                        if (pay.rejectionReason.isNotBlank()) {
+                            Text("বাতিলের কারণ: ${pay.rejectionReason}", style = MaterialTheme.typography.labelSmall, color = AlertRed)
                         }
                     }
                 }
@@ -826,25 +883,6 @@ private fun AdminOrdersComplaintsTab(
                             Text("সমাধান হিসেবে চিহ্নিত করুন")
                         }
                     }
-                }
-            }
-        }
-        item {
-            Spacer(modifier = Modifier.height(6.dp))
-            Text("সকল অর্ডারসমূহ (${uiState.orders.size})", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        }
-        items(uiState.orders, key = { it.id }) { ord ->
-            Card(shape = RoundedCornerShape(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("${ord.orderCode} • ${ord.farmerName}", fontWeight = FontWeight.Bold)
-                        Text("${ord.buyerName} • ${ord.grandTotal.formatBdt()}", style = MaterialTheme.typography.bodySmall)
-                    }
-                    OrderStatusChip(ord.status, uiState.language)
                 }
             }
         }
@@ -1281,11 +1319,46 @@ private fun AdminAdMonetizationTab(
     adConfig: AdConfig,
     onSaveAdConfig: (AdConfig) -> Unit
 ) {
+    val context = LocalContext.current
+    val telemetry by AdMonetizationManager.telemetry.collectAsStateWithLifecycle()
+
     var adsEnabled by remember(adConfig) { mutableStateOf(adConfig.adsEnabled) }
     var showAdsLabel by remember(adConfig) { mutableStateOf(adConfig.showAdsLabel) }
     var androidAdsEnabled by remember(adConfig) { mutableStateOf(adConfig.androidAdsEnabled) }
+    var mediationAppKey by remember(adConfig) { mutableStateOf(adConfig.mediationAppKey) }
+    var adTestMode by remember(adConfig) { mutableStateOf(adConfig.adTestMode) }
+
+    // 5 Format Toggles + Unit/Placement IDs
+    var bannerEnabled by remember(adConfig) { mutableStateOf(adConfig.bannerEnabled) }
     var androidBannerId by remember(adConfig) { mutableStateOf(adConfig.androidBannerId) }
+    var nativeEnabled by remember(adConfig) { mutableStateOf(adConfig.nativeEnabled) }
+    var androidNativePlacement by remember(adConfig) { mutableStateOf(adConfig.androidNativePlacement) }
+    var interstitialEnabled by remember(adConfig) { mutableStateOf(adConfig.interstitialEnabled) }
     var androidInterstitialId by remember(adConfig) { mutableStateOf(adConfig.androidInterstitialId) }
+    var rewardedEnabled by remember(adConfig) { mutableStateOf(adConfig.rewardedEnabled) }
+    var androidRewardedId by remember(adConfig) { mutableStateOf(adConfig.androidRewardedId) }
+    var appOpenEnabled by remember(adConfig) { mutableStateOf(adConfig.appOpenEnabled) }
+    var androidAppOpenId by remember(adConfig) { mutableStateOf(adConfig.androidAppOpenId) }
+
+    // 8 Mediation Networks (Unity LevelPlay 9.2.0, Zero AdMob)
+    var unityAdsEnabled by remember(adConfig) { mutableStateOf(adConfig.unityAdsEnabled) }
+    var unityGameId by remember(adConfig) { mutableStateOf(adConfig.unityGameId) }
+    var appLovinEnabled by remember(adConfig) { mutableStateOf(adConfig.appLovinEnabled) }
+    var appLovinSdkKey by remember(adConfig) { mutableStateOf(adConfig.appLovinSdkKey) }
+    var metaAudienceEnabled by remember(adConfig) { mutableStateOf(adConfig.metaAudienceEnabled) }
+    var metaPlacementId by remember(adConfig) { mutableStateOf(adConfig.metaPlacementId) }
+    var mintegralEnabled by remember(adConfig) { mutableStateOf(adConfig.mintegralEnabled) }
+    var mintegralAppId by remember(adConfig) { mutableStateOf(adConfig.mintegralAppId) }
+    var pangleEnabled by remember(adConfig) { mutableStateOf(adConfig.pangleEnabled) }
+    var pangleAppId by remember(adConfig) { mutableStateOf(adConfig.pangleAppId) }
+    var inMobiEnabled by remember(adConfig) { mutableStateOf(adConfig.inMobiEnabled) }
+    var inMobiAccountId by remember(adConfig) { mutableStateOf(adConfig.inMobiAccountId) }
+    var liftoffEnabled by remember(adConfig) { mutableStateOf(adConfig.liftoffEnabled) }
+    var liftoffAppId by remember(adConfig) { mutableStateOf(adConfig.liftoffAppId) }
+    var dtExchangeEnabled by remember(adConfig) { mutableStateOf(adConfig.dtExchangeEnabled) }
+    var dtExchangeAppId by remember(adConfig) { mutableStateOf(adConfig.dtExchangeAppId) }
+
+    // Website & Hybrid Web Fallback
     var mobileWebAdsEnabled by remember(adConfig) { mutableStateOf(adConfig.mobileWebAdsEnabled) }
     var mobileAdNetworkPriority by remember(adConfig) { mutableStateOf(adConfig.mobileAdNetworkPriority) }
     var mobileCustomAdHtml by remember(adConfig) { mutableStateOf(adConfig.mobileCustomAdHtml) }
@@ -1317,20 +1390,184 @@ private fun AdminAdMonetizationTab(
     var customAdName by remember(adConfig) { mutableStateOf(adConfig.customAdName) }
     var customTopHtml by remember(adConfig) { mutableStateOf(adConfig.customTopHtml) }
 
+    fun buildDraftConfig(): AdConfig = adConfig.copy(
+        adsEnabled = adsEnabled,
+        showAdsLabel = showAdsLabel,
+        androidAdsEnabled = androidAdsEnabled,
+        mediationPlatform = "UNITY_LEVELPLAY",
+        mediationAppKey = mediationAppKey.trim(),
+        adTestMode = adTestMode,
+        bannerEnabled = bannerEnabled,
+        androidBannerId = androidBannerId.trim(),
+        nativeEnabled = nativeEnabled,
+        androidNativePlacement = androidNativePlacement.trim(),
+        interstitialEnabled = interstitialEnabled,
+        androidInterstitialId = androidInterstitialId.trim(),
+        rewardedEnabled = rewardedEnabled,
+        androidRewardedId = androidRewardedId.trim(),
+        appOpenEnabled = appOpenEnabled,
+        androidAppOpenId = androidAppOpenId.trim(),
+        unityAdsEnabled = unityAdsEnabled,
+        unityGameId = unityGameId.trim(),
+        appLovinEnabled = appLovinEnabled,
+        appLovinSdkKey = appLovinSdkKey.trim(),
+        metaAudienceEnabled = metaAudienceEnabled,
+        metaPlacementId = metaPlacementId.trim(),
+        mintegralEnabled = mintegralEnabled,
+        mintegralAppId = mintegralAppId.trim(),
+        pangleEnabled = pangleEnabled,
+        pangleAppId = pangleAppId.trim(),
+        inMobiEnabled = inMobiEnabled,
+        inMobiAccountId = inMobiAccountId.trim(),
+        liftoffEnabled = liftoffEnabled,
+        liftoffAppId = liftoffAppId.trim(),
+        dtExchangeEnabled = dtExchangeEnabled,
+        dtExchangeAppId = dtExchangeAppId.trim(),
+        mobileWebAdsEnabled = mobileWebAdsEnabled,
+        mobileAdNetworkPriority = mobileAdNetworkPriority,
+        mobileCustomAdHtml = mobileCustomAdHtml,
+        mobileDirectLinkUrl = mobileDirectLinkUrl.trim(),
+        sponsorEnabled = sponsorEnabled,
+        sponsorTitle = sponsorTitle.trim(),
+        sponsorSubtitle = sponsorSubtitle.trim(),
+        sponsorImageUrl = sponsorImageUrl.trim(),
+        sponsorTargetUrl = sponsorTargetUrl.trim(),
+        sponsorCtaText = sponsorCtaText.trim(),
+        adsenseEnabled = adsenseEnabled,
+        adsenseClient = adsenseClient.trim(),
+        adsenseTopSlot = adsenseTopSlot.trim(),
+        adsenseFeedSlot = adsenseFeedSlot.trim(),
+        adsenseFooterSlot = adsenseFooterSlot.trim(),
+        adsterraEnabled = adsterraEnabled,
+        adsterraBannerKey = adsterraBannerKey.trim(),
+        adsterraScriptUrl = adsterraScriptUrl.trim(),
+        adsterraSocialBarUrl = adsterraSocialBarUrl.trim(),
+        monetagEnabled = monetagEnabled,
+        monetagZoneId = monetagZoneId.trim(),
+        monetagScriptUrl = monetagScriptUrl.trim(),
+        customAdEnabled = customAdEnabled,
+        customAdName = customAdName.trim(),
+        customTopHtml = customTopHtml
+    )
+
     val priorityOptions = listOf(
         "ALL" to "সব নেটওয়ার্ক (All)",
-        "ADMOB" to "AdMob / Mediation",
+        "LEVELPLAY" to "Unity LevelPlay Mediation",
+        "UNITY" to "Unity Ads",
+        "APPLOVIN" to "AppLovin MAX",
         "ADSTERRA" to "Adsterra",
         "MONETAG" to "Monetag",
-        "ADSENSE" to "AdSense",
-        "CUSTOM" to "Unity/AppLovin/Start.io/Custom",
+        "ADSENSE" to "Website AdSense",
+        "CUSTOM" to "Custom HTML / Direct",
         "SPONSOR" to "শুধু স্পন্সর"
     )
+
+    val sdkColor = when (telemetry.sdkInitStatus) {
+        SdkInitStatus.SUCCESS -> PrimaryGreen
+        SdkInitStatus.INITIALIZING -> InfoBlue
+        SdkInitStatus.FAILED -> AlertRed
+        SdkInitStatus.IDLE -> Color(0xFFB45309)
+    }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // 1. Live SDK Status, Real Impression Revenue & Diagnostic Telemetry
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, sdkColor.copy(alpha = 0.5f))
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("Unity LevelPlay মনিটাইজেশন টেলিমেট্রি", fontWeight = FontWeight.Bold, color = DarkGreen)
+                        Surface(shape = RoundedCornerShape(999.dp), color = sdkColor.copy(alpha = 0.14f)) {
+                            Text(
+                                text = telemetry.sdkInitStatus.labelBn,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = sdkColor
+                            )
+                        }
+                    }
+                    Text(
+                        text = "AdMob সম্পূর্ণ অপসারিত (Zero AdMob SDK) • প্ল্যাটফর্ম: ${telemetry.mediationPlatform} • App Key: ${telemetry.activeAppKeyMasked.ifBlank { "(not set)" }} • Test Mode: ${if (telemetry.testModeEnabled) "ON" else "OFF"}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    if (telemetry.lastInitError.isNotBlank()) {
+                        Text(
+                            text = "SDK Init ত্রুটি: ${telemetry.lastInitError}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AlertRed,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    HorizontalDivider()
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = LightGreen)) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("দৈনিক আয় (Real)", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
+                                Text(
+                                    text = "$" + String.format(Locale.ENGLISH, "%.5f", telemetry.dailyRevenueUsd),
+                                    fontWeight = FontWeight.Bold,
+                                    color = DarkGreen
+                                )
+                            }
+                        }
+                        Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = LightGreen)) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("মাসিক আয় (Real)", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
+                                Text(
+                                    text = "$" + String.format(Locale.ENGLISH, "%.5f", telemetry.monthlyRevenueUsd),
+                                    fontWeight = FontWeight.Bold,
+                                    color = DarkGreen
+                                )
+                            }
+                        }
+                        Card(modifier = Modifier.weight(1f), colors = CardDefaults.cardColors(containerColor = LightGreen)) {
+                            Column(modifier = Modifier.padding(10.dp)) {
+                                Text("ইম্প্রেশন", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
+                                Text("${telemetry.impressionCount}", fontWeight = FontWeight.Bold, color = DarkGreen)
+                            }
+                        }
+                    }
+                    if (telemetry.networkRevenueUsd.isNotEmpty()) {
+                        Text("নেটওয়ার্কভিত্তিক আয় (ILRD):", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        telemetry.networkRevenueUsd.forEach { (net, rev) ->
+                            Text(
+                                text = "• $net: $${String.format(Locale.ENGLISH, "%.5f", rev)}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "রিয়েল বিজ্ঞাপন প্রদর্শনের পরই এখানে দৈনিক/মাসিক/নেটওয়ার্কভিত্তিক আয় যুক্ত হবে (ভুয়া সংখ্যা দেখানো হয় না)।",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { AdMonetizationManager.initialize(context, buildDraftConfig()) },
+                            modifier = Modifier.weight(1f).testTag("admin_test_sdk_init_button")
+                        ) {
+                            Text("SDK টেস্ট ও ইনিশিয়ালাইজ")
+                        }
+                        OutlinedButton(
+                            onClick = { AdMonetizationManager.clearDebugLogs() },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("লগ পরিষ্কার করুন")
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Master Configuration, App Key & 5 Format Controls
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -1338,24 +1575,241 @@ private fun AdminAdMonetizationTab(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("মোবাইল অ্যাপ — সব অ্যাড নেটওয়ার্ক মনিটাইজেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text("মাস্টার কন্ট্রোল ও ৫টি বিজ্ঞাপন ফরম্যাট (LevelPlay)", fontWeight = FontWeight.Bold, color = DarkGreen)
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text("সব বিজ্ঞাপন সক্রিয় রাখুন", modifier = Modifier.weight(1f))
-                        Switch(checked = adsEnabled, onCheckedChange = { adsEnabled = it })
+                        Text("মাস্টার মনিটাইজেশন চালু (Master ON/OFF)", modifier = Modifier.weight(1f))
+                        Switch(checked = adsEnabled, onCheckedChange = { adsEnabled = it }, modifier = Modifier.testTag("admin_master_ads_switch"))
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("Android LevelPlay Mediation সক্রিয়", modifier = Modifier.weight(1f))
+                        Switch(checked = androidAdsEnabled, onCheckedChange = { androidAdsEnabled = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                        Text("টেস্ট মোড / Test Suite সক্রিয়", modifier = Modifier.weight(1f))
+                        Switch(checked = adTestMode, onCheckedChange = { adTestMode = it })
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                         Text("বিজ্ঞাপন লেবেল (Sponsored) দেখান", modifier = Modifier.weight(1f))
                         Switch(checked = showAdsLabel, onCheckedChange = { showAdsLabel = it })
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text("Android Google AdMob (SDK + Mediation)", modifier = Modifier.weight(1f))
-                        Switch(checked = androidAdsEnabled, onCheckedChange = { androidAdsEnabled = it })
+                    OutlinedTextField(
+                        value = mediationAppKey,
+                        onValueChange = { mediationAppKey = it },
+                        label = { Text("Unity LevelPlay App Key") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_levelplay_app_key_input")
+                    )
+
+                    HorizontalDivider()
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Adaptive Banner Ad", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Switch(checked = bannerEnabled, onCheckedChange = { bannerEnabled = it })
                     }
+                    OutlinedTextField(
+                        value = androidBannerId,
+                        onValueChange = { androidBannerId = it },
+                        label = { Text("LevelPlay Banner Ad Unit ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_levelplay_banner_input")
+                    )
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Native Ad", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Switch(checked = nativeEnabled, onCheckedChange = { nativeEnabled = it })
+                    }
+                    OutlinedTextField(
+                        value = androidNativePlacement,
+                        onValueChange = { androidNativePlacement = it },
+                        label = { Text("LevelPlay Native Placement ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Interstitial Ad", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Switch(checked = interstitialEnabled, onCheckedChange = { interstitialEnabled = it })
+                    }
+                    OutlinedTextField(
+                        value = androidInterstitialId,
+                        onValueChange = { androidInterstitialId = it },
+                        label = { Text("LevelPlay Interstitial Ad Unit ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_levelplay_interstitial_input")
+                    )
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Rewarded Video Ad", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Switch(checked = rewardedEnabled, onCheckedChange = { rewardedEnabled = it })
+                    }
+                    OutlinedTextField(
+                        value = androidRewardedId,
+                        onValueChange = { androidRewardedId = it },
+                        label = { Text("LevelPlay Rewarded Ad Unit ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("App Open Ad", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Switch(checked = appOpenEnabled, onCheckedChange = { appOpenEnabled = it })
+                    }
+                    OutlinedTextField(
+                        value = androidAppOpenId,
+                        onValueChange = { androidAppOpenId = it },
+                        label = { Text("LevelPlay App Open Ad Unit ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+
+        // 3. 8 Official Mediation Networks + App Keys
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("৮টি অফিসিয়াল অ্যাড নেটওয়ার্ক কনফিগারেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text(
+                        text = "Unity Ads বাদে বাকি ৭টি নেটওয়ার্কের জন্য সংশ্লিষ্ট পাবলিশার অ্যাকাউন্টে পৃথক অনুমোদন ও App ID প্রয়োজন।",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    @Composable
+                    fun networkInput(
+                        title: String,
+                        approvalRequired: Boolean,
+                        checked: Boolean,
+                        onCheckedChange: (Boolean) -> Unit,
+                        idLabel: String,
+                        idValue: String,
+                        onIdChange: (String) -> Unit
+                    ) {
+                        HorizontalDivider()
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(title, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = if (approvalRequired) "পৃথক পাবলিশার অ্যাকাউন্ট ও অনুমোদন প্রয়োজন" else "সরাসরি LevelPlay-তে প্রস্তুত (Game ID দিন)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (approvalRequired) Color(0xFFB45309) else PrimaryGreen
+                                )
+                            }
+                            Switch(checked = checked, onCheckedChange = onCheckedChange)
+                        }
+                        OutlinedTextField(
+                            value = idValue,
+                            onValueChange = onIdChange,
+                            label = { Text(idLabel) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    networkInput("1. Unity Ads", false, unityAdsEnabled, { unityAdsEnabled = it }, "Unity Game ID", unityGameId) { unityGameId = it }
+                    networkInput("2. AppLovin MAX", true, appLovinEnabled, { appLovinEnabled = it }, "AppLovin SDK Key / App ID", appLovinSdkKey) { appLovinSdkKey = it }
+                    networkInput("3. Meta Audience Network", true, metaAudienceEnabled, { metaAudienceEnabled = it }, "Meta Placement / App ID", metaPlacementId) { metaPlacementId = it }
+                    networkInput("4. Mintegral", true, mintegralEnabled, { mintegralAppId = mintegralAppId; mintegralEnabled = it }, "Mintegral App ID", mintegralAppId) { mintegralAppId = it }
+                    networkInput("5. Pangle", true, pangleEnabled, { pangleEnabled = it }, "Pangle App ID", pangleAppId) { pangleAppId = it }
+                    networkInput("6. InMobi", true, inMobiEnabled, { inMobiEnabled = it }, "InMobi Account / App ID", inMobiAccountId) { inMobiAccountId = it }
+                    networkInput("7. Liftoff Monetize (Vungle)", true, liftoffEnabled, { liftoffEnabled = it }, "Liftoff App ID", liftoffAppId) { liftoffAppId = it }
+                    networkInput("8. DT Exchange (Fyber)", true, dtExchangeEnabled, { dtExchangeEnabled = it }, "DT Exchange App ID", dtExchangeAppId) { dtExchangeAppId = it }
+                }
+            }
+        }
+
+        // 4. Adapter & Format Monitoring Tables
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("লাইভ অ্যাডাপ্টার স্ট্যাটাস (${telemetry.adapterStatuses.size})", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    telemetry.adapterStatuses.forEach { st ->
+                        val readyColor = if (st.runtimeReady) PrimaryGreen else Color(0xFFB45309)
+                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("${st.displayName} (v${st.adapterVersion})", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                                Text(
+                                    text = if (st.runtimeReady) "ACTIVE" else if (st.sdkPackaged) "CONFIG/WAIT" else "MISSING",
+                                    color = readyColor,
+                                    fontWeight = FontWeight.Bold,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                            Text(
+                                text = "SDK Packaged: ${st.sdkPackaged} • App ID: ${if (st.appKeyConfigured) "Set" else "Missing"} • ${st.statusNote}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("ফরম্যাট মনিটরিং (Request / Loaded / No Fill)", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    AdFormatType.entries.forEach { fmt ->
+                        val fm = telemetry.formatMetrics[fmt] ?: AdFormatTelemetry(fmt)
+                        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("${fmt.labelEn} (${if (fm.enabled) "ON" else "OFF"})", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                                Text("${fm.requestStatus} / ${fm.loadedStatus}", style = MaterialTheme.typography.labelSmall, color = DarkGreen)
+                            }
+                            Text(
+                                text = "Req: ${fm.requestCount} • Load: ${fm.loadedCount} • Show: ${fm.displayedCount} • No Fill: ${fm.noFillCount} • Fail: ${fm.failedCount}",
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                            if (fm.lastError.isNotBlank()) {
+                                Text("Last Error: ${fm.lastError}", style = MaterialTheme.typography.labelSmall, color = AlertRed)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Debug Event Logs
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("বিজ্ঞাপন ডিবাগ লগ (${telemetry.debugLogs.size})", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    if (telemetry.debugLogs.isEmpty()) {
+                        Text("এখনো কোনো ডিবাগ ইভেন্ট লগ রেকর্ড হয়নি।", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        telemetry.debugLogs.take(25).forEach { entry ->
+                            Text(
+                                text = "[${AdMonetizationManager.formatTimestamp(entry.timestamp)}] ${entry.code} (${entry.network}${entry.format?.let { "/${it.labelEn}" } ?: ""}): ${entry.message}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (entry.code.contains("FAIL") || entry.code.contains("INVALID") || entry.code == AdDebugEventCode.AD_NO_FILL) AlertRed else MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 6. Hybrid WebView Fallback + Priority (for Web & Mobile Web Ads)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("হাইব্রিড ওয়েব ফলব্যাক ও স্পন্সর কনফিগারেশন", fontWeight = FontWeight.Bold, color = DarkGreen)
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Text("মোবাইলে Multi-Network Web Ads", modifier = Modifier.weight(1f))
+                        Text("Multi-Network Web Ads ফলব্যাক চালু", modifier = Modifier.weight(1f))
                         Switch(checked = mobileWebAdsEnabled, onCheckedChange = { mobileWebAdsEnabled = it })
                     }
-                    Text("মোবাইল অগ্রাধিকার নেটওয়ার্ক:", style = MaterialTheme.typography.labelLarge)
+                    Text("মোবাইল অগ্রাধিকার:", style = MaterialTheme.typography.labelLarge)
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(priorityOptions) { (key, label) ->
                             FilterChip(
@@ -1366,30 +1820,16 @@ private fun AdminAdMonetizationTab(
                         }
                     }
                     OutlinedTextField(
-                        value = androidBannerId,
-                        onValueChange = { androidBannerId = it },
-                        label = { Text("AdMob Banner Unit ID") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("admin_admob_banner_input")
-                    )
-                    OutlinedTextField(
-                        value = androidInterstitialId,
-                        onValueChange = { androidInterstitialId = it },
-                        label = { Text("AdMob Interstitial Unit ID") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().testTag("admin_admob_interstitial_input")
-                    )
-                    OutlinedTextField(
                         value = mobileDirectLinkUrl,
                         onValueChange = { mobileDirectLinkUrl = it },
-                        label = { Text("Mobile Direct Link / Smartlink URL") },
+                        label = { Text("Direct Link / Smartlink URL") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
                         value = mobileCustomAdHtml,
                         onValueChange = { mobileCustomAdHtml = it },
-                        label = { Text("Mobile Custom Ad HTML / JS Tag") },
+                        label = { Text("Custom Ad HTML / JS Tag") },
                         minLines = 2,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1397,6 +1837,7 @@ private fun AdminAdMonetizationTab(
             }
         }
 
+        // 7. Direct Sponsor Banner
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -1419,6 +1860,7 @@ private fun AdminAdMonetizationTab(
             }
         }
 
+        // 8. Website Ad Networks (AdSense / Adsterra / Monetag / Custom HTML)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -1426,9 +1868,9 @@ private fun AdminAdMonetizationTab(
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
             ) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("ক্রস-প্ল্যাটফর্ম অ্যাড নেটওয়ার্কসমূহ", fontWeight = FontWeight.Bold, color = DarkGreen)
+                    Text("ওয়েবসাইট অ্যাড নেটওয়ার্কসমূহ", fontWeight = FontWeight.Bold, color = DarkGreen)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Google AdSense চালু", modifier = Modifier.weight(1f))
+                        Text("Google AdSense (Website Only) চালু", modifier = Modifier.weight(1f))
                         Switch(checked = adsenseEnabled, onCheckedChange = { adsenseEnabled = it })
                     }
                     OutlinedTextField(value = adsenseClient, onValueChange = { adsenseClient = it }, label = { Text("AdSense Publisher ID") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -1469,42 +1911,7 @@ private fun AdminAdMonetizationTab(
 
         item {
             Button(
-                onClick = {
-                    onSaveAdConfig(
-                        adConfig.copy(
-                            adsEnabled = adsEnabled,
-                            showAdsLabel = showAdsLabel,
-                            androidAdsEnabled = androidAdsEnabled,
-                            androidBannerId = androidBannerId.trim(),
-                            androidInterstitialId = androidInterstitialId.trim(),
-                            mobileWebAdsEnabled = mobileWebAdsEnabled,
-                            mobileAdNetworkPriority = mobileAdNetworkPriority,
-                            mobileCustomAdHtml = mobileCustomAdHtml,
-                            mobileDirectLinkUrl = mobileDirectLinkUrl.trim(),
-                            sponsorEnabled = sponsorEnabled,
-                            sponsorTitle = sponsorTitle.trim(),
-                            sponsorSubtitle = sponsorSubtitle.trim(),
-                            sponsorImageUrl = sponsorImageUrl.trim(),
-                            sponsorTargetUrl = sponsorTargetUrl.trim(),
-                            sponsorCtaText = sponsorCtaText.trim(),
-                            adsenseEnabled = adsenseEnabled,
-                            adsenseClient = adsenseClient.trim(),
-                            adsenseTopSlot = adsenseTopSlot.trim(),
-                            adsenseFeedSlot = adsenseFeedSlot.trim(),
-                            adsenseFooterSlot = adsenseFooterSlot.trim(),
-                            adsterraEnabled = adsterraEnabled,
-                            adsterraBannerKey = adsterraBannerKey.trim(),
-                            adsterraScriptUrl = adsterraScriptUrl.trim(),
-                            adsterraSocialBarUrl = adsterraSocialBarUrl.trim(),
-                            monetagEnabled = monetagEnabled,
-                            monetagZoneId = monetagZoneId.trim(),
-                            monetagScriptUrl = monetagScriptUrl.trim(),
-                            customAdEnabled = customAdEnabled,
-                            customAdName = customAdName.trim(),
-                            customTopHtml = customTopHtml
-                        )
-                    )
-                },
+                onClick = { onSaveAdConfig(buildDraftConfig()) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp)

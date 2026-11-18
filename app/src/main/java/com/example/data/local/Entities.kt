@@ -175,7 +175,10 @@ data class OrderEntity(
     val farmerPaymentConfirmedAt: Long = 0L,
     val adminPaymentVerified: Boolean = false,
     val adminPaymentVerifiedBy: String = "",
-    val adminPaymentVerifiedAt: Long = 0L
+    val adminPaymentVerifiedAt: Long = 0L,
+    val advanceAmountRequested: Double = 0.0,
+    val verifiedAdvanceTotal: Double = 0.0,
+    val remainingDue: Double = 0.0
 )
 
 @Entity(
@@ -295,3 +298,49 @@ data class PaymentSettingsEntity(
     val notifyOnExpiry: Boolean = true,
     val updatedAt: Long = 0L
 )
+
+@Entity(tableName = "farmer_payment_settings")
+data class FarmerPaymentSettingsEntity(
+    @PrimaryKey val farmerId: String,
+    val bKashNumber: String = "",
+    val nagadNumber: String = "",
+    val rocketNumber: String = "",
+    val bankAccountInfo: String = "",
+    val updatedAt: Long = 0L
+) {
+    fun hasAnyNumber(): Boolean =
+        bKashNumber.isNotBlank() || nagadNumber.isNotBlank() || rocketNumber.isNotBlank() || bankAccountInfo.isNotBlank()
+}
+
+@Entity(
+    tableName = "order_payments",
+    indices = [
+        Index("orderId"),
+        Index("farmerId"),
+        Index("buyerId"),
+        Index("transactionIdNormalized")
+    ]
+)
+data class OrderPaymentEntity(
+    @PrimaryKey val id: String,
+    val orderId: String,
+    val orderCode: String,
+    val buyerId: String,
+    val buyerName: String,
+    val farmerId: String,
+    val farmerName: String,
+    val amount: Double,
+    val paymentMethod: String,
+    val receiverNumber: String = "",
+    val senderNumber: String = "",
+    val transactionId: String,
+    val transactionIdNormalized: String,
+    val referenceNote: String = "",
+    val status: String = "PENDING_VERIFICATION", // PENDING_VERIFICATION, CONFIRMED, REJECTED
+    val rejectionReason: String = "",
+    val verifiedBy: String = "",
+    val verifiedAt: Long = 0L,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+

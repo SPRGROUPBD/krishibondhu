@@ -69,6 +69,7 @@ enum class PaymentAccountType(val labelBn: String, val labelEn: String) {
 
 enum class OrderStatus(val labelBn: String, val labelEn: String) {
     PENDING("Pending", "Pending"),
+    PAYMENT_PENDING("Payment Pending", "Payment Pending"),
     ACCEPTED("Accepted", "Accepted"),
     REJECTED("Rejected", "Rejected"),
     PROCESSING("Processing", "Processing"),
@@ -82,6 +83,7 @@ enum class OrderStatus(val labelBn: String, val labelEn: String) {
 
     fun display(lang: AppLanguage): String = when (this) {
         PENDING -> if (lang == AppLanguage.BENGALI) "অপেক্ষমান (Pending)" else "Pending"
+        PAYMENT_PENDING -> if (lang == AppLanguage.BENGALI) "অগ্রিম পেমেন্ট অপেক্ষমান" else "Payment Pending"
         ACCEPTED -> if (lang == AppLanguage.BENGALI) "গৃহীত (Accepted)" else "Accepted"
         REJECTED -> if (lang == AppLanguage.BENGALI) "প্রত্যাখ্যাত (Rejected)" else "Rejected"
         PROCESSING -> if (lang == AppLanguage.BENGALI) "প্রস্তুত হচ্ছে (Processing)" else "Processing"
@@ -92,6 +94,19 @@ enum class OrderStatus(val labelBn: String, val labelEn: String) {
         COMPLETED -> if (lang == AppLanguage.BENGALI) "সম্পন্ন (Completed)" else "Completed"
         CANCELLED -> if (lang == AppLanguage.BENGALI) "বাতিল (Cancelled)" else "Cancelled"
         DISPUTED -> if (lang == AppLanguage.BENGALI) "বিরোধপূর্ণ (Disputed)" else "Disputed"
+    }
+}
+
+enum class OrderPaymentStatus(val labelBn: String, val labelEn: String) {
+    PENDING_VERIFICATION("যাচাই অপেক্ষমান", "Pending Verification"),
+    CONFIRMED("নিশ্চিতকৃত", "Confirmed"),
+    REJECTED("প্রত্যাখ্যাত", "Rejected");
+
+    fun display(lang: AppLanguage): String = if (lang == AppLanguage.BENGALI) labelBn else labelEn
+
+    companion object {
+        fun fromName(raw: String?): OrderPaymentStatus =
+            entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) } ?: PENDING_VERIFICATION
     }
 }
 
@@ -111,14 +126,21 @@ enum class PaymentMethod(val labelBn: String, val labelEn: String, val isDigital
     DIRECT_CASH("Direct Cash Payment", "Direct Cash Payment", false),
     BANK_TRANSFER("Direct Bank Transfer", "Direct Bank Transfer", true),
     BKASH("bKash", "bKash", true),
-    NAGAD("Nagad", "Nagad", true);
+    NAGAD("Nagad", "Nagad", true),
+    ROCKET("Rocket", "Rocket", true);
 
     fun display(lang: AppLanguage): String = when (this) {
         CASH_ON_PICKUP -> if (lang == AppLanguage.BENGALI) "সংগ্রহের সময় নগদ (Cash on Pickup)" else "Cash on Pickup"
         DIRECT_CASH -> if (lang == AppLanguage.BENGALI) "সরাসরি নগদ প্রদান (Direct Cash)" else "Direct Cash Payment"
         BANK_TRANSFER -> if (lang == AppLanguage.BENGALI) "সরাসরি ব্যাংক ট্রান্সফার" else "Direct Bank Transfer"
-        BKASH -> if (lang == AppLanguage.BENGALI) "বিকাশ (bKash - গেটওয়ে)" else "bKash (Gateway)"
-        NAGAD -> if (lang == AppLanguage.BENGALI) "নগদ (Nagad - গেটওয়ে)" else "Nagad (Gateway)"
+        BKASH -> if (lang == AppLanguage.BENGALI) "বিকাশ (bKash - সরাসরি কৃষক)" else "bKash (Direct to Farmer)"
+        NAGAD -> if (lang == AppLanguage.BENGALI) "নগদ (Nagad - সরাসরি কৃষক)" else "Nagad (Direct to Farmer)"
+        ROCKET -> if (lang == AppLanguage.BENGALI) "রকেট (Rocket - সরাসরি কৃষক)" else "Rocket (Direct to Farmer)"
+    }
+
+    companion object {
+        fun fromName(raw: String?): PaymentMethod =
+            entries.firstOrNull { it.name.equals(raw?.trim(), ignoreCase = true) } ?: BKASH
     }
 }
 
@@ -151,8 +173,38 @@ data class AdConfig(
     val adsEnabled: Boolean = true,
     val showAdsLabel: Boolean = true,
     val androidAdsEnabled: Boolean = true,
+    val mediationPlatform: String = "UNITY_LEVELPLAY",
+    val mediationAppKey: String = "",
+    val adTestMode: Boolean = false,
+    // 5 Ad Formats (LevelPlay Ad Unit / Placement IDs)
+    val bannerEnabled: Boolean = true,
     val androidBannerId: String = "",
+    val nativeEnabled: Boolean = true,
+    val androidNativePlacement: String = "",
+    val interstitialEnabled: Boolean = true,
     val androidInterstitialId: String = "",
+    val rewardedEnabled: Boolean = false,
+    val androidRewardedId: String = "",
+    val appOpenEnabled: Boolean = false,
+    val androidAppOpenId: String = "",
+    // 8 Supported Mediation Networks (Zero AdMob)
+    val unityAdsEnabled: Boolean = true,
+    val unityGameId: String = "",
+    val appLovinEnabled: Boolean = false,
+    val appLovinSdkKey: String = "",
+    val metaAudienceEnabled: Boolean = false,
+    val metaPlacementId: String = "",
+    val mintegralEnabled: Boolean = false,
+    val mintegralAppId: String = "",
+    val pangleEnabled: Boolean = false,
+    val pangleAppId: String = "",
+    val inMobiEnabled: Boolean = false,
+    val inMobiAccountId: String = "",
+    val liftoffEnabled: Boolean = false,
+    val liftoffAppId: String = "",
+    val dtExchangeEnabled: Boolean = false,
+    val dtExchangeAppId: String = "",
+    // Website & Hybrid Mobile Web Networks (kept for website parity)
     val mobileWebAdsEnabled: Boolean = true,
     val mobileAdNetworkPriority: String = "ALL",
     val mobileCustomAdHtml: String = "",
@@ -181,7 +233,13 @@ data class AdConfig(
     val sponsorTargetUrl: String = "",
     val sponsorCtaText: String = "বিস্তারিত দেখুন",
     val updatedAt: Long = 0L
-)
+) {
+    fun resolvedBannerUnitId(): String = androidBannerId.trim()
+    fun resolvedNativePlacement(): String = androidNativePlacement.trim()
+    fun resolvedInterstitialUnitId(): String = androidInterstitialId.trim()
+    fun resolvedRewardedUnitId(): String = androidRewardedId.trim()
+    fun resolvedAppOpenUnitId(): String = androidAppOpenId.trim()
+}
 
 fun Double.formatBdt(): String {
     val rounded = kotlin.math.round(this * 100.0) / 100.0

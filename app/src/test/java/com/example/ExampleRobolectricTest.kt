@@ -467,21 +467,26 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun admobResourcesAndManifestMetaDataAreConfigured() {
-        val appId = context.getString(R.string.admob_app_id)
-        val bannerId = context.getString(R.string.admob_banner_unit_id)
-        val interstitialId = context.getString(R.string.admob_interstitial_unit_id)
-
-        assertTrue(appId.startsWith("ca-app-pub-"))
-        assertTrue(bannerId.startsWith("ca-app-pub-"))
-        assertTrue(interstitialId.startsWith("ca-app-pub-"))
-
+    fun unityLevelPlayConfiguredWithoutAdMobAndZeroFakeRevenue() {
         val appInfo = context.packageManager.getApplicationInfo(
             context.packageName,
             android.content.pm.PackageManager.GET_META_DATA
         )
-        val manifestAppId = appInfo.metaData?.getString("com.google.android.gms.ads.APPLICATION_ID")
-        assertEquals(appId, manifestAppId)
+        assertNull(appInfo.metaData?.getString("com.google.android.gms.ads.APPLICATION_ID"))
+
+        val defaultConfig = com.example.data.model.AdConfig()
+        assertEquals("UNITY_LEVELPLAY", defaultConfig.mediationPlatform)
+
+        com.example.ads.AdMonetizationManager.resetForTest()
+        com.example.ads.AdMonetizationManager.syncConfig(context, defaultConfig)
+        val telemetry = com.example.ads.AdMonetizationManager.telemetry.value
+        assertEquals(0.0, telemetry.dailyRevenueUsd, 0.00001)
+        assertEquals(0.0, telemetry.monthlyRevenueUsd, 0.00001)
+        assertEquals(0, telemetry.impressionCount)
+        assertEquals(8, telemetry.adapterStatuses.size)
+        val unityStatus = telemetry.adapterStatuses.first { it.key == "unity_ads" }
+        assertFalse(unityStatus.requiresSeparateApproval)
+        assertEquals(7, telemetry.adapterStatuses.count { it.requiresSeparateApproval })
     }
 
     @Test
@@ -505,13 +510,27 @@ class ExampleRobolectricTest {
         val updatedConfig = com.example.data.model.AdConfig(
             adsEnabled = true,
             androidAdsEnabled = true,
-            androidBannerId = "ca-app-pub-1234567890123456/1111111111",
+            mediationPlatform = "UNITY_LEVELPLAY",
+            mediationAppKey = "lp_app_key_live_01",
+            adTestMode = true,
+            bannerEnabled = true,
+            androidBannerId = "lp_banner_unit_01",
+            nativeEnabled = true,
+            androidNativePlacement = "lp_native_unit_01",
+            interstitialEnabled = true,
+            androidInterstitialId = "lp_interstitial_unit_01",
+            rewardedEnabled = true,
+            androidRewardedId = "lp_rewarded_unit_01",
+            appOpenEnabled = true,
+            androidAppOpenId = "lp_appopen_unit_01",
+            unityAdsEnabled = true,
+            unityGameId = "5789123",
+            appLovinEnabled = true,
+            appLovinSdkKey = "applovin_key_01",
             mobileWebAdsEnabled = true,
             mobileAdNetworkPriority = "ADSTERRA",
             mobileCustomAdHtml = "<div id='unity-banner'>Ad</div>",
             mobileDirectLinkUrl = "https://example.com/smartlink",
-            adsenseEnabled = true,
-            adsenseClient = "ca-pub-1234567890123456",
             adsterraEnabled = true,
             monetagEnabled = true
         )
@@ -521,12 +540,16 @@ class ExampleRobolectricTest {
 
         val allowed = repo.adminSaveAdConfig(admin, updatedConfig)
         assertTrue(allowed.isSuccess)
-        assertEquals("ca-app-pub-1234567890123456/1111111111", repo.adConfig.value.androidBannerId)
+        assertEquals("lp_app_key_live_01", repo.adConfig.value.mediationAppKey)
+        assertEquals("lp_banner_unit_01", repo.adConfig.value.androidBannerId)
+        assertEquals("5789123", repo.adConfig.value.unityGameId)
+        assertTrue(repo.adConfig.value.adTestMode)
+        assertTrue(repo.adConfig.value.rewardedEnabled)
+        assertTrue(repo.adConfig.value.appOpenEnabled)
         assertTrue(repo.adConfig.value.mobileWebAdsEnabled)
         assertEquals("ADSTERRA", repo.adConfig.value.mobileAdNetworkPriority)
         assertEquals("<div id='unity-banner'>Ad</div>", repo.adConfig.value.mobileCustomAdHtml)
         assertEquals("https://example.com/smartlink", repo.adConfig.value.mobileDirectLinkUrl)
-        assertTrue(repo.adConfig.value.adsenseEnabled)
         assertTrue(repo.adConfig.value.adsterraEnabled)
         assertTrue(repo.adConfig.value.monetagEnabled)
 
@@ -1019,7 +1042,7 @@ class ExampleRobolectricTest {
             isWholesale = false
         ).getOrThrow()
 
-        // Step 1: Buyer places order
+        // Step 1: Buyer places wholesale order -> starts PAYMENT_PENDING
         repo.addToCart(prod, 10.0, buyer).getOrThrow()
         val order = repo.placeOrdersFromCart(
             buyer = buyer,
@@ -1028,42 +1051,36 @@ class ExampleRobolectricTest {
             paymentMethod = PaymentMethod.CASH_ON_PICKUP,
             transactionRef = ""
         ).getOrThrow().first()
-        assertEquals(OrderStatus.PENDING.name, order.status)
+        assertEquals(OrderStatus.PAYMENT_PENDING.name, order.status)
+        assertTrue(prod.isWholesale)
+        assertEquals(ProductUnit.MON.labelBn, prod.unit)
 
-        // Cannot submit payment before farmer accepts
-        assertTrue(
-            repo.submitOrderPayment(
-                orderId = order.id,
-                buyer = buyer,
-                paymentMethod = PaymentMethod.BKASH,
-                senderNumber = "01777000045",
-                transactionReference = "ORDTX1234",
-                receiptUri = "data:image/jpeg;base64,/9j/4AAQ"
-            ).isFailure
-        )
+        // Cannot transition to CONFIRMED or COMPLETED before farmer verifies payment
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.CONFIRMED, farmer).isFailure)
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isFailure)
 
         // Step 2: Farmer accepts order
         assertTrue(repo.updateOrderStatus(order.id, OrderStatus.ACCEPTED, farmer).isSuccess)
 
-        // Step 3: Buyer submits payment TxID + receipt -> must NOT auto-confirm!
+        // Step 3: Buyer submits payment TxID -> must NOT auto-confirm!
         val submitted = repo.submitOrderPayment(
             orderId = order.id,
             buyer = buyer,
             paymentMethod = PaymentMethod.BKASH,
             senderNumber = "01777000045",
             transactionReference = "ORDTX1234",
-            receiptUri = "data:image/jpeg;base64,/9j/4AAQ"
+            receiptUri = ""
         ).getOrThrow()
         assertEquals(OrderStatus.ACCEPTED.name, submitted.status)
-        assertEquals("SUBMITTED", submitted.paymentStatus)
+        assertEquals("PENDING_VERIFICATION", submitted.paymentStatus)
         assertFalse(submitted.farmerPaymentConfirmed)
         assertFalse(submitted.adminPaymentVerified)
 
-        // Cannot transition to CONFIRMED or COMPLETED from buyer receipt alone
+        // Still cannot transition to CONFIRMED or COMPLETED until farmer actually verifies
         assertTrue(repo.updateOrderStatus(order.id, OrderStatus.CONFIRMED, farmer).isFailure)
         assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isFailure)
 
-        // Step 4 & 5: Farmer confirms money received & approves payment -> immediately CONFIRMED & PAID without admin approval!
+        // Step 4 & 5: Farmer confirms money received -> immediately CONFIRMED & PAID without admin approval!
         val afterFarmer = repo.farmerConfirmPaymentReceived(order.id, farmer).getOrThrow()
         assertTrue(afterFarmer.farmerPaymentConfirmed)
         assertFalse(afterFarmer.adminPaymentVerified)
@@ -1382,5 +1399,264 @@ class ExampleRobolectricTest {
         assertNotNull(db.userDao().getUserById(farmer.id))
         assertTrue(db.categoryDao().observeCategories().first().isNotEmpty())
     }
+
+    @Test
+    fun wholesaleOnlyAndCustomAdvancePaymentVerificationWorkflow() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val cat = repo.categories.first().first()
+
+        val farmer1 = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "পাইকারি কৃষক ১",
+                phone = "01711110001",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "কুমারখালী",
+                unionName = "",
+                village = "",
+                nidLastFour = "1111",
+                farmBio = "ধান"
+            ).getOrThrow()
+        )
+        val farmer2 = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "পাইকারি কৃষক ২",
+                phone = "01711110002",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "রাজশাহী",
+                district = "বগুড়া",
+                upazila = "সদর",
+                unionName = "",
+                village = "",
+                nidLastFour = "2222",
+                farmBio = "আলু"
+            ).getOrThrow()
+        )
+        val buyer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "পাইকারি ক্রেতা",
+                phone = "01711110003",
+                rawPassword = "pass1234",
+                role = UserRole.BUYER,
+                division = "ঢাকা",
+                district = "ঢাকা",
+                upazila = "সাভার",
+                unionName = "",
+                village = "",
+                nidLastFour = "",
+                farmBio = ""
+            ).getOrThrow()
+        )
+
+        // Farmer payment settings isolation check
+        repo.saveFarmerPaymentSettings(
+            farmer = farmer1,
+            bKashNumber = "01700001111",
+            nagadNumber = "01800001111",
+            rocketNumber = "01900001111",
+            bankAccountInfo = "Sonali Bank AC-111"
+        ).getOrThrow()
+        repo.saveFarmerPaymentSettings(
+            farmer = farmer2,
+            bKashNumber = "01700002222",
+            nagadNumber = "",
+            rocketNumber = "",
+            bankAccountInfo = ""
+        ).getOrThrow()
+        assertEquals("01700001111", repo.getFarmerPaymentSettingsOnce(farmer1.id)?.bKashNumber)
+        assertEquals("01700002222", repo.getFarmerPaymentSettingsOnce(farmer2.id)?.bKashNumber)
+
+        // Wholesale-only enforcement: even if isWholesale=false is passed, stored product isWholesale=true
+        val product = repo.createFarmerProduct(
+            farmer = farmer1,
+            category = cat,
+            nameBn = "হাইব্রিড আলু (পাইকারি)",
+            descriptionBn = "",
+            imageUri = "",
+            quantity = 10.0,
+            unit = "মণ",
+            pricePerUnit = 100.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "কুমারখালী",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0,
+            isWholesale = false
+        ).getOrThrow()
+        assertTrue(product.isWholesale)
+        assertEquals("মণ", product.unit)
+
+        // Order total = ৳100, buyer advance = ৳50
+        repo.addToCart(product, 1.0, buyer).getOrThrow()
+        val placed = repo.placeOrdersFromCart(
+            buyer = buyer,
+            deliveryOption = DeliveryOption.FARM_PICKUP,
+            deliveryAddress = "",
+            paymentMethod = PaymentMethod.BKASH,
+            transactionRef = "TXADV50",
+            senderNumber = "01711110003",
+            advanceByFarmer = mapOf(farmer1.id to 50.0),
+            paymentReferenceNote = "First advance"
+        ).getOrThrow().first()
+
+        // Before farmer verifies, verifiedAdvanceTotal must remain 0 and remainingDue = 100
+        assertEquals(OrderStatus.PAYMENT_PENDING.name, placed.status)
+        assertEquals(100.0, placed.grandTotal, 0.01)
+        assertEquals(50.0, placed.advanceAmountRequested, 0.01)
+        assertEquals(0.0, placed.verifiedAdvanceTotal, 0.01)
+        assertEquals(100.0, placed.remainingDue, 0.01)
+
+        val firstPayment = db.orderPaymentDao().getPaymentsForOrderOnce(placed.id).single()
+        assertEquals("01700001111", firstPayment.receiverNumber)
+        assertEquals("TXADV50", firstPayment.transactionId)
+
+        // Duplicate TxID across system must be blocked
+        assertTrue(
+            repo.submitOrderAdvancePayment(
+                orderId = placed.id,
+                buyer = buyer,
+                amount = 20.0,
+                paymentMethod = PaymentMethod.NAGAD,
+                senderNumber = "01711110003",
+                transactionId = " txadv50 "
+            ).isFailure
+        )
+
+        // Unauthorized farmer2 cannot confirm farmer1's payment
+        assertTrue(repo.farmerVerifyOrderPayment(firstPayment.id, farmer2, approved = true).isFailure)
+
+        // Farmer1 confirms ৳50 -> Verified Advance = ৳50, Remaining Due = ৳50, Status = CONFIRMED
+        val afterFirstVerify = repo.farmerVerifyOrderPayment(firstPayment.id, farmer1, approved = true).getOrThrow()
+        assertEquals(50.0, afterFirstVerify.verifiedAdvanceTotal, 0.01)
+        assertEquals(50.0, afterFirstVerify.remainingDue, 0.01)
+        assertEquals(OrderStatus.CONFIRMED.name, afterFirstVerify.status)
+        assertEquals("PARTIAL_ADVANCE_VERIFIED", afterFirstVerify.paymentStatus)
+
+        // Multiple verified partial payments (৳30 + ৳20 = ৳50 remaining)
+        val p2 = repo.submitOrderAdvancePayment(
+            orderId = placed.id,
+            buyer = buyer,
+            amount = 30.0,
+            paymentMethod = PaymentMethod.NAGAD,
+            senderNumber = "01711110003",
+            transactionId = "TXPART30",
+            referenceNote = "Second partial"
+        ).getOrThrow()
+        val afterSecondVerify = repo.farmerVerifyOrderPayment(p2.id, farmer1, approved = true).getOrThrow()
+        assertEquals(80.0, afterSecondVerify.verifiedAdvanceTotal, 0.01)
+        assertEquals(20.0, afterSecondVerify.remainingDue, 0.01)
+
+        // Overpaying remaining due (> ৳20) must be rejected
+        assertTrue(
+            repo.submitOrderAdvancePayment(
+                orderId = placed.id,
+                buyer = buyer,
+                amount = 25.0,
+                paymentMethod = PaymentMethod.ROCKET,
+                senderNumber = "01711110003",
+                transactionId = "TXOVER25"
+            ).isFailure
+        )
+
+        val p3 = repo.submitOrderAdvancePayment(
+            orderId = placed.id,
+            buyer = buyer,
+            amount = 20.0,
+            paymentMethod = PaymentMethod.ROCKET,
+            senderNumber = "01711110003",
+            transactionId = "TXFINAL20",
+            referenceNote = "Final payment"
+        ).getOrThrow()
+        val afterFinalVerify = repo.farmerVerifyOrderPayment(p3.id, farmer1, approved = true).getOrThrow()
+        assertEquals(100.0, afterFinalVerify.verifiedAdvanceTotal, 0.01)
+        assertEquals(0.0, afterFinalVerify.remainingDue, 0.01)
+        assertEquals("PAID", afterFinalVerify.paymentStatus)
+    }
+
+    @Test
+    fun zeroAdvanceOrderStartsPaymentPendingAndFarmerApprovesToConfirmedAndCompleted() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val cat = repo.categories.first().first()
+
+        val farmer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "শূন্য অগ্রিম কৃষক",
+                phone = "01722220001",
+                rawPassword = "pass1234",
+                role = UserRole.FARMER,
+                division = "খুলনা",
+                district = "কুষ্টিয়া",
+                upazila = "ভেড়ামারা",
+                unionName = "",
+                village = "",
+                nidLastFour = "3333",
+                farmBio = "মরিচ"
+            ).getOrThrow()
+        )
+        val buyer = activateAsAdmin(
+            admin,
+            repo.registerUser(
+                fullName = "শূন্য অগ্রিম ক্রেতা",
+                phone = "01722220002",
+                rawPassword = "pass1234",
+                role = UserRole.BUYER,
+                division = "ঢাকা",
+                district = "ঢাকা",
+                upazila = "সাভার",
+                unionName = "",
+                village = "",
+                nidLastFour = "",
+                farmBio = ""
+            ).getOrThrow()
+        )
+        val prod = repo.createFarmerProduct(
+            farmer = farmer,
+            category = cat,
+            nameBn = "কাঁচা মরিচ",
+            descriptionBn = "",
+            imageUri = "",
+            quantity = 5.0,
+            unit = "মণ",
+            pricePerUnit = 200.0,
+            harvestDate = "আজ",
+            availabilityDate = "আজ",
+            pickupAddress = "ভেড়ামারা",
+            supportsFarmPickup = true,
+            supportsDirectDelivery = false,
+            deliveryCharge = 0.0
+        ).getOrThrow()
+
+        repo.addToCart(prod, 1.0, buyer).getOrThrow()
+        val order = repo.placeOrdersFromCart(
+            buyer = buyer,
+            deliveryOption = DeliveryOption.FARM_PICKUP,
+            deliveryAddress = "",
+            paymentMethod = PaymentMethod.CASH_ON_PICKUP,
+            transactionRef = "",
+            advanceByFarmer = mapOf(farmer.id to 0.0)
+        ).getOrThrow().first()
+
+        assertEquals(OrderStatus.PAYMENT_PENDING.name, order.status)
+        assertEquals("ZERO_ADVANCE_PENDING", order.paymentStatus)
+        assertEquals(200.0, order.remainingDue, 0.01)
+
+        val approved = repo.approveZeroAdvanceOrder(order.id, farmer).getOrThrow()
+        assertEquals(OrderStatus.CONFIRMED.name, approved.status)
+        assertEquals("ZERO_ADVANCE_APPROVED", approved.paymentStatus)
+
+        assertTrue(repo.updateOrderStatus(order.id, OrderStatus.COMPLETED, buyer).isSuccess)
+        assertEquals(OrderStatus.COMPLETED.name, db.orderDao().getOrderById(order.id)!!.status)
+    }
 }
+
 

@@ -530,8 +530,7 @@ private fun MarketplaceHomeContent(
     val categoryEmojiMap = uiState.categories.associate { it.id to it.emoji }
     val activeProducts = uiState.products.filter { it.status == "ACTIVE" }
     val popularProducts = activeProducts.filter { it.isPopular }.take(6)
-    val wholesaleProducts = activeProducts.filter { it.isWholesale }.take(6)
-    val retailProducts = activeProducts.filter { !it.isWholesale }.take(6)
+    val wholesaleProducts = activeProducts.take(6)
     val recentProducts = activeProducts.sortedByDescending { it.createdAt }.take(6)
     val verifiedFarmers = uiState.farmers.filter { it.verificationStatus == "VERIFIED" }.take(6)
 
@@ -979,7 +978,7 @@ private fun MarketplaceHomeContent(
 
             item {
                 SectionHeader(
-                    title = if (lang == AppLanguage.BENGALI) "খুচরা ও সম্প্রতি যুক্ত ফসল" else "Retail & Recently Listed",
+                    title = if (lang == AppLanguage.BENGALI) "সম্প্রতি যুক্ত পাইকারি ফসল" else "Recently Listed Wholesale Crops",
                     actionLabel = if (lang == AppLanguage.BENGALI) "সব ফসল" else "All Crops",
                     onActionClick = onNavigateToBrowse
                 )
@@ -988,7 +987,7 @@ private fun MarketplaceHomeContent(
                     modifier = Modifier.padding(horizontal = 16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    (retailProducts + recentProducts).distinctBy { it.id }.take(5).forEach { prod ->
+                    recentProducts.take(5).forEach { prod ->
                         Surface(
                             onClick = { onProductClick(prod.id) },
                             shape = RoundedCornerShape(14.dp),
@@ -1060,15 +1059,11 @@ private fun MarketplaceHomeContent(
                         ) {
                             Column(modifier = Modifier.padding(14.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(44.dp)
-                                            .clip(CircleShape)
-                                            .background(LightGreen),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text("🧑‍🌾", fontSize = 22.sp)
-                                    }
+                                    UserAvatar(
+                                        imageUri = farmer.profileImageUri,
+                                        role = farmer.role,
+                                        size = 44.dp
+                                    )
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {

@@ -31,7 +31,7 @@ interface UserDao {
     @Query("SELECT COUNT(*) FROM users")
     suspend fun countUsers(): Int
 
-    @Query("DELETE FROM users WHERE isDemoRecord = 1")
+    @Query("DELETE FROM users WHERE isDemoRecord = 1 OR phone LIKE 'farmer_%'")
     suspend fun deleteDemoUsers()
 
     @Query("DELETE FROM users WHERE id != 'admin_super'")
@@ -256,6 +256,18 @@ interface OrderDao {
         paymentStatus: String,
         now: Long
     )
+
+    @Query("UPDATE orders SET verifiedAdvanceTotal = :verifiedAdvanceTotal, remainingDue = :remainingDue, farmerPaymentConfirmed = :farmerConfirmed, farmerPaymentConfirmedAt = :farmerConfirmedAt, paymentStatus = :paymentStatus, status = :status, updatedAt = :now WHERE id = :orderId")
+    suspend fun updateOrderAdvanceAndStatus(
+        orderId: String,
+        verifiedAdvanceTotal: Double,
+        remainingDue: Double,
+        farmerConfirmed: Boolean,
+        farmerConfirmedAt: Long,
+        paymentStatus: String,
+        status: String,
+        now: Long
+    )
 }
 
 @Dao
@@ -392,3 +404,64 @@ interface PaymentSettingsDao {
     @Query("DELETE FROM payment_settings")
     suspend fun clearSettings()
 }
+
+@Dao
+interface FarmerPaymentSettingsDao {
+    @Query("SELECT * FROM farmer_payment_settings")
+    fun observeAll(): Flow<List<FarmerPaymentSettingsEntity>>
+
+    @Query("SELECT * FROM farmer_payment_settings WHERE farmerId = :farmerId LIMIT 1")
+    fun observeForFarmer(farmerId: String): Flow<FarmerPaymentSettingsEntity?>
+
+    @Query("SELECT * FROM farmer_payment_settings WHERE farmerId = :farmerId LIMIT 1")
+    suspend fun getForFarmerOnce(farmerId: String): FarmerPaymentSettingsEntity?
+
+    @Upsert
+    suspend fun upsert(settings: FarmerPaymentSettingsEntity)
+
+    @Upsert
+    suspend fun insertAll(list: List<FarmerPaymentSettingsEntity>)
+
+    @Query("DELETE FROM farmer_payment_settings WHERE farmerId NOT IN (:ids)")
+    suspend fun deleteNotIn(ids: List<String>)
+
+    @Query("DELETE FROM farmer_payment_settings")
+    suspend fun clearAll()
+}
+
+@Dao
+interface OrderPaymentDao {
+    @Query("SELECT * FROM order_payments ORDER BY createdAt DESC")
+    fun observeAllPayments(): Flow<List<OrderPaymentEntity>>
+
+    @Query("SELECT * FROM order_payments WHERE orderId = :orderId ORDER BY createdAt DESC")
+    fun observePaymentsForOrder(orderId: String): Flow<List<OrderPaymentEntity>>
+
+    @Query("SELECT * FROM order_payments WHERE orderId = :orderId ORDER BY createdAt DESC")
+    suspend fun getPaymentsForOrderOnce(orderId: String): List<OrderPaymentEntity>
+
+    @Query("SELECT * FROM order_payments")
+    suspend fun getAllPaymentsOnce(): List<OrderPaymentEntity>
+
+    @Query("SELECT * FROM order_payments WHERE id = :id LIMIT 1")
+    suspend fun getPaymentById(id: String): OrderPaymentEntity?
+
+    @Query("SELECT * FROM order_payments WHERE transactionIdNormalized = :txNorm LIMIT 1")
+    suspend fun findByNormalizedTxId(txNorm: String): OrderPaymentEntity?
+
+    @Query("SELECT COALESCE(SUM(amount), 0.0) FROM order_payments WHERE orderId = :orderId AND status = 'CONFIRMED'")
+    suspend fun getConfirmedTotalForOrder(orderId: String): Double
+
+    @Upsert
+    suspend fun upsertPayment(payment: OrderPaymentEntity)
+
+    @Upsert
+    suspend fun insertAll(payments: List<OrderPaymentEntity>)
+
+    @Query("DELETE FROM order_payments WHERE id NOT IN (:ids)")
+    suspend fun deleteNotIn(ids: List<String>)
+
+    @Query("DELETE FROM order_payments")
+    suspend fun clearAll()
+}
+

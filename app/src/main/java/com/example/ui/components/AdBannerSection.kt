@@ -4,6 +4,10 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.net.http.SslError
+import android.os.Build
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -11,6 +15,9 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -18,36 +25,38 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import coil.compose.AsyncImage
-import com.example.R
+import com.example.ads.AdFormatType
 import com.example.ads.AdMonetizationManager
+import com.example.ads.SdkInitStatus
 import com.example.data.model.AdConfig
 import com.example.ui.theme.DarkGreen
 import com.example.ui.theme.HarvestGoldLight
 import com.example.ui.theme.LightGreen
 import com.example.ui.theme.PrimaryGreen
 import com.example.util.NetworkMonitor
-import com.google.android.gms.ads.AdRequest
-import com.google.android.gms.ads.AdSize
-import com.google.android.gms.ads.AdView
+import com.ironsource.mediationsdk.ads.nativead.LevelPlayNativeAd
+import com.ironsource.mediationsdk.ads.nativead.LevelPlayNativeAdListener
+import com.ironsource.mediationsdk.ads.nativead.NativeAdLayout
+import com.ironsource.mediationsdk.adunit.adapter.utility.AdInfo
+import com.ironsource.mediationsdk.logger.IronSourceError
+import com.unity3d.mediation.LevelPlayAdError
+import com.unity3d.mediation.LevelPlayAdInfo
+import com.unity3d.mediation.LevelPlayAdSize
+import com.unity3d.mediation.banner.LevelPlayBannerAdView
+import com.unity3d.mediation.banner.LevelPlayBannerAdViewListener
 
 @Composable
 fun AdBannerSection(
@@ -58,12 +67,13 @@ fun AdBannerSection(
     if (!adConfig.adsEnabled) return
 
     val context = LocalContext.current
+    val telemetry by AdMonetizationManager.telemetry.collectAsState()
     val priority = adConfig.mobileAdNetworkPriority.trim().ifBlank { "ALL" }
     fun allows(networkKey: String): Boolean =
         priority.equals("ALL", ignoreCase = true) || priority.equals(networkKey, ignoreCase = true)
 
-    val resolvedAdMobUnit = adConfig.androidBannerId.trim()
-        .ifBlank { stringResource(id = R.string.admob_banner_unit_id) }
+    val bannerUnitId = adConfig.resolvedBannerUnitId()
+    val nativePlacement = adConfig.resolvedNativePlacement()
 
     val webNetworkAd = remember(adConfig, placementTag, priority) {
         buildMobileNetworkHtmlPayload(adConfig, placementTag, priority)
@@ -71,20 +81,34 @@ fun AdBannerSection(
     val isOnline = remember(context) {
         AdMonetizationManager.isTestEnvironment() || NetworkMonitor.isCurrentlyOnline(context)
     }
-    val showAdMob = adConfig.androidAdsEnabled &&
-        resolvedAdMobUnit.isNotBlank() &&
-        allows("ADMOB") &&
-        (AdMonetizationManager.isTestEnvironment() || (isOnline && AdMonetizationManager.isPlayServicesAvailable(context)))
+
+    val sdkReadyOrTest = AdMonetizationManager.isTestEnvironment() ||
+        telemetry.sdkInitStatus == com.example.ads.SdkInitStatus.SUCCESS
+
+    val showMediatedBanner = adConfig.androidAdsEnabled &&
+        adConfig.bannerEnabled &&
+        adConfig.mediationAppKey.isNotBlank() &&
+        bannerUnitId.isNotBlank() &&
+        allows("LEVELPLAY") &&
+        (AdMonetizationManager.isTestEnvironment() || (isOnline && sdkReadyOrTest))
+
+    val showMediatedNative = adConfig.androidAdsEnabled &&
+        adConfig.nativeEnabled &&
+        adConfig.mediationAppKey.isNotBlank() &&
+        nativePlacement.isNotBlank() &&
+        placementTag == "browse_feed" &&
+        (AdMonetizationManager.isTestEnvironment() || (isOnline && sdkReadyOrTest))
+
     val showMobileWebAd = adConfig.mobileWebAdsEnabled && webNetworkAd != null &&
         (AdMonetizationManager.isTestEnvironment() || isOnline)
     val showSponsor = adConfig.sponsorEnabled &&
         adConfig.sponsorTitle.isNotBlank() &&
-        (allows("SPONSOR") || (!showAdMob && !showMobileWebAd))
+        (allows("SPONSOR") || (!showMediatedBanner && !showMobileWebAd))
 
     val directLink = adConfig.mobileDirectLinkUrl.trim()
         .takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
-    if (!showSponsor && !showAdMob && !showMobileWebAd && directLink == null) return
+    if (!showSponsor && !showMediatedBanner && !showMediatedNative && !showMobileWebAd && directLink == null) return
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -192,8 +216,8 @@ fun AdBannerSection(
             }
         }
 
-        // 2. Multi-Network Mobile WebView Ad Bridge (collapses cleanly if ad network fails to load)
-        if (showMobileWebAd && webNetworkAd != null) {
+        // 2. Multi-Network Mobile WebView Ad Bridge (collapses cleanly on failure)
+        if (webNetworkAd != null && adConfig.mobileWebAdsEnabled && (AdMonetizationManager.isTestEnvironment() || isOnline)) {
             var webAdFailed by remember(webNetworkAd.html, placementTag) { mutableStateOf(false) }
             if (!webAdFailed) {
                 Surface(
@@ -250,64 +274,250 @@ fun AdBannerSection(
             }
         }
 
-        // 3. Google AdMob Native Banner (+ AdMob Mediation Networks: Meta, Unity, AppLovin, Start.io)
-        if (showAdMob) {
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+        // 3. Unity LevelPlay Adaptive Banner (Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff, DT Exchange — Zero AdMob)
+        if (showMediatedBanner) {
+            var bannerFailed by remember(bannerUnitId, placementTag) { mutableStateOf(false) }
+            if (!bannerFailed) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    if (adConfig.showAdsLabel) {
-                        Text(
-                            text = "Sponsored Ad • AdMob & Mediation",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                    }
-                    if (AdMonetizationManager.isTestEnvironment()) {
-                        Surface(
-                            color = LightGreen,
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(50.dp)
-                                .testTag("ad_banner_$placementTag")
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Text(
-                                    text = "AdMob Banner ($placementTag)",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = DarkGreen
-                                )
-                            }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        if (adConfig.showAdsLabel) {
+                            Text(
+                                text = "Sponsored Ad • Multi-Network Mediation",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
                         }
-                    } else {
-                        key(resolvedAdMobUnit) {
-                            AndroidView(
-                                factory = { ctx ->
-                                    AdView(ctx).apply {
-                                        setAdSize(AdSize.BANNER)
-                                        adUnitId = resolvedAdMobUnit
-                                        loadAd(AdRequest.Builder().build())
-                                    }
-                                },
+                        if (AdMonetizationManager.isTestEnvironment()) {
+                            Surface(
+                                color = LightGreen,
+                                shape = RoundedCornerShape(8.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .defaultMinSize(minHeight = 50.dp)
+                                    .height(50.dp)
                                     .testTag("ad_banner_$placementTag")
-                            )
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = "LevelPlay Adaptive Banner ($placementTag)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = DarkGreen
+                                    )
+                                }
+                            }
+                        } else {
+                            key(bannerUnitId, placementTag) {
+                                var bannerViewHolder by remember { mutableStateOf<LevelPlayBannerAdView?>(null) }
+                                DisposableEffect(bannerUnitId, placementTag) {
+                                    onDispose {
+                                        bannerViewHolder?.destroy()
+                                        bannerViewHolder = null
+                                    }
+                                }
+                                AndroidView(
+                                    factory = { ctx ->
+                                        val adSize = LevelPlayAdSize.createAdaptiveAdSize(ctx)
+                                        val configBuilder = LevelPlayBannerAdView.Config.Builder()
+                                        if (adSize != null) {
+                                            configBuilder.setAdSize(adSize)
+                                        }
+                                        configBuilder.setPlacementName(placementTag)
+                                        LevelPlayBannerAdView(ctx, bannerUnitId, configBuilder.build()).apply {
+                                            setBannerListener(object : LevelPlayBannerAdViewListener {
+                                                override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
+                                                    bannerFailed = false
+                                                    AdMonetizationManager.trackFormatLoaded(
+                                                        AdFormatType.BANNER,
+                                                        adInfo.adNetwork
+                                                    )
+                                                }
+
+                                                override fun onAdLoadFailed(error: LevelPlayAdError) {
+                                                    bannerFailed = true
+                                                    AdMonetizationManager.trackFormatFailed(
+                                                        AdFormatType.BANNER,
+                                                        error.errorCode,
+                                                        error.errorMessage
+                                                    )
+                                                }
+
+                                                override fun onAdDisplayed(adInfo: LevelPlayAdInfo) {
+                                                    AdMonetizationManager.trackFormatDisplayed(
+                                                        AdFormatType.BANNER,
+                                                        adInfo.adNetwork
+                                                    )
+                                                }
+
+                                                override fun onAdDisplayFailed(adInfo: LevelPlayAdInfo, error: LevelPlayAdError) {
+                                                    AdMonetizationManager.trackFormatFailed(
+                                                        AdFormatType.BANNER,
+                                                        error.errorCode,
+                                                        error.errorMessage
+                                                    )
+                                                }
+
+                                                override fun onAdClicked(adInfo: LevelPlayAdInfo) = Unit
+                                                override fun onAdLeftApplication(adInfo: LevelPlayAdInfo) = Unit
+                                                override fun onAdExpanded(adInfo: LevelPlayAdInfo) = Unit
+                                                override fun onAdCollapsed(adInfo: LevelPlayAdInfo) = Unit
+                                            })
+                                            AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, bannerUnitId)
+                                            loadAd()
+                                        }.also { bannerViewHolder = it }
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 50.dp)
+                                        .testTag("ad_banner_$placementTag")
+                                )
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // 4. LevelPlay Native Ad Slot (for feed cards)
+        if (showMediatedNative) {
+            LevelPlayNativeAdCard(
+                placementName = nativePlacement,
+                showAdsLabel = adConfig.showAdsLabel
+            )
+        }
+    }
+}
+
+@Composable
+private fun LevelPlayNativeAdCard(
+    placementName: String,
+    showAdsLabel: Boolean
+) {
+    if (AdMonetizationManager.isTestEnvironment()) {
+        Surface(
+            color = LightGreen,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(64.dp)
+                .testTag("native_ad_$placementName")
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = "LevelPlay Native Ad ($placementName)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = DarkGreen
+                )
+            }
+        }
+        return
+    }
+
+    var nativeLoaded by remember(placementName) { mutableStateOf(false) }
+    var nativeFailed by remember(placementName) { mutableStateOf(false) }
+    if (nativeFailed) return
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (nativeLoaded) Modifier else Modifier.height(1.dp))
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            if (showAdsLabel && nativeLoaded) {
+                Text(
+                    text = "Sponsored • Native Mediation",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+            }
+            var nativeAdHolder by remember(placementName) { mutableStateOf<LevelPlayNativeAd?>(null) }
+            DisposableEffect(placementName) {
+                onDispose {
+                    nativeAdHolder?.destroyAd()
+                    nativeAdHolder = null
+                }
+            }
+            AndroidView(
+                factory = { ctx ->
+                    val container = NativeAdLayout(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                    }
+                    val titleView = TextView(ctx).apply { textSize = 15f }
+                    val bodyView = TextView(ctx).apply { textSize = 13f }
+                    val ctaView = TextView(ctx).apply { textSize = 13f }
+                    val inner = LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(titleView)
+                        addView(bodyView)
+                        addView(ctaView)
+                    }
+                    container.addView(inner)
+
+                    val nativeAd = LevelPlayNativeAd.Builder()
+                        .withPlacementName(placementName)
+                        .withListener(object : LevelPlayNativeAdListener {
+                            override fun onAdLoaded(ad: LevelPlayNativeAd?, adInfo: AdInfo?) {
+                                nativeLoaded = true
+                                nativeFailed = false
+                                ad?.let { loaded ->
+                                    titleView.text = loaded.title ?: ""
+                                    bodyView.text = loaded.body ?: ""
+                                    ctaView.text = loaded.callToAction ?: ""
+                                    container.registerNativeAdViews(loaded)
+                                }
+                                AdMonetizationManager.trackFormatLoaded(
+                                    AdFormatType.NATIVE,
+                                    adInfo?.adNetwork ?: "LevelPlay"
+                                )
+                            }
+
+                            override fun onAdLoadFailed(ad: LevelPlayNativeAd?, error: IronSourceError?) {
+                                nativeFailed = true
+                                nativeLoaded = false
+                                AdMonetizationManager.trackFormatFailed(
+                                    AdFormatType.NATIVE,
+                                    error?.errorCode ?: -1,
+                                    error?.errorMessage ?: "Native ad load failed"
+                                )
+                            }
+
+                            override fun onAdImpression(ad: LevelPlayNativeAd?, adInfo: AdInfo?) {
+                                AdMonetizationManager.trackFormatDisplayed(
+                                    AdFormatType.NATIVE,
+                                    adInfo?.adNetwork ?: "LevelPlay"
+                                )
+                            }
+
+                            override fun onAdClicked(ad: LevelPlayNativeAd?, adInfo: AdInfo?) = Unit
+                        })
+                        .build()
+
+                    container.setTitleView(titleView)
+                    container.setBodyView(bodyView)
+                    container.setCallToActionView(ctaView)
+                    nativeAdHolder = nativeAd
+                    AdMonetizationManager.trackFormatRequested(AdFormatType.NATIVE, placementName)
+                    nativeAd.loadAd()
+                    container
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }
@@ -412,74 +622,146 @@ private fun SandboxedAdWebView(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val latestOnAdFailed by rememberUpdatedState(onAdFailed)
+    var webViewHolder by remember(htmlContent) { mutableStateOf<WebView?>(null) }
+    var verifyRunnableHolder by remember(htmlContent) { mutableStateOf<Runnable?>(null) }
+    var isDisposed by remember(htmlContent) { mutableStateOf(false) }
+
+    DisposableEffect(htmlContent) {
+        onDispose {
+            isDisposed = true
+            verifyRunnableHolder?.let { runnable ->
+                runCatching { webViewHolder?.removeCallbacks(runnable) }
+            }
+            verifyRunnableHolder = null
+            webViewHolder?.let { wv ->
+                runCatching {
+                    wv.stopLoading()
+                    (wv.parent as? ViewGroup)?.removeView(wv)
+                    wv.destroy()
+                }
+            }
+            webViewHolder = null
+        }
+    }
+
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            WebView(ctx).apply {
-                setBackgroundColor(AndroidColor.TRANSPARENT)
-                settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    allowFileAccess = false
-                    allowContentAccess = false
-                    mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                    loadWithOverviewMode = true
-                    useWideViewPort = true
-                }
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                        val url = request?.url?.toString() ?: return false
-                        if (isSafeHttpsOrHttp(url)) {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()))
+            runCatching {
+                WebView(ctx).apply {
+                    // Use software layer for small Compose-hosted ad WebViews to avoid GPU/Vulkan renderer crashes (code -1)
+                    setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+                    setBackgroundColor(AndroidColor.TRANSPARENT)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true)
+                    }
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        allowFileAccess = false
+                        allowContentAccess = false
+                        mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                        loadWithOverviewMode = true
+                        useWideViewPort = true
+                    }
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            val url = request?.url?.toString() ?: return false
+                            if (isSafeHttpsOrHttp(url)) {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, url.toUri()).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                    )
+                                }
+                                return true
                             }
                             return true
                         }
-                        return true
-                    }
 
-                    override fun onReceivedError(
-                        view: WebView?,
-                        request: WebResourceRequest?,
-                        error: WebResourceError?
-                    ) {
-                        if (request?.isForMainFrame == true) {
-                            onAdFailed()
-                        }
-                    }
-
-                    override fun onReceivedHttpError(
-                        view: WebView?,
-                        request: WebResourceRequest?,
-                        errorResponse: WebResourceResponse?
-                    ) {
-                        if (request?.isForMainFrame == true) {
-                            onAdFailed()
-                        }
-                    }
-
-                    override fun onReceivedSslError(
-                        view: WebView?,
-                        handler: SslErrorHandler?,
-                        error: SslError?
-                    ) {
-                        handler?.cancel()
-                        onAdFailed()
-                    }
-
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        view?.postDelayed({
-                            view.evaluateJavascript(
-                                "(function(){var b=document.body;if(!b)return '0';var h=b.querySelector('img,iframe,ins,a,object,embed');return (h||(b.innerText||'').trim().length>0)?'1':'0';})()"
-                            ) { res ->
-                                if (res == "\"0\"" || res == "0") {
-                                    onAdFailed()
+                        override fun onRenderProcessGone(
+                            view: WebView?,
+                            detail: RenderProcessGoneDetail?
+                        ): Boolean {
+                            // Gracefully absorb Chromium renderer crash without terminating host app process
+                            verifyRunnableHolder?.let { runnable ->
+                                runCatching { view?.removeCallbacks(runnable) }
+                            }
+                            verifyRunnableHolder = null
+                            view?.let { crashed ->
+                                runCatching {
+                                    crashed.stopLoading()
+                                    (crashed.parent as? ViewGroup)?.removeView(crashed)
+                                    crashed.destroy()
                                 }
                             }
-                        }, 3500L)
+                            if (webViewHolder === view) {
+                                webViewHolder = null
+                            }
+                            if (!isDisposed) {
+                                latestOnAdFailed()
+                            }
+                            return true
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            error: WebResourceError?
+                        ) {
+                            if (request?.isForMainFrame == true && !isDisposed) {
+                                latestOnAdFailed()
+                            }
+                        }
+
+                        override fun onReceivedHttpError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            errorResponse: WebResourceResponse?
+                        ) {
+                            if (request?.isForMainFrame == true && !isDisposed) {
+                                latestOnAdFailed()
+                            }
+                        }
+
+                        override fun onReceivedSslError(
+                            view: WebView?,
+                            handler: SslErrorHandler?,
+                            error: SslError?
+                        ) {
+                            handler?.cancel()
+                            if (!isDisposed) {
+                                latestOnAdFailed()
+                            }
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            val wv = view ?: return
+                            verifyRunnableHolder?.let { old -> runCatching { wv.removeCallbacks(old) } }
+                            val checkRunnable = Runnable {
+                                if (isDisposed || webViewHolder == null) return@Runnable
+                                runCatching {
+                                    wv.evaluateJavascript(
+                                        "(function(){var b=document.body;if(!b)return '0';var h=b.querySelector('img,iframe,ins,a,object,embed');return (h||(b.innerText||'').trim().length>0)?'1':'0';})()"
+                                    ) { res ->
+                                        if (!isDisposed && (res == "\"0\"" || res == "0")) {
+                                            latestOnAdFailed()
+                                        }
+                                    }
+                                }
+                            }
+                            verifyRunnableHolder = checkRunnable
+                            wv.postDelayed(checkRunnable, 3500L)
+                        }
                     }
+                    webViewHolder = this
+                    loadDataWithBaseURL("https://krishibondhu.bd", htmlContent, "text/html", "utf-8", null)
                 }
-                loadDataWithBaseURL("https://krishibondhu.bd", htmlContent, "text/html", "utf-8", null)
+            }.getOrElse {
+                latestOnAdFailed()
+                FrameLayout(ctx)
             }
         }
     )

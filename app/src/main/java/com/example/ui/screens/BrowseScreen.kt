@@ -199,7 +199,6 @@ fun BrowseScreen(
         uiState.selectedUpazila,
         uiState.selectedUnion,
         uiState.selectedCategoryId,
-        uiState.wholesaleOnly,
         uiState.priceSort.takeIf { it != PriceSort.NEWEST }
     ).size
     val hasActiveFilter = uiState.searchQuery.isNotBlank() || activeFilterCount > 0
@@ -495,20 +494,6 @@ fun BrowseScreen(
                         )
                     }
                 }
-                uiState.wholesaleOnly?.let { wholesale ->
-                    InputChip(
-                        selected = true,
-                        onClick = { onWholesaleSelect(null) },
-                        label = {
-                            Text(
-                                if (wholesale) (if (lang == AppLanguage.BENGALI) "পাইকারি" else "Wholesale")
-                                else (if (lang == AppLanguage.BENGALI) "খুচরা" else "Retail"),
-                                maxLines = 1
-                            )
-                        },
-                        trailingIcon = { Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(14.dp)) }
-                    )
-                }
                 if (uiState.priceSort != PriceSort.NEWEST) {
                     InputChip(
                         selected = true,
@@ -628,28 +613,6 @@ fun BrowseScreen(
                                 onSelect = onCategorySelect,
                                 modifier = Modifier.weight(1f),
                                 testTag = "filter_category_dropdown"
-                            )
-
-                            val allTypeLabel = if (lang == AppLanguage.BENGALI) "সব ধরন" else "All Types"
-                            val wholesaleLabel = if (lang == AppLanguage.BENGALI) "পাইকারি" else "Wholesale"
-                            val retailLabel = if (lang == AppLanguage.BENGALI) "খুচরা" else "Retail"
-                            val selectedTypeText = when (uiState.wholesaleOnly) {
-                                true -> wholesaleLabel
-                                false -> retailLabel
-                                null -> allTypeLabel
-                            }
-                            FilterDropdownField(
-                                label = if (lang == AppLanguage.BENGALI) "ধরন" else "Sale Type",
-                                selectedText = selectedTypeText,
-                                isActive = uiState.wholesaleOnly != null,
-                                options = listOf(
-                                    allTypeLabel to null,
-                                    wholesaleLabel to true,
-                                    retailLabel to false
-                                ),
-                                onSelect = onWholesaleSelect,
-                                modifier = Modifier.weight(0.85f),
-                                testTag = "filter_wholesale_dropdown"
                             )
 
                             val sortNewest = if (lang == AppLanguage.BENGALI) "নতুন" else "Newest"

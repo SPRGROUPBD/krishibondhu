@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.BuildConfig
 import com.example.data.local.UserEntity
 import com.example.data.model.AccountStatus
 import com.example.data.model.AppLanguage
@@ -498,6 +499,18 @@ fun ProfileScreen(
                 }
             }
         }
+
+        item {
+            Text(
+                text = "Krishi Bondhu • Version ${BuildConfig.VERSION_NAME} • Build ${BuildConfig.BUILD_VERSION}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .testTag("profile_version_footer")
+            )
+        }
     }
 
     if (showEditDialog && user != null) {
@@ -512,6 +525,7 @@ fun ProfileScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EditProfileDialog(
     user: UserEntity,
@@ -542,6 +556,9 @@ private fun EditProfileDialog(
     var profileImageUri by remember(user) { mutableStateOf(user.profileImageUri) }
     var processingImage by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var divExpanded by remember { mutableStateOf(false) }
+    var distExpanded by remember { mutableStateOf(false) }
+    var upzExpanded by remember { mutableStateOf(false) }
 
     val districts = remember(division) {
         BangladeshLocations.districtsForDivision(division).map { it.districtBn }
@@ -641,56 +658,102 @@ private fun EditProfileDialog(
                     modifier = Modifier.fillMaxWidth().testTag("edit_profile_name_input")
                 )
 
-                Text("বিভাগ", style = MaterialTheme.typography.labelMedium)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(BangladeshLocations.divisions) { div ->
-                        FilterChip(
-                            selected = division == div,
-                            onClick = {
-                                division = div
-                                val firstDist = BangladeshLocations.districtsForDivision(div).firstOrNull()?.districtBn ?: "ঢাকা"
-                                district = firstDist
-                                upazila = BangladeshLocations.upazilasForDistrict(firstDist).firstOrNull() ?: firstDist
-                            },
-                            label = { Text(div) }
-                        )
-                    }
-                }
-
-                Text("জেলা", style = MaterialTheme.typography.labelMedium)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(districts) { d ->
-                        FilterChip(
-                            selected = district == d,
-                            onClick = {
-                                district = d
-                                upazila = BangladeshLocations.upazilasForDistrict(d).firstOrNull() ?: d
-                            },
-                            label = { Text(d) }
-                        )
-                    }
-                }
-
-                if (upazilas.isNotEmpty()) {
-                    Text("উপজেলা", style = MaterialTheme.typography.labelMedium)
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(upazilas) { u ->
-                            FilterChip(
-                                selected = upazila == u,
-                                onClick = { upazila = u },
-                                label = { Text(u) }
+                ExposedDropdownMenuBox(
+                    expanded = divExpanded,
+                    onExpandedChange = { divExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = division,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("বিভাগ *") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = divExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .testTag("edit_profile_division_dropdown")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = divExpanded,
+                        onDismissRequest = { divExpanded = false }
+                    ) {
+                        BangladeshLocations.divisions.forEach { div ->
+                            DropdownMenuItem(
+                                text = { Text(div) },
+                                onClick = {
+                                    division = div
+                                    val firstDist = BangladeshLocations.districtsForDivision(div).firstOrNull()?.districtBn ?: "ঢাকা"
+                                    district = firstDist
+                                    upazila = BangladeshLocations.upazilasForDistrict(firstDist).firstOrNull() ?: firstDist
+                                    divExpanded = false
+                                }
                             )
                         }
                     }
                 }
 
-                OutlinedTextField(
-                    value = upazila,
-                    onValueChange = { upazila = it },
-                    label = { Text("উপজেলা / থানা *") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                ExposedDropdownMenuBox(
+                    expanded = distExpanded,
+                    onExpandedChange = { distExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = district,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("জেলা *") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = distExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .testTag("edit_profile_district_dropdown")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = distExpanded,
+                        onDismissRequest = { distExpanded = false }
+                    ) {
+                        districts.forEach { d ->
+                            DropdownMenuItem(
+                                text = { Text(d) },
+                                onClick = {
+                                    district = d
+                                    upazila = BangladeshLocations.upazilasForDistrict(d).firstOrNull() ?: d
+                                    distExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                ExposedDropdownMenuBox(
+                    expanded = upzExpanded,
+                    onExpandedChange = { upzExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = upazila,
+                        onValueChange = { upazila = it },
+                        readOnly = upazilas.isNotEmpty(),
+                        label = { Text("উপজেলা / থানা *") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = upzExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .testTag("edit_profile_upazila_dropdown")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = upzExpanded,
+                        onDismissRequest = { upzExpanded = false }
+                    ) {
+                        upazilas.forEach { u ->
+                            DropdownMenuItem(
+                                text = { Text(u) },
+                                onClick = {
+                                    upazila = u
+                                    upzExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = unionName,

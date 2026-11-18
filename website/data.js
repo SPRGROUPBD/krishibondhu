@@ -16,12 +16,42 @@ export const SUPERADMIN_CREDENTIALS = {
   userId: "admin_super"
 };
 
+export const APP_VERSION_NAME = "v1.0.1";
+export const APP_BUILD_VERSION = "kbbd20261117-01";
+
 export const DEFAULT_AD_CONFIG = {
   adsEnabled: true,
   showAdsLabel: true,
   androidAdsEnabled: true,
+  mediationPlatform: "UNITY_LEVELPLAY",
+  mediationAppKey: "",
+  adTestMode: false,
+  bannerEnabled: true,
   androidBannerId: "",
+  nativeEnabled: true,
+  androidNativePlacement: "",
+  interstitialEnabled: true,
   androidInterstitialId: "",
+  rewardedEnabled: false,
+  androidRewardedId: "",
+  appOpenEnabled: false,
+  androidAppOpenId: "",
+  unityAdsEnabled: true,
+  unityGameId: "",
+  appLovinEnabled: false,
+  appLovinSdkKey: "",
+  metaAudienceEnabled: false,
+  metaPlacementId: "",
+  mintegralEnabled: false,
+  mintegralAppId: "",
+  pangleEnabled: false,
+  pangleAppId: "",
+  inMobiEnabled: false,
+  inMobiAccountId: "",
+  liftoffEnabled: false,
+  liftoffAppId: "",
+  dtExchangeEnabled: false,
+  dtExchangeAppId: "",
   mobileWebAdsEnabled: true,
   mobileAdNetworkPriority: "ALL",
   mobileCustomAdHtml: "",
@@ -211,7 +241,23 @@ export const ACTIVATION_PAYMENT_STATUS_META = {
   RESUBMISSION_REQUESTED: { labelBn: "পুনঃজমা প্রয়োজন", labelEn: "Resubmission Requested", color: "bg-purple-100 text-purple-800" }
 };
 
+export const DEFAULT_FARMER_PAYMENT_SETTINGS = {
+  farmerId: "",
+  bKashNumber: "",
+  nagadNumber: "",
+  rocketNumber: "",
+  bankAccountInfo: "",
+  updatedAt: 0
+};
+
+export const ORDER_PAYMENT_STATUS_META = {
+  PENDING_VERIFICATION: { labelBn: "কৃষক যাচাই অপেক্ষমাণ", labelEn: "Pending Verification", color: "bg-amber-100 text-amber-800" },
+  CONFIRMED: { labelBn: "কৃষক নিশ্চিত করেছেন", labelEn: "Confirmed by Farmer", color: "bg-emerald-100 text-emerald-800" },
+  REJECTED: { labelBn: "বাতিল / প্রত্যাখ্যাত", labelEn: "Rejected by Farmer", color: "bg-red-100 text-red-700" }
+};
+
 export const ORDER_STATUS_META = {
+  PAYMENT_PENDING: { labelBn: "পেমেন্ট অপেক্ষমাণ (০৳ অগ্রিম)", labelEn: "Payment Pending", color: "bg-amber-100 text-amber-800" },
   PENDING: { labelBn: "অপেক্ষমান", labelEn: "Pending", color: "bg-amber-100 text-amber-800" },
   ACCEPTED: { labelBn: "গৃহীত", labelEn: "Accepted", color: "bg-emerald-100 text-emerald-800" },
   REJECTED: { labelBn: "প্রত্যাখ্যাত", labelEn: "Rejected", color: "bg-red-100 text-red-700" },
@@ -220,7 +266,7 @@ export const ORDER_STATUS_META = {
   READY: { labelBn: "সংগ্রহের জন্য প্রস্তুত", labelEn: "Ready", color: "bg-teal-100 text-teal-800" },
   SHIPPED: { labelBn: "পথে রয়েছে", labelEn: "Shipped", color: "bg-indigo-100 text-indigo-800" },
   DELIVERED: { labelBn: "পৌঁছেছে", labelEn: "Delivered", color: "bg-cyan-100 text-cyan-800" },
-  CONFIRMED: { labelBn: "চূড়ান্ত নিশ্চিত", labelEn: "Confirmed", color: "bg-emerald-600 text-white" },
+  CONFIRMED: { labelBn: "অর্ডার নিশ্চিত (Confirmed)", labelEn: "Order Confirmed", color: "bg-emerald-600 text-white" },
   COMPLETED: { labelBn: "সম্পন্ন", labelEn: "Completed", color: "bg-green-100 text-green-800" },
   CANCELLED: { labelBn: "বাতিল", labelEn: "Cancelled", color: "bg-gray-200 text-gray-700" },
   DISPUTED: { labelBn: "বিরোধপূর্ণ", labelEn: "Disputed", color: "bg-rose-100 text-rose-800" }

@@ -23,13 +23,24 @@
 -dontwarn okio.**
 -dontwarn javax.annotation.**
 
-# Google Mobile Ads (AdMob)
--keep public class com.google.android.gms.ads.** {
-    public *;
-}
--keep public class com.google.ads.** {
-    public *;
-}
+# Unity LevelPlay & Approved Mediation Adapters (Zero AdMob)
+-keep class com.unity3d.mediation.** { *; }
+-keep class com.ironsource.** { *; }
+-keepclassmembers class * implements com.ironsource.mediationsdk.sdk.InitializationListener { *; }
+-keepclassmembers class * implements com.unity3d.mediation.LevelPlayInitListener { *; }
+-keepclassmembers class * implements com.unity3d.mediation.impression.LevelPlayImpressionDataListener { *; }
+-dontwarn com.unity3d.mediation.**
+-dontwarn com.ironsource.**
+
+# Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff Vungle, DT Exchange
+-keep class com.unity3d.ads.** { *; }
+-keep class com.applovin.** { *; }
+-keep class com.facebook.ads.** { *; }
+-keep class com.mbridge.msdk.** { *; }
+-keep class com.bytedance.sdk.openadsdk.** { *; }
+-keep class com.inmobi.** { *; }
+-keep class com.vungle.ads.** { *; }
+-keep class com.fyber.inneractive.sdk.** { *; }
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }

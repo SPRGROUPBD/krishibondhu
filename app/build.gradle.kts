@@ -81,6 +81,14 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+configurations.all {
+  exclude(group = "com.google.android.gms", module = "play-services-ads")
+  exclude(group = "com.google.android.gms", module = "play-services-ads-lite")
+  exclude(group = "com.google.android.gms", module = "play-services-ads-base")
+  exclude(group = "com.google.android.gms", module = "play-services-ads-api")
+  exclude(group = "com.unity3d.ads-mediation", module = "admob-adapter")
+}
+
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
@@ -93,6 +101,7 @@ dependencies {
   implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.datastore.preferences)
+  implementation(libs.androidx.lifecycle.process)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -108,8 +117,18 @@ dependencies {
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
-  implementation(libs.play.services.ads)
   implementation(libs.play.services.location)
+  implementation(libs.play.services.appset)
+  implementation(libs.play.services.ads.identifier)
+  implementation(libs.levelplay.mediation.sdk)
+  implementation(libs.levelplay.unityads.adapter)
+  implementation(libs.levelplay.applovin.adapter)
+  implementation(libs.levelplay.facebook.adapter)
+  implementation(libs.levelplay.mintegral.adapter)
+  implementation(libs.levelplay.pangle.adapter)
+  implementation(libs.levelplay.inmobi.adapter)
+  implementation(libs.levelplay.vungle.adapter)
+  implementation(libs.levelplay.fyber.adapter)
   implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)

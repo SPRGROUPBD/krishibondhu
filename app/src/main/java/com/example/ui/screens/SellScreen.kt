@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.CameraAlt
@@ -37,11 +38,14 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.example.data.local.CategoryEntity
+import com.example.data.local.FarmerPaymentSettingsEntity
 import com.example.data.local.ProductEntity
 import com.example.data.model.*
 import com.example.ui.components.EmptyStateView
 import com.example.ui.components.InteractiveBangladeshMapDialog
 import com.example.ui.theme.DarkGreen
+import com.example.ui.theme.HarvestGold
+import com.example.ui.theme.HarvestGoldLight
 import com.example.ui.theme.LightGreen
 import com.example.ui.theme.PrimaryGreen
 import com.example.ui.viewmodel.MarketplaceUiState
@@ -52,9 +56,11 @@ import kotlinx.coroutines.launch
 @Composable
 fun SellScreen(
     uiState: MarketplaceUiState,
+    farmerPaymentSettings: FarmerPaymentSettingsEntity? = null,
     onLoginFarmer: () -> Unit,
     onRegisterFarmer: () -> Unit,
     onOpenActivation: () -> Unit = {},
+    onSavePaymentSettings: (bKash: String, nagad: String, rocket: String, bank: String) -> Unit = { _, _, _, _ -> },
     onAddProduct: (
         category: CategoryEntity,
         nameBn: String,
@@ -141,6 +147,10 @@ fun SellScreen(
     val myProducts = uiState.products.filter { it.farmerId == activeUser.id }
     val myOrders = uiState.orders.filter { it.farmerId == activeUser.id }
     val totalSales = myOrders.filter { it.status == OrderStatus.COMPLETED.name || it.status == OrderStatus.CONFIRMED.name }.sumOf { it.productTotal }
+    val resolvedSettings = farmerPaymentSettings ?: uiState.farmerPaymentSettings.firstOrNull { it.farmerId == activeUser.id }
+    val pendingPaymentVerifyCount = uiState.orderPayments.count {
+        it.farmerId == activeUser.id && it.status == OrderPaymentStatus.PENDING_VERIFICATION.name
+    }
 
     var showAddForm by remember { mutableStateOf(false) }
     var editingProduct by remember { mutableStateOf<ProductEntity?>(null) }
@@ -190,8 +200,32 @@ fun SellScreen(
                         FarmerStatBox("অর্ডার", "${myOrders.size}", Modifier.weight(1f))
                         FarmerStatBox("মোট বিক্রি", totalSales.formatBdt(), Modifier.weight(1f))
                     }
+                    if (pendingPaymentVerifyCount > 0) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            color = HarvestGoldLight,
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, HarvestGold)
+                        ) {
+                            Text(
+                                text = "⚠ আপনার ${pendingPaymentVerifyCount}টি ক্রেতা অগ্রিম পেমেন্ট যাচাই অপেক্ষমাণ — অর্ডার ট্যাবে গিয়ে নিশ্চিত করুন।",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFF78350F),
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(10.dp)
+                            )
+                        }
+                    }
                 }
             }
+        }
+
+        // Farmer Direct Payment Settings Card (Isolated per farmer)
+        item {
+            FarmerPaymentSettingsCard(
+                currentSettings = resolvedSettings,
+                onSave = onSavePaymentSettings
+            )
         }
 
         // Active Account Gate Banner
@@ -370,7 +404,7 @@ private fun AddProductFormCard(
     var supportsPickup by remember { mutableStateOf(true) }
     var supportsDelivery by remember { mutableStateOf(true) }
     var deliveryFeeText by remember { mutableStateOf("60") }
-    var isWholesale by remember { mutableStateOf(false) }
+    val isWholesale = true // সব পণ্য শুধুমাত্র পাইকারি দামে বিক্রি হবে
 
     val handleSelectedImageUri: (Uri) -> Unit = { uri ->
         processingImage = true
@@ -652,10 +686,19 @@ private fun AddProductFormCard(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Switch(checked = isWholesale, onCheckedChange = { isWholesale = it })
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(if (isWholesale) "পাইকারি বিক্রি (Wholesale)" else "খুচরা বিক্রি (Retail)")
+            Surface(
+                color = LightGreen,
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "বিক্রয়ের ধরন: পাইকারি মাত্র (Wholesale Only • ১ মণ = ৪০ কেজি)",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = DarkGreen,
+                    modifier = Modifier.padding(10.dp)
+                )
             }
 
             val canSubmit = selectedCategory != null && nameBn.isNotBlank() && priceVal > 0 && qtyVal > 0
@@ -737,4 +780,117 @@ private fun EditPriceStockDialog(
             TextButton(onClick = onDismiss) { Text("বাতিল") }
         }
     )
+}
+
+@Composable
+private fun FarmerPaymentSettingsCard(
+    currentSettings: FarmerPaymentSettingsEntity?,
+    onSave: (bKash: String, nagad: String, rocket: String, bank: String) -> Unit
+) {
+    var expanded by remember(currentSettings) { mutableStateOf(currentSettings?.hasAnyNumber() != true) }
+    var bKash by remember(currentSettings) { mutableStateOf(currentSettings?.bKashNumber.orEmpty()) }
+    var nagad by remember(currentSettings) { mutableStateOf(currentSettings?.nagadNumber.orEmpty()) }
+    var rocket by remember(currentSettings) { mutableStateOf(currentSettings?.rocketNumber.orEmpty()) }
+    var bankInfo by remember(currentSettings) { mutableStateOf(currentSettings?.bankAccountInfo.orEmpty()) }
+
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.45f)),
+        modifier = Modifier.fillMaxWidth().testTag("farmer_payment_settings_card")
+    ) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null, tint = PrimaryGreen)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = "কৃষকের সরাসরি পেমেন্ট সেটিংস",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = DarkGreen
+                        )
+                        Text(
+                            text = "ক্রেতা অগ্রিম পেমেন্ট সরাসরি আপনার নম্বরে পাঠাবেন (প্ল্যাটফর্ম কোনো টাকা নেয় না)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = { expanded = !expanded },
+                    modifier = Modifier.testTag("toggle_farmer_payment_settings")
+                ) {
+                    Text(if (expanded) "লুকান" else "সম্পাদনা")
+                }
+            }
+
+            if (!expanded && currentSettings != null && currentSettings.hasAnyNumber()) {
+                val summary = listOfNotNull(
+                    currentSettings.bKashNumber.takeIf { it.isNotBlank() }?.let { "bKash: $it" },
+                    currentSettings.nagadNumber.takeIf { it.isNotBlank() }?.let { "Nagad: $it" },
+                    currentSettings.rocketNumber.takeIf { it.isNotBlank() }?.let { "Rocket: $it" },
+                    currentSettings.bankAccountInfo.takeIf { it.isNotBlank() }?.let { "Bank: $it" }
+                ).joinToString(" • ")
+                Text(
+                    text = summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = PrimaryGreen,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            if (expanded) {
+                OutlinedTextField(
+                    value = bKash,
+                    onValueChange = { bKash = it },
+                    label = { Text("বিকাশ (bKash) নম্বর") },
+                    placeholder = { Text("01XXXXXXXXX") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth().testTag("farmer_pay_bkash_input")
+                )
+                OutlinedTextField(
+                    value = nagad,
+                    onValueChange = { nagad = it },
+                    label = { Text("নগদ (Nagad) নম্বর") },
+                    placeholder = { Text("01XXXXXXXXX") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth().testTag("farmer_pay_nagad_input")
+                )
+                OutlinedTextField(
+                    value = rocket,
+                    onValueChange = { rocket = it },
+                    label = { Text("রকেট (Rocket) নম্বর") },
+                    placeholder = { Text("01XXXXXXXXX") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    modifier = Modifier.fillMaxWidth().testTag("farmer_pay_rocket_input")
+                )
+                OutlinedTextField(
+                    value = bankInfo,
+                    onValueChange = { bankInfo = it },
+                    label = { Text("ব্যাংক একাউন্ট তথ্য (ঐচ্ছিক)") },
+                    placeholder = { Text("ব্যাংকের নাম, শাখা, অ্যাকাউন্ট নম্বর") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("farmer_pay_bank_input")
+                )
+                Button(
+                    onClick = {
+                        onSave(bKash.trim(), nagad.trim(), rocket.trim(), bankInfo.trim())
+                        expanded = false
+                    },
+                    modifier = Modifier.fillMaxWidth().height(46.dp).testTag("farmer_pay_save_button")
+                ) {
+                    Text("পেমেন্ট নম্বর সংরক্ষণ করুন", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
 }

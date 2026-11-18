@@ -25,7 +25,18 @@ kotlinxCoroutinesAndroid = "1.10.2"
 kotlinxCoroutinesCore = "1.10.2"
 accompanistPermissions = "0.37.3"
 playServicesLocation = "21.3.0"
-playServicesAds = "24.9.0"
+playServicesAppSet = "16.1.0"
+playServicesAdsIdentifier = "18.2.0"
+lifecycleProcess = "2.8.7"
+levelplaySdk = "9.2.0"
+levelplayUnityAdsAdapter = "5.13.0"
+levelplayAppLovinAdapter = "5.2.0"
+levelplayMetaAdapter = "5.6.0"
+levelplayMintegralAdapter = "5.2.0"
+levelplayPangleAdapter = "5.2.0"
+levelplayInMobiAdapter = "5.12.0"
+levelplayVungleAdapter = "5.12.0"
+levelplayFyberAdapter = "5.3.0"
 cameraCamera2 = "1.5.0"
 cameraLifecycle = "1.5.0"
 cameraView = "1.5.0"
@@ -76,7 +87,18 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanistPermissions" }
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
-play-services-ads = { group = "com.google.android.gms", name = "play-services-ads", version.ref = "playServicesAds" }
+play-services-appset = { group = "com.google.android.gms", name = "play-services-appset", version.ref = "playServicesAppSet" }
+play-services-ads-identifier = { group = "com.google.android.gms", name = "play-services-ads-identifier", version.ref = "playServicesAdsIdentifier" }
+androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycleProcess" }
+levelplay-mediation-sdk = { group = "com.unity3d.ads-mediation", name = "mediation-sdk", version.ref = "levelplaySdk" }
+levelplay-unityads-adapter = { group = "com.unity3d.ads-mediation", name = "unityads-adapter", version.ref = "levelplayUnityAdsAdapter" }
+levelplay-applovin-adapter = { group = "com.unity3d.ads-mediation", name = "applovin-adapter", version.ref = "levelplayAppLovinAdapter" }
+levelplay-facebook-adapter = { group = "com.unity3d.ads-mediation", name = "facebook-adapter", version.ref = "levelplayMetaAdapter" }
+levelplay-mintegral-adapter = { group = "com.unity3d.ads-mediation", name = "mintegral-adapter", version.ref = "levelplayMintegralAdapter" }
+levelplay-pangle-adapter = { group = "com.unity3d.ads-mediation", name = "pangle-adapter", version.ref = "levelplayPangleAdapter" }
+levelplay-inmobi-adapter = { group = "com.unity3d.ads-mediation", name = "inmobi-adapter", version.ref = "levelplayInMobiAdapter" }
+levelplay-vungle-adapter = { group = "com.unity3d.ads-mediation", name = "vungle-adapter", version.ref = "levelplayVungleAdapter" }
+levelplay-fyber-adapter = { group = "com.unity3d.ads-mediation", name = "fyber-adapter", version.ref = "levelplayFyberAdapter" }
 androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraCamera2" }
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraLifecycle" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraView" }

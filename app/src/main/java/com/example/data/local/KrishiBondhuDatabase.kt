@@ -22,9 +22,11 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         NotificationEntity::class,
         AuditLogEntity::class,
         ActivationPaymentEntity::class,
-        PaymentSettingsEntity::class
+        PaymentSettingsEntity::class,
+        FarmerPaymentSettingsEntity::class,
+        OrderPaymentEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class KrishiBondhuDatabase : RoomDatabase() {
@@ -38,6 +40,8 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
     abstract fun notificationAuditDao(): NotificationAuditDao
     abstract fun activationPaymentDao(): ActivationPaymentDao
     abstract fun paymentSettingsDao(): PaymentSettingsDao
+    abstract fun farmerPaymentSettingsDao(): FarmerPaymentSettingsDao
+    abstract fun orderPaymentDao(): OrderPaymentDao
 
     companion object {
         @Volatile
@@ -119,6 +123,66 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE orders ADD COLUMN advanceAmountRequested REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE orders ADD COLUMN verifiedAdvanceTotal REAL NOT NULL DEFAULT 0.0")
+                db.execSQL("ALTER TABLE orders ADD COLUMN remainingDue REAL NOT NULL DEFAULT 0.0")
+                db.execSQL(
+                    "UPDATE orders SET verifiedAdvanceTotal = CASE WHEN farmerPaymentConfirmed = 1 THEN grandTotal ELSE 0.0 END, " +
+                        "remainingDue = CASE WHEN farmerPaymentConfirmed = 1 THEN 0.0 ELSE grandTotal END"
+                )
+                db.execSQL("UPDATE products SET isWholesale = 1, unit = 'মণ'")
+                db.execSQL("DELETE FROM products WHERE isDemoRecord = 1")
+                db.execSQL("DELETE FROM orders WHERE isDemoRecord = 1")
+                db.execSQL("DELETE FROM users WHERE id != 'admin_super' AND (isDemoRecord = 1 OR phone LIKE 'farmer_%')")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS farmer_payment_settings (
+                        farmerId TEXT NOT NULL PRIMARY KEY,
+                        bKashNumber TEXT NOT NULL,
+                        nagadNumber TEXT NOT NULL,
+                        rocketNumber TEXT NOT NULL,
+                        bankAccountInfo TEXT NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS order_payments (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        orderId TEXT NOT NULL,
+                        orderCode TEXT NOT NULL,
+                        buyerId TEXT NOT NULL,
+                        buyerName TEXT NOT NULL,
+                        farmerId TEXT NOT NULL,
+                        farmerName TEXT NOT NULL,
+                        amount REAL NOT NULL,
+                        paymentMethod TEXT NOT NULL,
+                        receiverNumber TEXT NOT NULL,
+                        senderNumber TEXT NOT NULL,
+                        transactionId TEXT NOT NULL,
+                        transactionIdNormalized TEXT NOT NULL,
+                        referenceNote TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        rejectionReason TEXT NOT NULL,
+                        verifiedBy TEXT NOT NULL,
+                        verifiedAt INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_order_payments_orderId ON order_payments(orderId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_order_payments_farmerId ON order_payments(farmerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_order_payments_buyerId ON order_payments(buyerId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_order_payments_transactionIdNormalized ON order_payments(transactionIdNormalized)")
+            }
+        }
+
         fun getInstance(context: Context): KrishiBondhuDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -126,7 +190,7 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
                     KrishiBondhuDatabase::class.java,
                     "krishi_bondhu_local_dev.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

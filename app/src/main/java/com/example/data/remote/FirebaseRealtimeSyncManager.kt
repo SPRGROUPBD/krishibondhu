@@ -366,6 +366,50 @@ class FirebaseRealtimeSyncManager(
                 Log.w(TAG, "paymentSettings listener cancelled: ${error.message}")
             }
         })
+
+        // 10. Farmer Payment Settings listener
+        root.child("farmerPaymentSettings").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val list = snapshot.children.mapNotNull { snapToFarmerPaymentSettings(it) }
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || list.isEmpty()) {
+                            localDb.farmerPaymentSettingsDao().clearAll()
+                        } else {
+                            localDb.farmerPaymentSettingsDao().insertAll(list)
+                            val ids = list.map { it.farmerId }
+                            if (ids.size <= 900) localDb.farmerPaymentSettingsDao().deleteNotIn(ids)
+                        }
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "farmerPaymentSettings listener cancelled: ${error.message}")
+            }
+        })
+
+        // 11. Wholesale Order Advance Payments listener
+        root.child("orderPayments").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val list = snapshot.children.mapNotNull { snapToOrderPayment(it) }
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || list.isEmpty()) {
+                            localDb.orderPaymentDao().clearAll()
+                        } else {
+                            localDb.orderPaymentDao().insertAll(list)
+                            val ids = list.map { it.id }
+                            if (ids.size <= 900) localDb.orderPaymentDao().deleteNotIn(ids)
+                        }
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "orderPayments listener cancelled: ${error.message}")
+            }
+        })
     }
 
     private fun itOrSelf(snap: DataSnapshot): DataSnapshot = snap
@@ -409,52 +453,38 @@ class FirebaseRealtimeSyncManager(
         if (missingFarmer) {
             pullUsersFromRestIntoDb(localDb)
         }
-        val existingCatIds = runCatching {
-            // Seed master categories if empty first
+        runCatching {
             if (localDb.categoryDao().countCategories() == 0) {
                 MasterCatalogSeeder.initialize(localDb)
             }
-            emptySet<String>()
-        }.getOrDefault(emptySet())
+        }
         products.forEach { rawProd ->
-            val prod = if (rawProd.categoryId.isBlank()) rawProd.copy(categoryId = "cat_other") else rawProd
+            val farmerExists = runCatching {
+                localDb.userDao().getUserById(rawProd.farmerId) != null
+            }.getOrDefault(false)
+            if (!farmerExists) {
+                // Never auto-create synthetic "farmer_*" user accounts for orphaned products
+                Log.w(TAG, "Skipping orphaned product ${rawProd.id}: farmer ${rawProd.farmerId} does not exist")
+                return@forEach
+            }
+            val prod = (if (rawProd.categoryId.isBlank()) rawProd.copy(categoryId = "cat_other") else rawProd)
+                .copy(unit = "মণ", isWholesale = true)
             runCatching { localDb.productDao().upsertProduct(prod) }.onFailure {
-                // Ensure both farmer & category FK targets exist so valid products are NEVER dropped
                 runCatching {
-                    if (localDb.userDao().getUserById(prod.farmerId) == null) {
-                        val stubFarmer = UserEntity(
-                            id = prod.farmerId,
-                            fullName = prod.farmerName.ifBlank { "কৃষক" },
-                            phone = "farmer_${prod.farmerId.takeLast(8)}",
-                            passwordHash = "",
-                            role = UserRole.FARMER.name,
-                            division = prod.division.ifBlank { "খুলনা" },
-                            district = prod.district.ifBlank { "কুষ্টিয়া" },
-                            upazila = prod.upazila,
-                            unionName = prod.unionName,
-                            village = prod.village,
-                            verificationStatus = if (prod.farmerVerified) "VERIFIED" else "PENDING",
-                            accountStatus = AccountStatus.ACTIVE.name
+                    localDb.categoryDao().upsertCategory(
+                        CategoryEntity(
+                            id = prod.categoryId,
+                            nameBn = prod.categoryNameBn.ifBlank { "কৃষিপণ্য" },
+                            nameEn = prod.categoryNameBn.ifBlank { "Produce" },
+                            groupKey = "OTHER",
+                            emoji = "🌾",
+                            sortOrder = 99,
+                            isActive = true
                         )
-                        safeUpsertUser(localDb, stubFarmer)
-                    }
-                    runCatching { localDb.productDao().upsertProduct(prod) }.onFailure {
-                        // Fallback category if custom categoryId isn't seeded yet
-                        localDb.categoryDao().upsertCategory(
-                            CategoryEntity(
-                                id = prod.categoryId,
-                                nameBn = prod.categoryNameBn.ifBlank { "কৃষিপণ্য" },
-                                nameEn = prod.categoryNameBn.ifBlank { "Produce" },
-                                groupKey = "OTHER",
-                                emoji = "🌾",
-                                sortOrder = 99,
-                                isActive = true
-                            )
-                        )
-                        localDb.productDao().upsertProduct(prod)
-                    }
+                    )
+                    localDb.productDao().upsertProduct(prod)
                 }.onFailure { err ->
-                    Log.w(TAG, "Product upsert failed (${prod.id}, cats=${existingCatIds.size}): ${err.message}")
+                    Log.w(TAG, "Product upsert failed (${prod.id}): ${err.message}")
                 }
             }
         }
@@ -500,6 +530,8 @@ class FirebaseRealtimeSyncManager(
                     adRes = RestGetOutcome(true, rootObj.optJSONObject("adConfig")?.toString() ?: "null"),
                     payRes = RestGetOutcome(true, rootObj.optJSONObject("activationPayments")?.toString() ?: "null"),
                     psRes = RestGetOutcome(true, rootObj.optJSONObject("paymentSettings")?.toString() ?: "null"),
+                    fpsRes = RestGetOutcome(true, rootObj.optJSONObject("farmerPaymentSettings")?.toString() ?: "null"),
+                    opRes = RestGetOutcome(true, rootObj.optJSONObject("orderPayments")?.toString() ?: "null"),
                     onAdConfigChanged = onAdConfigChanged,
                     onIncomingNotification = onIncomingNotification
                 )
@@ -521,6 +553,8 @@ class FirebaseRealtimeSyncManager(
             val adD = async(Dispatchers.IO) { restGetJsonWithStatus("adConfig.json") }
             val payD = async(Dispatchers.IO) { restGetJsonWithStatus("activationPayments.json") }
             val psD = async(Dispatchers.IO) { restGetJsonWithStatus("paymentSettings.json") }
+            val fpsD = async(Dispatchers.IO) { restGetJsonWithStatus("farmerPaymentSettings.json") }
+            val opD = async(Dispatchers.IO) { restGetJsonWithStatus("orderPayments.json") }
 
             val catsRes = catsD.await()
             val locsRes = locsD.await()
@@ -534,6 +568,8 @@ class FirebaseRealtimeSyncManager(
             val adRes = adD.await()
             val payRes = payD.await()
             val psRes = psD.await()
+            val fpsRes = fpsD.await()
+            val opRes = opD.await()
 
             reconcileAllNodesFromJson(
                 localDb = localDb,
@@ -549,6 +585,8 @@ class FirebaseRealtimeSyncManager(
                 adRes = adRes,
                 payRes = payRes,
                 psRes = psRes,
+                fpsRes = fpsRes,
+                opRes = opRes,
                 onAdConfigChanged = onAdConfigChanged,
                 onIncomingNotification = onIncomingNotification
             )
@@ -577,6 +615,8 @@ class FirebaseRealtimeSyncManager(
         adRes: RestGetOutcome,
         payRes: RestGetOutcome,
         psRes: RestGetOutcome,
+        fpsRes: RestGetOutcome,
+        opRes: RestGetOutcome,
         onAdConfigChanged: (AdConfig) -> Unit,
         onIncomingNotification: (NotificationEntity) -> Unit
     ) {
@@ -778,6 +818,32 @@ class FirebaseRealtimeSyncManager(
                 }
             }
         }
+
+        // 11. Farmer Payment Settings
+        parseJsonObjectOrNull(fpsRes)?.let { fpsObj ->
+            val list = if (fpsObj.length() == 0) emptyList() else parseJsonMap(fpsObj) { id, obj -> jsonToFarmerPaymentSettings(id, obj) }
+            runCatching {
+                if (list.isEmpty()) localDb.farmerPaymentSettingsDao().clearAll()
+                else {
+                    localDb.farmerPaymentSettingsDao().insertAll(list)
+                    val ids = list.map { it.farmerId }
+                    if (ids.size <= 900) localDb.farmerPaymentSettingsDao().deleteNotIn(ids)
+                }
+            }
+        }
+
+        // 12. Order Advance Payments
+        parseJsonObjectOrNull(opRes)?.let { opObj ->
+            val list = if (opObj.length() == 0) emptyList() else parseJsonMap(opObj) { id, obj -> jsonToOrderPayment(id, obj) }
+            runCatching {
+                if (list.isEmpty()) localDb.orderPaymentDao().clearAll()
+                else {
+                    localDb.orderPaymentDao().insertAll(list)
+                    val ids = list.map { it.id }
+                    if (ids.size <= 900) localDb.orderPaymentDao().deleteNotIn(ids)
+                }
+            }
+        }
     }
 
     private suspend fun pullUsersFromRestIntoDb(localDb: KrishiBondhuDatabase): List<UserEntity> {
@@ -951,6 +1017,32 @@ class FirebaseRealtimeSyncManager(
         }
     }
 
+    suspend fun pushFarmerPaymentSettings(settings: FarmerPaymentSettingsEntity) {
+        val map = farmerPaymentSettingsToMap(settings)
+        pushNode("farmerPaymentSettings/${settings.farmerId}", map) { root ->
+            root.child("farmerPaymentSettings").child(settings.farmerId).setValue(map).await()
+        }
+    }
+
+    suspend fun pushOrderPayment(payment: OrderPaymentEntity) {
+        val map = orderPaymentToMap(payment)
+        pushNode("orderPayments/${payment.id}", map) { root ->
+            root.child("orderPayments").child(payment.id).setValue(map).await()
+        }
+    }
+
+    suspend fun fetchAllOrderPayments(localDb: KrishiBondhuDatabase? = null): List<OrderPaymentEntity> {
+        if (!enableRemoteSync) return emptyList()
+        val bodyStr = restGetJson("orderPayments.json") ?: return emptyList()
+        if (bodyStr == "null" || bodyStr.isBlank()) return emptyList()
+        val obj = runCatching { JSONObject(bodyStr) }.getOrNull() ?: return emptyList()
+        val list = parseJsonMap(obj) { id, pObj -> jsonToOrderPayment(id, pObj) }
+        if (localDb != null && list.isNotEmpty()) {
+            runCatching { localDb.orderPaymentDao().insertAll(list) }
+        }
+        return list
+    }
+
     suspend fun fetchAllActivationPayments(localDb: KrishiBondhuDatabase? = null): List<ActivationPaymentEntity> {
         if (!enableRemoteSync) return emptyList()
         val bodyStr = restGetJson("activationPayments.json") ?: return emptyList()
@@ -1091,14 +1183,16 @@ class FirebaseRealtimeSyncManager(
 
     private fun snapToUser(s: DataSnapshot): UserEntity? {
         val id = s.str("id") ?: s.key ?: return null
-        val phone = s.str("phone") ?: return null
+        val phoneRaw = s.str("phone") ?: return null
+        val phone = SecurityHashUtil.normalizePhone(phoneRaw)
+        if ((s.bool("isDemoRecord") == true) || id.startsWith("demo_") || phone.startsWith("farmer_")) return null
         val role = s.str("role") ?: "BUYER"
         val verificationStatus = s.str("verificationStatus") ?: "PENDING"
         val resolvedAccountStatus = resolveAccountStatus(role, s.str("accountStatus"), verificationStatus)
         return UserEntity(
             id = id,
             fullName = (s.str("fullName") ?: "").normalizeBn(),
-            phone = SecurityHashUtil.normalizePhone(phone),
+            phone = phone,
             passwordHash = s.str("passwordHash") ?: "",
             role = role,
             division = (s.str("division") ?: "ঢাকা").normalizeBn(),
@@ -1127,13 +1221,15 @@ class FirebaseRealtimeSyncManager(
         val id = o.optString("id", key).ifBlank { key }
         val phoneRaw = o.optString("phone", "")
         if (phoneRaw.isBlank()) return null
+        val phone = SecurityHashUtil.normalizePhone(phoneRaw)
+        if (o.optBoolean("isDemoRecord", false) || id.startsWith("demo_") || phone.startsWith("farmer_")) return null
         val role = o.optString("role", "BUYER")
         val verificationStatus = o.optString("verificationStatus", "PENDING")
         val resolvedAccountStatus = resolveAccountStatus(role, o.optString("accountStatus", ""), verificationStatus)
         return UserEntity(
             id = id,
             fullName = o.optString("fullName", "").normalizeBn(),
-            phone = SecurityHashUtil.normalizePhone(phoneRaw),
+            phone = phone,
             passwordHash = o.optString("passwordHash", ""),
             role = role,
             division = o.optString("division", "ঢাকা").normalizeBn(),
@@ -1272,6 +1368,7 @@ class FirebaseRealtimeSyncManager(
 
     private fun snapToProduct(s: DataSnapshot): ProductEntity? {
         val id = s.str("id") ?: s.key ?: return null
+        if ((s.bool("isDemoRecord") == true) || id.startsWith("demo_")) return null
         val nameBn = (s.str("nameBn") ?: s.str("nameEn") ?: "").normalizeBn()
         val farmerId = s.str("farmerId") ?: return null
         if (nameBn.isBlank()) return null
@@ -1300,7 +1397,7 @@ class FirebaseRealtimeSyncManager(
             supportsFarmPickup = s.bool("supportsFarmPickup") ?: true,
             supportsDirectDelivery = s.bool("supportsDirectDelivery") ?: true,
             deliveryChargeEstimate = s.dbl("deliveryChargeEstimate") ?: 0.0,
-            isWholesale = s.bool("isWholesale") ?: s.bool("wholesale") ?: false,
+            isWholesale = true,
             isPopular = s.bool("isPopular") ?: s.bool("popular") ?: false,
             status = s.str("status") ?: "ACTIVE",
             createdAt = s.lng("createdAt") ?: System.currentTimeMillis(),
@@ -1311,6 +1408,7 @@ class FirebaseRealtimeSyncManager(
 
     private fun jsonToProduct(key: String, o: JSONObject): ProductEntity? {
         val id = o.optString("id", key).ifBlank { key }
+        if (o.optBoolean("isDemoRecord", false) || id.startsWith("demo_")) return null
         val nameBn = o.optString("nameBn", "").ifBlank { o.optString("nameEn", "") }.normalizeBn()
         val farmerId = o.optString("farmerId", "")
         if (nameBn.isBlank() || farmerId.isBlank()) return null
@@ -1339,7 +1437,7 @@ class FirebaseRealtimeSyncManager(
             supportsFarmPickup = o.optBoolean("supportsFarmPickup", true),
             supportsDirectDelivery = o.optBoolean("supportsDirectDelivery", true),
             deliveryChargeEstimate = o.optDouble("deliveryChargeEstimate", 0.0).takeUnless { it.isNaN() } ?: 0.0,
-            isWholesale = o.optBoolean("isWholesale", o.optBoolean("wholesale", false)),
+            isWholesale = true,
             isPopular = o.optBoolean("isPopular", o.optBoolean("popular", false)),
             status = o.optString("status", "ACTIVE"),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
@@ -1379,6 +1477,9 @@ class FirebaseRealtimeSyncManager(
         "adminPaymentVerified" to o.adminPaymentVerified,
         "adminPaymentVerifiedBy" to o.adminPaymentVerifiedBy,
         "adminPaymentVerifiedAt" to o.adminPaymentVerifiedAt,
+        "advanceAmountRequested" to o.advanceAmountRequested,
+        "verifiedAdvanceTotal" to o.verifiedAdvanceTotal,
+        "remainingDue" to o.remainingDue,
         "items" to items.associate { it.id to orderItemToMap(it) }
     )
 
@@ -1395,7 +1496,12 @@ class FirebaseRealtimeSyncManager(
 
     private fun snapToOrder(s: DataSnapshot): OrderEntity? {
         val id = s.str("id") ?: s.key ?: return null
+        if ((s.bool("isDemoRecord") == true) || id.startsWith("demo_")) return null
         val orderCode = s.str("orderCode") ?: return null
+        val grandTotal = s.dbl("grandTotal") ?: 0.0
+        val confirmed = s.bool("farmerPaymentConfirmed") ?: false
+        val verifiedAdv = s.dbl("verifiedAdvanceTotal") ?: if (confirmed) grandTotal else 0.0
+        val remaining = s.dbl("remainingDue") ?: kotlin.math.max(0.0, grandTotal - verifiedAdv)
         return OrderEntity(
             id = id,
             orderCode = orderCode,
@@ -1413,7 +1519,7 @@ class FirebaseRealtimeSyncManager(
             upazila = s.str("upazila") ?: "",
             productTotal = s.dbl("productTotal") ?: 0.0,
             deliveryCharge = s.dbl("deliveryCharge") ?: 0.0,
-            grandTotal = s.dbl("grandTotal") ?: 0.0,
+            grandTotal = grandTotal,
             paymentMethod = s.str("paymentMethod") ?: "CASH_ON_PICKUP",
             transactionReference = s.str("transactionReference") ?: "",
             paymentStatus = s.str("paymentStatus") ?: "PENDING",
@@ -1423,18 +1529,36 @@ class FirebaseRealtimeSyncManager(
             isDemoRecord = false,
             paymentSenderNumber = s.str("paymentSenderNumber") ?: "",
             paymentReceiptUri = s.str("paymentReceiptUri") ?: "",
-            farmerPaymentConfirmed = s.bool("farmerPaymentConfirmed") ?: false,
+            farmerPaymentConfirmed = confirmed,
             farmerPaymentConfirmedAt = s.lng("farmerPaymentConfirmedAt") ?: 0L,
             adminPaymentVerified = s.bool("adminPaymentVerified") ?: false,
             adminPaymentVerifiedBy = s.str("adminPaymentVerifiedBy") ?: "",
-            adminPaymentVerifiedAt = s.lng("adminPaymentVerifiedAt") ?: 0L
+            adminPaymentVerifiedAt = s.lng("adminPaymentVerifiedAt") ?: 0L,
+            advanceAmountRequested = s.dbl("advanceAmountRequested") ?: 0.0,
+            verifiedAdvanceTotal = verifiedAdv,
+            remainingDue = remaining
         )
     }
 
     private fun jsonToOrder(key: String, o: JSONObject): OrderEntity? {
         val id = o.optString("id", key).ifBlank { key }
+        if (o.optBoolean("isDemoRecord", false) || id.startsWith("demo_")) return null
         val orderCode = o.optString("orderCode", "")
         if (orderCode.isBlank()) return null
+        val grandTotal = o.optDouble("grandTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0
+        val confirmed = o.optBoolean("farmerPaymentConfirmed", false)
+        val verifiedAdv = if (o.has("verifiedAdvanceTotal")) {
+            o.optDouble("verifiedAdvanceTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0
+        } else if (confirmed) {
+            grandTotal
+        } else {
+            0.0
+        }
+        val remaining = if (o.has("remainingDue")) {
+            o.optDouble("remainingDue", 0.0).takeUnless { it.isNaN() } ?: kotlin.math.max(0.0, grandTotal - verifiedAdv)
+        } else {
+            kotlin.math.max(0.0, grandTotal - verifiedAdv)
+        }
         return OrderEntity(
             id = id,
             orderCode = orderCode,
@@ -1452,7 +1576,7 @@ class FirebaseRealtimeSyncManager(
             upazila = o.optString("upazila", ""),
             productTotal = o.optDouble("productTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0,
             deliveryCharge = o.optDouble("deliveryCharge", 0.0).takeUnless { it.isNaN() } ?: 0.0,
-            grandTotal = o.optDouble("grandTotal", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            grandTotal = grandTotal,
             paymentMethod = o.optString("paymentMethod", "CASH_ON_PICKUP"),
             transactionReference = o.optString("transactionReference", ""),
             paymentStatus = o.optString("paymentStatus", "PENDING"),
@@ -1462,11 +1586,14 @@ class FirebaseRealtimeSyncManager(
             isDemoRecord = false,
             paymentSenderNumber = o.optString("paymentSenderNumber", ""),
             paymentReceiptUri = o.optString("paymentReceiptUri", ""),
-            farmerPaymentConfirmed = o.optBoolean("farmerPaymentConfirmed", false),
+            farmerPaymentConfirmed = confirmed,
             farmerPaymentConfirmedAt = o.optLong("farmerPaymentConfirmedAt", 0L),
             adminPaymentVerified = o.optBoolean("adminPaymentVerified", false),
             adminPaymentVerifiedBy = o.optString("adminPaymentVerifiedBy", ""),
-            adminPaymentVerifiedAt = o.optLong("adminPaymentVerifiedAt", 0L)
+            adminPaymentVerifiedAt = o.optLong("adminPaymentVerifiedAt", 0L),
+            advanceAmountRequested = o.optDouble("advanceAmountRequested", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            verifiedAdvanceTotal = verifiedAdv,
+            remainingDue = remaining
         )
     }
 
@@ -1673,8 +1800,35 @@ class FirebaseRealtimeSyncManager(
         "adsEnabled" to a.adsEnabled,
         "showAdsLabel" to a.showAdsLabel,
         "androidAdsEnabled" to a.androidAdsEnabled,
+        "mediationPlatform" to a.mediationPlatform,
+        "mediationAppKey" to a.mediationAppKey,
+        "adTestMode" to a.adTestMode,
+        "bannerEnabled" to a.bannerEnabled,
         "androidBannerId" to a.androidBannerId,
+        "nativeEnabled" to a.nativeEnabled,
+        "androidNativePlacement" to a.androidNativePlacement,
+        "interstitialEnabled" to a.interstitialEnabled,
         "androidInterstitialId" to a.androidInterstitialId,
+        "rewardedEnabled" to a.rewardedEnabled,
+        "androidRewardedId" to a.androidRewardedId,
+        "appOpenEnabled" to a.appOpenEnabled,
+        "androidAppOpenId" to a.androidAppOpenId,
+        "unityAdsEnabled" to a.unityAdsEnabled,
+        "unityGameId" to a.unityGameId,
+        "appLovinEnabled" to a.appLovinEnabled,
+        "appLovinSdkKey" to a.appLovinSdkKey,
+        "metaAudienceEnabled" to a.metaAudienceEnabled,
+        "metaPlacementId" to a.metaPlacementId,
+        "mintegralEnabled" to a.mintegralEnabled,
+        "mintegralAppId" to a.mintegralAppId,
+        "pangleEnabled" to a.pangleEnabled,
+        "pangleAppId" to a.pangleAppId,
+        "inMobiEnabled" to a.inMobiEnabled,
+        "inMobiAccountId" to a.inMobiAccountId,
+        "liftoffEnabled" to a.liftoffEnabled,
+        "liftoffAppId" to a.liftoffAppId,
+        "dtExchangeEnabled" to a.dtExchangeEnabled,
+        "dtExchangeAppId" to a.dtExchangeAppId,
         "mobileWebAdsEnabled" to a.mobileWebAdsEnabled,
         "mobileAdNetworkPriority" to a.mobileAdNetworkPriority,
         "mobileCustomAdHtml" to a.mobileCustomAdHtml,
@@ -1710,8 +1864,35 @@ class FirebaseRealtimeSyncManager(
             adsEnabled = s.bool("adsEnabled") ?: true,
             showAdsLabel = s.bool("showAdsLabel") ?: true,
             androidAdsEnabled = s.bool("androidAdsEnabled") ?: true,
+            mediationPlatform = s.str("mediationPlatform") ?: "UNITY_LEVELPLAY",
+            mediationAppKey = s.str("mediationAppKey") ?: "",
+            adTestMode = s.bool("adTestMode") ?: false,
+            bannerEnabled = s.bool("bannerEnabled") ?: true,
             androidBannerId = s.str("androidBannerId") ?: "",
+            nativeEnabled = s.bool("nativeEnabled") ?: true,
+            androidNativePlacement = s.str("androidNativePlacement") ?: "",
+            interstitialEnabled = s.bool("interstitialEnabled") ?: true,
             androidInterstitialId = s.str("androidInterstitialId") ?: "",
+            rewardedEnabled = s.bool("rewardedEnabled") ?: false,
+            androidRewardedId = s.str("androidRewardedId") ?: "",
+            appOpenEnabled = s.bool("appOpenEnabled") ?: false,
+            androidAppOpenId = s.str("androidAppOpenId") ?: "",
+            unityAdsEnabled = s.bool("unityAdsEnabled") ?: true,
+            unityGameId = s.str("unityGameId") ?: "",
+            appLovinEnabled = s.bool("appLovinEnabled") ?: false,
+            appLovinSdkKey = s.str("appLovinSdkKey") ?: "",
+            metaAudienceEnabled = s.bool("metaAudienceEnabled") ?: false,
+            metaPlacementId = s.str("metaPlacementId") ?: "",
+            mintegralEnabled = s.bool("mintegralEnabled") ?: false,
+            mintegralAppId = s.str("mintegralAppId") ?: "",
+            pangleEnabled = s.bool("pangleEnabled") ?: false,
+            pangleAppId = s.str("pangleAppId") ?: "",
+            inMobiEnabled = s.bool("inMobiEnabled") ?: false,
+            inMobiAccountId = s.str("inMobiAccountId") ?: "",
+            liftoffEnabled = s.bool("liftoffEnabled") ?: false,
+            liftoffAppId = s.str("liftoffAppId") ?: "",
+            dtExchangeEnabled = s.bool("dtExchangeEnabled") ?: false,
+            dtExchangeAppId = s.str("dtExchangeAppId") ?: "",
             mobileWebAdsEnabled = s.bool("mobileWebAdsEnabled") ?: true,
             mobileAdNetworkPriority = s.str("mobileAdNetworkPriority") ?: "ALL",
             mobileCustomAdHtml = s.str("mobileCustomAdHtml") ?: "",
@@ -1748,8 +1929,35 @@ class FirebaseRealtimeSyncManager(
             adsEnabled = o.optBoolean("adsEnabled", true),
             showAdsLabel = o.optBoolean("showAdsLabel", true),
             androidAdsEnabled = o.optBoolean("androidAdsEnabled", true),
+            mediationPlatform = o.optString("mediationPlatform", "UNITY_LEVELPLAY"),
+            mediationAppKey = o.optString("mediationAppKey", ""),
+            adTestMode = o.optBoolean("adTestMode", false),
+            bannerEnabled = o.optBoolean("bannerEnabled", true),
             androidBannerId = o.optString("androidBannerId", ""),
+            nativeEnabled = o.optBoolean("nativeEnabled", true),
+            androidNativePlacement = o.optString("androidNativePlacement", ""),
+            interstitialEnabled = o.optBoolean("interstitialEnabled", true),
             androidInterstitialId = o.optString("androidInterstitialId", ""),
+            rewardedEnabled = o.optBoolean("rewardedEnabled", false),
+            androidRewardedId = o.optString("androidRewardedId", ""),
+            appOpenEnabled = o.optBoolean("appOpenEnabled", false),
+            androidAppOpenId = o.optString("androidAppOpenId", ""),
+            unityAdsEnabled = o.optBoolean("unityAdsEnabled", true),
+            unityGameId = o.optString("unityGameId", ""),
+            appLovinEnabled = o.optBoolean("appLovinEnabled", false),
+            appLovinSdkKey = o.optString("appLovinSdkKey", ""),
+            metaAudienceEnabled = o.optBoolean("metaAudienceEnabled", false),
+            metaPlacementId = o.optString("metaPlacementId", ""),
+            mintegralEnabled = o.optBoolean("mintegralEnabled", false),
+            mintegralAppId = o.optString("mintegralAppId", ""),
+            pangleEnabled = o.optBoolean("pangleEnabled", false),
+            pangleAppId = o.optString("pangleAppId", ""),
+            inMobiEnabled = o.optBoolean("inMobiEnabled", false),
+            inMobiAccountId = o.optString("inMobiAccountId", ""),
+            liftoffEnabled = o.optBoolean("liftoffEnabled", false),
+            liftoffAppId = o.optString("liftoffAppId", ""),
+            dtExchangeEnabled = o.optBoolean("dtExchangeEnabled", false),
+            dtExchangeAppId = o.optString("dtExchangeAppId", ""),
             mobileWebAdsEnabled = o.optBoolean("mobileWebAdsEnabled", true),
             mobileAdNetworkPriority = o.optString("mobileAdNetworkPriority", "ALL"),
             mobileCustomAdHtml = o.optString("mobileCustomAdHtml", ""),
@@ -1910,6 +2118,122 @@ class FirebaseRealtimeSyncManager(
             updatedAt = o.optLong("updatedAt", 0L)
         )
     }.getOrNull()
+
+    private fun farmerPaymentSettingsToMap(fps: FarmerPaymentSettingsEntity): Map<String, Any?> = mapOf(
+        "farmerId" to fps.farmerId,
+        "bKashNumber" to fps.bKashNumber,
+        "nagadNumber" to fps.nagadNumber,
+        "rocketNumber" to fps.rocketNumber,
+        "bankAccountInfo" to fps.bankAccountInfo,
+        "updatedAt" to fps.updatedAt
+    )
+
+    private fun snapToFarmerPaymentSettings(s: DataSnapshot): FarmerPaymentSettingsEntity? {
+        val farmerId = s.str("farmerId") ?: s.key ?: return null
+        return FarmerPaymentSettingsEntity(
+            farmerId = farmerId,
+            bKashNumber = s.str("bKashNumber") ?: "",
+            nagadNumber = s.str("nagadNumber") ?: "",
+            rocketNumber = s.str("rocketNumber") ?: "",
+            bankAccountInfo = s.str("bankAccountInfo") ?: "",
+            updatedAt = s.lng("updatedAt") ?: 0L
+        )
+    }
+
+    private fun jsonToFarmerPaymentSettings(key: String, o: JSONObject): FarmerPaymentSettingsEntity? {
+        val farmerId = o.optString("farmerId", key).ifBlank { key }
+        if (farmerId.isBlank()) return null
+        return FarmerPaymentSettingsEntity(
+            farmerId = farmerId,
+            bKashNumber = o.optString("bKashNumber", ""),
+            nagadNumber = o.optString("nagadNumber", ""),
+            rocketNumber = o.optString("rocketNumber", ""),
+            bankAccountInfo = o.optString("bankAccountInfo", ""),
+            updatedAt = o.optLong("updatedAt", 0L)
+        )
+    }
+
+    private fun orderPaymentToMap(op: OrderPaymentEntity): Map<String, Any?> = mapOf(
+        "id" to op.id,
+        "orderId" to op.orderId,
+        "orderCode" to op.orderCode,
+        "buyerId" to op.buyerId,
+        "buyerName" to op.buyerName,
+        "farmerId" to op.farmerId,
+        "farmerName" to op.farmerName,
+        "amount" to op.amount,
+        "paymentMethod" to op.paymentMethod,
+        "receiverNumber" to op.receiverNumber,
+        "senderNumber" to op.senderNumber,
+        "transactionId" to op.transactionId,
+        "transactionIdNormalized" to op.transactionIdNormalized,
+        "referenceNote" to op.referenceNote,
+        "status" to op.status,
+        "rejectionReason" to op.rejectionReason,
+        "verifiedBy" to op.verifiedBy,
+        "verifiedAt" to op.verifiedAt,
+        "createdAt" to op.createdAt,
+        "updatedAt" to op.updatedAt
+    )
+
+    private fun snapToOrderPayment(s: DataSnapshot): OrderPaymentEntity? {
+        val id = s.str("id") ?: s.key ?: return null
+        val orderId = s.str("orderId") ?: return null
+        val tx = s.str("transactionId") ?: ""
+        return OrderPaymentEntity(
+            id = id,
+            orderId = orderId,
+            orderCode = s.str("orderCode") ?: "",
+            buyerId = s.str("buyerId") ?: "",
+            buyerName = s.str("buyerName") ?: "",
+            farmerId = s.str("farmerId") ?: "",
+            farmerName = s.str("farmerName") ?: "",
+            amount = s.dbl("amount") ?: 0.0,
+            paymentMethod = s.str("paymentMethod") ?: "BKASH",
+            receiverNumber = s.str("receiverNumber") ?: "",
+            senderNumber = s.str("senderNumber") ?: "",
+            transactionId = tx,
+            transactionIdNormalized = s.str("transactionIdNormalized") ?: tx.trim().replace(Regex("\\s+"), "").uppercase(),
+            referenceNote = s.str("referenceNote") ?: "",
+            status = s.str("status") ?: "PENDING_VERIFICATION",
+            rejectionReason = s.str("rejectionReason") ?: "",
+            verifiedBy = s.str("verifiedBy") ?: "",
+            verifiedAt = s.lng("verifiedAt") ?: 0L,
+            createdAt = s.lng("createdAt") ?: System.currentTimeMillis(),
+            updatedAt = s.lng("updatedAt") ?: System.currentTimeMillis()
+        )
+    }
+
+    private fun jsonToOrderPayment(key: String, o: JSONObject): OrderPaymentEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val orderId = o.optString("orderId", "")
+        if (orderId.isBlank()) return null
+        val tx = o.optString("transactionId", "")
+        return OrderPaymentEntity(
+            id = id,
+            orderId = orderId,
+            orderCode = o.optString("orderCode", ""),
+            buyerId = o.optString("buyerId", ""),
+            buyerName = o.optString("buyerName", ""),
+            farmerId = o.optString("farmerId", ""),
+            farmerName = o.optString("farmerName", ""),
+            amount = o.optDouble("amount", 0.0).takeUnless { it.isNaN() } ?: 0.0,
+            paymentMethod = o.optString("paymentMethod", "BKASH"),
+            receiverNumber = o.optString("receiverNumber", ""),
+            senderNumber = o.optString("senderNumber", ""),
+            transactionId = tx,
+            transactionIdNormalized = o.optString("transactionIdNormalized", "").ifBlank {
+                tx.trim().replace(Regex("\\s+"), "").uppercase()
+            },
+            referenceNote = o.optString("referenceNote", ""),
+            status = o.optString("status", "PENDING_VERIFICATION"),
+            rejectionReason = o.optString("rejectionReason", ""),
+            verifiedBy = o.optString("verifiedBy", ""),
+            verifiedAt = o.optLong("verifiedAt", 0L),
+            createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
+        )
+    }
 
     private fun DataSnapshot.str(key: String): String? = child(key).getValue(String::class.java)
     private fun DataSnapshot.bool(key: String): Boolean? = child(key).getValue(Boolean::class.java)

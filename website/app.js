@@ -3,11 +3,15 @@ import {
   SUPERADMIN_CREDENTIALS,
   DEFAULT_AD_CONFIG,
   DEFAULT_PAYMENT_SETTINGS,
+  DEFAULT_FARMER_PAYMENT_SETTINGS,
+  APP_VERSION_NAME,
+  APP_BUILD_VERSION,
   MON_TO_KG,
   FIXED_ACTIVATION_FEE_BDT,
   FIXED_VALIDITY_YEARS,
   ACCOUNT_STATUS_META,
   ACTIVATION_PAYMENT_STATUS_META,
+  ORDER_PAYMENT_STATUS_META,
   MASTER_CATEGORIES,
   BD_DIVISIONS,
   BD_DISTRICTS,
@@ -43,6 +47,8 @@ const state = {
   locations: buildInitialSeedLocations(),
   products: [],
   orders: [],
+  orderPayments: [],
+  farmerPaymentSettings: {},
   activationPayments: [],
   paymentSettings: { ...DEFAULT_PAYMENT_SETTINGS },
   notifications: [],
@@ -57,7 +63,6 @@ const state = {
     district: "",
     upazila: "",
     union: "",
-    wholesaleOnly: "",
     sort: "NEWEST"
   },
   farmerTab: "orders",
@@ -176,6 +181,12 @@ async function initFirebaseRealtime() {
         : [];
       state.activationPayments = root.activationPayments && typeof root.activationPayments === "object"
         ? Object.entries(root.activationPayments).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.submittedAt || b.createdAt || 0) - (a.submittedAt || a.createdAt || 0))
+        : [];
+      state.farmerPaymentSettings = root.farmerPaymentSettings && typeof root.farmerPaymentSettings === "object"
+        ? root.farmerPaymentSettings
+        : {};
+      state.orderPayments = root.orderPayments && typeof root.orderPayments === "object"
+        ? Object.entries(root.orderPayments).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
         : [];
       state.adConfig = root.adConfig && typeof root.adConfig === "object"
         ? { ...DEFAULT_AD_CONFIG, ...root.adConfig }
@@ -326,6 +337,20 @@ async function initFirebaseRealtime() {
         renderCurrentView();
       }
     });
+
+    onValue(child(rtdbRef, "farmerPaymentSettings"), (snap) => {
+      const val = snap.val();
+      state.farmerPaymentSettings = val && typeof val === "object" ? val : {};
+      renderCurrentView();
+    });
+
+    onValue(child(rtdbRef, "orderPayments"), (snap) => {
+      const val = snap.val();
+      state.orderPayments = val && typeof val === "object"
+        ? Object.entries(val).map(([k, v]) => ({ id: k, ...v })).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+        : [];
+      renderCurrentView();
+    });
   } catch (err) {
     console.warn("Firebase RTDB connection failed:", err);
     state.rtdbConnected = false;
@@ -381,6 +406,22 @@ async function rtdbFetchAllActivationPayments() {
   } catch (err) {
     console.warn("RTDB activationPayments lookup failed:", err);
     return state.activationPayments;
+  }
+}
+
+async function rtdbFetchAllOrderPayments() {
+  if (!rtdbRef || !rtdbApi) return state.orderPayments;
+  try {
+    const snap = await rtdbApi.get(rtdbApi.child(rtdbRef, "orderPayments"));
+    if (!snap.exists()) return [];
+    const val = snap.val();
+    if (!val || typeof val !== "object") return [];
+    const list = Object.entries(val).map(([k, v]) => ({ id: k, ...v }));
+    state.orderPayments = list;
+    return list;
+  } catch (err) {
+    console.warn("RTDB orderPayments lookup failed:", err);
+    return state.orderPayments;
   }
 }
 
@@ -605,8 +646,21 @@ function updateHeaderChrome() {
   const isBuyer = role === "BUYER";
   const unreadCount = getVisibleNotifications().filter((n) => !n.isRead).length;
   const farmerPendingOrders = isFarmer
-    ? state.orders.filter((o) => o.farmerId === user.id && o.status === "PENDING").length
+    ? state.orders.filter((o) => o.farmerId === user.id && ["PENDING", "PAYMENT_PENDING"].includes(o.status)).length
     : 0;
+
+  const brandLogoEl = document.getElementById("header-brand-logo");
+  if (brandLogoEl) {
+    if (user && user.profileImageUri) {
+      brandLogoEl.src = user.profileImageUri;
+      brandLogoEl.alt = user.fullName || "ব্যবহারকারীর প্রোফাইল ছবি";
+      brandLogoEl.className = "w-10 h-10 rounded-full object-cover border-2 border-[#168447] shadow-sm";
+    } else {
+      brandLogoEl.src = `${ASSET_BASE}logo.png`;
+      brandLogoEl.alt = "কৃষি বন্ধু লোগো";
+      brandLogoEl.className = "w-10 h-10 rounded-xl object-cover border border-emerald-200 shadow-sm";
+    }
+  }
 
   const dot = document.getElementById("rtdb-status-dot");
   if (dot) {
@@ -849,11 +903,69 @@ async function login(identifier, rawPassword) {
   saveLocalSnapshot();
   const refreshed = getActiveUser() || user;
   showToast(`স্বাগতম, ${refreshed.fullName}!`, "success");
-  if (!isMarketplaceActive(refreshed)) {
-    navigate((refreshed.accountStatus || "PAYMENT_PENDING") === "SUSPENDED" ? "profile" : "activation");
-  } else {
-    navigate("home");
+  navigate(
+    !isMarketplaceActive(refreshed)
+      ? ((refreshed.accountStatus || "PAYMENT_PENDING") === "SUSPENDED" ? "profile" : "activation")
+      : "home"
+  );
+  return true;
+}
+
+async function resetPassword(phone, newPassword, confirmPassword) {
+  const cleanPhone = normalizePhone(phone || "");
+  const rawNew = String(newPassword || "");
+  const rawConfirm = String(confirmPassword || "");
+  if (cleanPhone.length < 10) {
+    showToast("সঠিক নিবন্ধিত মোবাইল নম্বর দিন (যেমন: 017XXXXXXXX)।", "error");
+    return false;
   }
+  if (cleanPhone.toLowerCase() === SUPERADMIN_CREDENTIALS.id) {
+    showToast("সুপার অ্যাডমিন পাসওয়ার্ড এখান থেকে পরিবর্তন করা যাবে না।", "error");
+    return false;
+  }
+  if (rawNew.length < 6) {
+    showToast("নতুন পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।", "error");
+    return false;
+  }
+  if (rawNew !== rawConfirm) {
+    showToast("নতুন পাসওয়ার্ড ও নিশ্চিত পাসওয়ার্ড মেলেনি।", "error");
+    return false;
+  }
+  const lookup = await rtdbFetchUserByPhoneStrict(cleanPhone);
+  if (lookup.status === "UNREACHABLE") {
+    showToast("অনলাইন সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি। পরে আবার চেষ্টা করুন।", "error");
+    return false;
+  }
+  if (lookup.status !== "FOUND" || !lookup.user) {
+    showToast("এই মোবাইল নম্বরে কোনো নিবন্ধিত অ্যাকাউন্ট পাওয়া যায়নি।", "error");
+    return false;
+  }
+
+  const user = lookup.user;
+  const now = Date.now();
+  user.passwordHash = await hashPassword(rawNew);
+  user.updatedAt = now;
+  upsertArrayItem(state.users, user);
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: user.id,
+    actorRole: user.role,
+    actionBn: "পাসওয়ার্ড রিসেট (ওয়েব)",
+    targetEntity: "User",
+    targetId: user.id,
+    detailsBn: `${user.fullName} (${user.phone}) নতুন পাসওয়ার্ড সেট করেছেন`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+  saveLocalSnapshot();
+
+  await rtdbPush(`users/${user.id}`, user);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+  showToast("পাসওয়ার্ড সফলভাবে পরিবর্তিত হয়েছে! এখন নতুন পাসওয়ার্ড দিয়ে লগইন করুন।", "success");
+  closeModal();
+  renderCurrentView();
   return true;
 }
 
@@ -1435,8 +1547,107 @@ function updateCartQty(cartId, newQty) {
   renderCurrentView();
 }
 
-async function placeOrdersFromCart({ deliveryOption, deliveryAddress, paymentMethod, transactionRef }) {
-  const buyer = requireActiveMarketplaceUser("অর্ডার নিশ্চিত");
+function getFarmerPaymentSettings(farmerId) {
+  const s = (state.farmerPaymentSettings && state.farmerPaymentSettings[farmerId]) || {};
+  return { ...DEFAULT_FARMER_PAYMENT_SETTINGS, ...s, farmerId };
+}
+
+function hasAnyFarmerPaymentChannel(fps) {
+  return Boolean(
+    String(fps?.bKashNumber || "").trim() ||
+    String(fps?.nagadNumber || "").trim() ||
+    String(fps?.rocketNumber || "").trim() ||
+    String(fps?.bankAccountInfo || "").trim()
+  );
+}
+
+async function saveFarmerPaymentSettings({ bKashNumber, nagadNumber, rocketNumber, bankAccountInfo }) {
+  const farmer = getActiveUser();
+  if (!farmer || farmer.role !== "FARMER") {
+    showToast("শুধুমাত্র কৃষক নিজস্ব পেমেন্ট নম্বর সেটিংস সংরক্ষণ করতে পারেন।", "error");
+    return false;
+  }
+  const cleanBkash = String(bKashNumber || "").trim() ? normalizePhone(bKashNumber) : "";
+  const cleanNagad = String(nagadNumber || "").trim() ? normalizePhone(nagadNumber) : "";
+  const cleanRocket = String(rocketNumber || "").trim() ? normalizePhone(rocketNumber) : "";
+  const cleanBank = String(bankAccountInfo || "").trim();
+
+  if (cleanBkash && cleanBkash.length < 10) {
+    showToast("সঠিক বিকাশ (bKash) মোবাইল নম্বর লিখুন।", "error");
+    return false;
+  }
+  if (cleanNagad && cleanNagad.length < 10) {
+    showToast("সঠিক নগদ (Nagad) মোবাইল নম্বর লিখুন।", "error");
+    return false;
+  }
+  if (cleanRocket && cleanRocket.length < 10) {
+    showToast("সঠিক রকেট (Rocket) মোবাইল নম্বর লিখুন।", "error");
+    return false;
+  }
+  if (!cleanBkash && !cleanNagad && !cleanRocket && !cleanBank) {
+    showToast("অন্তত একটি পেমেন্ট মাধ্যম (bKash / Nagad / Rocket / Bank) লিখুন।", "error");
+    return false;
+  }
+
+  const now = Date.now();
+  const payload = {
+    farmerId: farmer.id,
+    bKashNumber: cleanBkash,
+    nagadNumber: cleanNagad,
+    rocketNumber: cleanRocket,
+    bankAccountInfo: cleanBank,
+    updatedAt: now
+  };
+  state.farmerPaymentSettings = {
+    ...(state.farmerPaymentSettings || {}),
+    [farmer.id]: payload
+  };
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: farmer.id,
+    actorRole: farmer.role,
+    actionBn: "কৃষকের সরাসরি পেমেন্ট নম্বর আপডেট (ওয়েব)",
+    targetEntity: "FarmerPaymentSettings",
+    targetId: farmer.id,
+    detailsBn: `bKash: ${cleanBkash || "-"}, Nagad: ${cleanNagad || "-"}, Rocket: ${cleanRocket || "-"}`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+  saveLocalSnapshot();
+
+  await rtdbPush(`farmerPaymentSettings/${farmer.id}`, payload);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+  showToast("আপনার সরাসরি পেমেন্ট নম্বর সংরক্ষিত ও লাইভ হয়েছে!", "success");
+  renderCurrentView();
+  return true;
+}
+
+async function isDuplicateTransactionIdAnywhere(txNormalized) {
+  if (!txNormalized) return false;
+  const [remoteOrdersPay, remoteActPay] = await Promise.all([
+    rtdbFetchAllOrderPayments(),
+    rtdbFetchAllActivationPayments()
+  ]);
+  const allOp = mergeById(state.orderPayments, remoteOrdersPay);
+  const allAct = mergeById(state.activationPayments, remoteActPay);
+  state.orderPayments = allOp;
+  state.activationPayments = allAct;
+  const dupOp = allOp.some((p) => normalizeTxId(p.transactionIdNormalized || p.transactionId) === txNormalized);
+  const dupAct = allAct.some((p) => normalizeTxId(p.transactionId) === txNormalized);
+  return dupOp || dupAct;
+}
+
+async function placeOrdersFromCart({
+  deliveryOption,
+  deliveryAddress,
+  paymentMethod,
+  transactionRef,
+  senderNumber,
+  referenceNote,
+  advanceAmount
+}) {
+  const buyer = requireActiveMarketplaceUser("পাইকারি অর্ডার নিশ্চিত");
   if (!buyer) return;
   if (!state.cart.length) {
     showToast("আপনার কার্ট খালি।", "error");
@@ -1455,16 +1666,64 @@ async function placeOrdersFromCart({ deliveryOption, deliveryAddress, paymentMet
     }
   }
 
-  const now = Date.now();
   const grouped = new Map();
   for (const item of state.cart) {
     if (!grouped.has(item.farmerId)) grouped.set(item.farmerId, []);
     grouped.get(item.farmerId).push(item);
   }
 
+  // Compute total wholesale checkout value and validate advance payment amount (0 .. total)
+  const cartTotalGrand = Array.from(grouped.entries()).reduce((sum, [, items]) => {
+    const prodTotal = items.reduce((s, ci) => s + Number(ci.pricePerUnit || 0) * Number(ci.quantity || 0), 0);
+    const maxDel = items.reduce((m, ci) => Math.max(m, Number(ci.deliveryChargeEstimate || 0)), 0);
+    return sum + prodTotal + (deliveryOption === "FARM_PICKUP" ? 0 : maxDel);
+  }, 0);
+
+  const requestedAdvanceTotal = Math.round(Number(advanceAmount ?? 0) * 100) / 100;
+  if (Number.isNaN(requestedAdvanceTotal) || requestedAdvanceTotal < 0 || requestedAdvanceTotal > cartTotalGrand + 0.01) {
+    showToast(`অগ্রিম পেমেন্টের পরিমাণ ০ থেকে মোট মূল্যের (${formatBdt(cartTotalGrand)}) মধ্যে হতে হবে।`, "error");
+    return;
+  }
+
+  const cleanTx = normalizeTxId(transactionRef || "");
+  const cleanSender = normalizePhone(senderNumber || "") || buyer.phone;
+  const cleanNote = String(referenceNote || "").trim();
+
+  if (requestedAdvanceTotal > 0) {
+    if (cleanTx.length < 4) {
+      showToast("অগ্রিম পেমেন্টের জন্য সঠিক Transaction ID দিন।", "error");
+      return;
+    }
+    if (["BKASH", "NAGAD", "ROCKET", "BANK_TRANSFER"].includes(paymentMethod)) {
+      for (const [fId, fItems] of grouped.entries()) {
+        const fps = getFarmerPaymentSettings(fId);
+        const rec =
+          paymentMethod === "BKASH"
+            ? fps.bKashNumber
+            : paymentMethod === "NAGAD"
+            ? fps.nagadNumber
+            : paymentMethod === "ROCKET"
+            ? fps.rocketNumber
+            : fps.bankAccountInfo;
+        if (!rec) {
+          showToast(`কৃষক ${fItems[0].farmerName} এখনো ${paymentMethod} নম্বর সেট করেননি। অন্য মাধ্যম বা ৳০ অগ্রিম বেছে নিন।`, "error");
+          return;
+        }
+      }
+    }
+    if (await isDuplicateTransactionIdAnywhere(cleanTx)) {
+      showToast(`এই Transaction ID (${cleanTx}) পূর্বেই ব্যবহৃত হয়েছে! নতুন ও সঠিক TxID দিন।`, "error");
+      return;
+    }
+  }
+
+  const now = Date.now();
   const createdOrders = [];
+  let txUsed = false;
+
   for (const [farmerId, farmerItems] of grouped.entries()) {
     const farmer = state.users.find((u) => u.id === farmerId);
+    const farmerPay = getFarmerPaymentSettings(farmerId);
     const orderId = shortId("ord");
     const orderCode = `KB-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(10 + Math.random() * 89)}`;
     let productTotal = 0;
@@ -1497,8 +1756,25 @@ async function placeOrdersFromCart({ deliveryOption, deliveryAddress, paymentMet
 
     const deliveryCharge = deliveryOption === "FARM_PICKUP" ? 0 : maxDeliveryFee;
     const grandTotal = productTotal + deliveryCharge;
+    const orderAdvance = grouped.size === 1
+      ? Math.min(grandTotal, requestedAdvanceTotal)
+      : cartTotalGrand > 0
+      ? Math.min(grandTotal, Math.round((requestedAdvanceTotal * (grandTotal / cartTotalGrand)) * 100) / 100)
+      : 0;
+    const receiverNumber =
+      paymentMethod === "BKASH"
+        ? farmerPay.bKashNumber
+        : paymentMethod === "NAGAD"
+        ? farmerPay.nagadNumber
+        : paymentMethod === "ROCKET"
+        ? farmerPay.rocketNumber
+        : paymentMethod === "BANK_TRANSFER"
+        ? farmerPay.bankAccountInfo
+        : "";
+    const orderTxId = orderAdvance > 0
+      ? (!txUsed ? (txUsed = true, cleanTx) : `${cleanTx}_${farmerId.slice(-4)}`)
+      : "";
     const itemsSummary = farmerItems.map((i) => `${i.productNameBn} × ${formatQty(i.quantity)} মণ (${formatQty(i.quantity * MON_TO_KG)} কেজি)`).join(", ");
-    const cleanTx = normalizeTxId(transactionRef || "");
 
     const order = {
       id: orderId,
@@ -1509,7 +1785,7 @@ async function placeOrdersFromCart({ deliveryOption, deliveryAddress, paymentMet
       farmerId,
       farmerName: farmer?.fullName || farmerItems[0].farmerName,
       farmerPhone: farmer?.phone || "",
-      status: "PENDING",
+      status: "PAYMENT_PENDING",
       deliveryOption,
       deliveryAddress: deliveryOption === "FARM_PICKUP" ? "সরাসরি কৃষকের খামার থেকে সংগ্রহ" : deliveryAddress.trim(),
       division: farmer?.division || buyer.division,
@@ -1518,11 +1794,14 @@ async function placeOrdersFromCart({ deliveryOption, deliveryAddress, paymentMet
       productTotal,
       deliveryCharge,
       grandTotal,
-      paymentMethod: paymentMethod || "CASH_ON_PICKUP",
-      paymentSenderNumber: "",
-      transactionReference: cleanTx,
+      advanceAmountRequested: orderAdvance,
+      verifiedAdvanceTotal: 0,
+      remainingDue: grandTotal,
+      paymentMethod: paymentMethod || "BKASH",
+      paymentSenderNumber: orderAdvance > 0 ? cleanSender : "",
+      transactionReference: orderTxId,
       paymentReceiptUri: "",
-      paymentStatus: cleanTx ? "SUBMITTED" : "PENDING",
+      paymentStatus: orderAdvance > 0 ? "PENDING_VERIFICATION" : "ZERO_ADVANCE_PENDING",
       farmerPaymentConfirmed: false,
       farmerPaymentConfirmedAt: 0,
       adminPaymentVerified: false,
@@ -1534,30 +1813,71 @@ async function placeOrdersFromCart({ deliveryOption, deliveryAddress, paymentMet
       items: itemsMap
     };
 
+    if (orderAdvance > 0) {
+      const op = {
+        id: shortId("op"),
+        orderId,
+        orderCode,
+        buyerId: buyer.id,
+        buyerName: buyer.fullName,
+        farmerId,
+        farmerName: order.farmerName,
+        amount: orderAdvance,
+        paymentMethod: order.paymentMethod,
+        receiverNumber,
+        senderNumber: cleanSender,
+        transactionId: orderTxId,
+        transactionIdNormalized: normalizeTxId(orderTxId),
+        referenceNote: cleanNote,
+        status: "PENDING_VERIFICATION",
+        rejectionReason: "",
+        verifiedBy: "",
+        verifiedAt: 0,
+        createdAt: now,
+        updatedAt: now
+      };
+      state.orderPayments.unshift(op);
+      await rtdbPush(`orderPayments/${op.id}`, op);
+    }
+
     const farmerNotif = {
       id: shortId("not"),
       userId: farmerId,
       targetRole: "FARMER",
       senderRole: "BUYER",
       orderId,
-      type: "ORDER_NEW",
-      titleBn: `নতুন অর্ডার এসেছে (${orderCode})`,
-      messageBn: `ক্রেতা ${buyer.fullName} (${buyer.upazila}, ${buyer.district}) ${itemsSummary} অর্ডার করেছেন — মোট ${formatBdt(grandTotal)}।`,
+      type: orderAdvance > 0 ? "ORDER_ADVANCE_SUBMITTED" : "ORDER_NEW",
+      titleBn: orderAdvance > 0 ? `নতুন পাইকারি অর্ডার ও অগ্রিম (${orderCode})` : `নতুন পাইকারি অর্ডার (${orderCode})`,
+      messageBn: orderAdvance > 0
+        ? `ক্রেতা ${buyer.fullName} ${itemsSummary} (মোট ${formatBdt(grandTotal)}) অর্ডার করে ${formatBdt(orderAdvance)} অগ্রিম (${order.paymentMethod}, TxID: ${orderTxId}) জমা দিয়েছেন। নিজ অ্যাকাউন্ট ব্যালেন্স দেখে যাচাই করুন।`
+        : `ক্রেতা ${buyer.fullName} ${itemsSummary} (মোট ${formatBdt(grandTotal)}) অর্ডার করেছেন (অগ্রিম ৳০)। অনুমোদন বা প্রত্যাখ্যান করুন।`,
       isRead: false,
+      createdAt: now
+    };
+    const audit = {
+      id: shortId("aud"),
+      actorId: buyer.id,
+      actorRole: buyer.role,
+      actionBn: "পাইকারি অর্ডার ও অগ্রিম তথ্য তৈরি (ওয়েব)",
+      targetEntity: "Order",
+      targetId: orderId,
+      detailsBn: `${orderCode} — মোট ${formatBdt(grandTotal)}, প্রস্তাবিত অগ্রিম ${formatBdt(orderAdvance)}, অবশিষ্ট বকেয়া ${formatBdt(grandTotal)}`,
       createdAt: now
     };
 
     state.orders.unshift(order);
     state.notifications.unshift(farmerNotif);
+    state.auditLogs.unshift(audit);
     createdOrders.push(order);
 
     await rtdbPush(`orders/${orderId}`, order);
     await rtdbPush(`notifications/${farmerNotif.id}`, farmerNotif);
+    await rtdbPush(`auditLogs/${audit.id}`, audit);
   }
 
   state.cart = [];
   saveLocalSnapshot();
-  showToast(`${createdOrders.length}টি অর্ডার জমা হয়েছে! কৃষক অর্ডার গ্রহণ করলে পেমেন্ট জমা দিন।`, "success");
+  showToast(`${createdOrders.length}টি পাইকারি অর্ডার জমা হয়েছে! কৃষক আপনার সরাসরি পেমেন্ট যাচাই করলে অর্ডার Confirmed হবে।`, "success");
   navigate("orders");
 }
 
@@ -1576,7 +1896,7 @@ async function createFarmerProduct(form) {
   const price = Number(form.pricePerUnit);
   const fee = Number(form.deliveryCharge || 0);
   if (!String(form.nameBn || "").trim() || qty <= 0 || price <= 0 || fee < 0) {
-    showToast("ফসলের নাম, সঠিক মণ পরিমাণ ও প্রতি মণের দাম দিন।", "error");
+    showToast("ফসলের নাম, সঠিক মণ পরিমাণ ও প্রতি মণের পাইকারি দাম দিন।", "error");
     return false;
   }
   const category = state.categories.find((c) => c.id === form.categoryId) || state.categories[0];
@@ -1606,7 +1926,7 @@ async function createFarmerProduct(form) {
     supportsFarmPickup: Boolean(form.supportsFarmPickup),
     supportsDirectDelivery: Boolean(form.supportsDirectDelivery),
     deliveryChargeEstimate: form.supportsDirectDelivery ? fee : 0,
-    isWholesale: Boolean(form.isWholesale),
+    isWholesale: true,
     isPopular: false,
     status: "ACTIVE",
     createdAt: now,
@@ -1618,7 +1938,7 @@ async function createFarmerProduct(form) {
     id: shortId("aud"),
     actorId: farmer.id,
     actorRole: farmer.role,
-    actionBn: "নতুন ফসল যুক্ত (ওয়েব)",
+    actionBn: "নতুন পাইকারি ফসল যুক্ত (ওয়েব)",
     targetEntity: "Product",
     targetId: product.id,
     detailsBn: `${product.nameBn} (${product.district}) — ${formatBdt(product.pricePerUnit)}/মণ`,
@@ -1630,7 +1950,7 @@ async function createFarmerProduct(form) {
   await rtdbPush(`products/${product.id}`, product);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
-  showToast("আপনার ফসল সফলভাবে যুক্ত ও লাইভ করা হয়েছে!", "success");
+  showToast("আপনার পাইকারি ফসল সফলভাবে যুক্ত ও লাইভ করা হয়েছে!", "success");
   state.farmerTab = "products";
   renderCurrentView();
   return true;
@@ -1653,6 +1973,7 @@ async function updateFarmerPriceAndStock(productId, newPrice, newStock) {
   prod.pricePerUnit = p;
   prod.availableQuantity = s;
   prod.unit = "মণ";
+  prod.isWholesale = true;
   prod.status = s > 0 ? "ACTIVE" : "OUT_OF_STOCK";
   prod.updatedAt = Date.now();
   saveLocalSnapshot();
@@ -1661,37 +1982,84 @@ async function updateFarmerPriceAndStock(productId, newPrice, newStock) {
   renderCurrentView();
 }
 
-async function submitOrderPayment(orderId, { paymentMethod, senderNumber, transactionReference, receiptUri }) {
-  const buyer = requireActiveMarketplaceUser("অর্ডার পেমেন্ট জমা");
+async function submitOrderAdvancePayment(orderId, { amount, paymentMethod, senderNumber, transactionId, referenceNote }) {
+  const buyer = requireActiveMarketplaceUser("অগ্রিম/আংশিক পেমেন্ট জমা");
   if (!buyer) return false;
   const order = state.orders.find((o) => o.id === orderId);
   if (!order || order.buyerId !== buyer.id) {
     showToast("শুধুমাত্র অর্ডারকারী ক্রেতা পেমেন্ট তথ্য জমা দিতে পারবেন।", "error");
     return false;
   }
-  if (["REJECTED", "CANCELLED"].includes(order.status)) {
-    showToast("বাতিল বা প্রত্যাখ্যাত অর্ডারে পেমেন্ট জমা দেওয়া যাবে না।", "error");
-    return false;
-  }
-  if (order.status === "PENDING") {
-    showToast("কৃষক অর্ডারটি গ্রহণ (Accept) করার পর পেমেন্ট জমা দিন।", "error");
-    return false;
-  }
-  const cleanSender = normalizePhone(senderNumber) || buyer.phone;
-  const cleanTx = normalizeTxId(transactionReference);
-  const cleanReceipt = String(receiptUri || "").trim();
-  const isDigital = !["CASH_ON_PICKUP", "CASH_ON_DELIVERY"].includes(paymentMethod);
-  if (isDigital && cleanTx.length < 4 && !cleanReceipt) {
-    showToast("ডিজিটাল পেমেন্টের জন্য Transaction ID অথবা রসিদ ছবি দিন।", "error");
+  if (["REJECTED", "CANCELLED", "COMPLETED"].includes(order.status)) {
+    showToast("এই অবস্থায় অর্ডারে পেমেন্ট জমা দেওয়া যাবে না।", "error");
     return false;
   }
 
+  const verifiedTotal = Number(order.verifiedAdvanceTotal || 0);
+  const currentRemainingDue = Math.max(0, Number(order.grandTotal || 0) - verifiedTotal);
+  if (currentRemainingDue <= 0) {
+    showToast("এই অর্ডারের সম্পূর্ণ মূল্য ইতোমধ্যে পরিশোধিত।", "info");
+    return false;
+  }
+
+  const payAmount = Math.round(Number(amount || 0) * 100) / 100;
+  if (Number.isNaN(payAmount) || payAmount <= 0 || payAmount > currentRemainingDue + 0.01) {
+    showToast(`পেমেন্টের পরিমাণ অবশ্যই ৳১ থেকে অবশিষ্ট বকেয়া (${formatBdt(currentRemainingDue)}) এর মধ্যে হতে হবে।`, "error");
+    return false;
+  }
+
+  const cleanSender = normalizePhone(senderNumber) || buyer.phone;
+  const cleanTx = normalizeTxId(transactionId);
+  if (cleanTx.length < 4) {
+    showToast("সঠিক Transaction ID দিন।", "error");
+    return false;
+  }
+  if (await isDuplicateTransactionIdAnywhere(cleanTx)) {
+    showToast(`এই Transaction ID (${cleanTx}) পূর্বেই ব্যবহৃত হয়েছে!`, "error");
+    return false;
+  }
+
+  const farmerPay = getFarmerPaymentSettings(order.farmerId);
+  const receiverNumber =
+    paymentMethod === "BKASH"
+      ? farmerPay.bKashNumber
+      : paymentMethod === "NAGAD"
+      ? farmerPay.nagadNumber
+      : paymentMethod === "ROCKET"
+      ? farmerPay.rocketNumber
+      : paymentMethod === "BANK_TRANSFER"
+      ? farmerPay.bankAccountInfo
+      : "";
+
   const now = Date.now();
-  order.paymentMethod = paymentMethod || "BKASH";
+  const payment = {
+    id: shortId("op"),
+    orderId: order.id,
+    orderCode: order.orderCode,
+    buyerId: buyer.id,
+    buyerName: buyer.fullName,
+    farmerId: order.farmerId,
+    farmerName: order.farmerName,
+    amount: Math.min(currentRemainingDue, payAmount),
+    paymentMethod: paymentMethod || "BKASH",
+    receiverNumber,
+    senderNumber: cleanSender,
+    transactionId: cleanTx,
+    transactionIdNormalized: cleanTx,
+    referenceNote: String(referenceNote || "").trim(),
+    status: "PENDING_VERIFICATION",
+    rejectionReason: "",
+    verifiedBy: "",
+    verifiedAt: 0,
+    createdAt: now,
+    updatedAt: now
+  };
+  state.orderPayments.unshift(payment);
+
+  order.paymentMethod = payment.paymentMethod;
   order.paymentSenderNumber = cleanSender;
   order.transactionReference = cleanTx;
-  order.paymentReceiptUri = cleanReceipt;
-  order.paymentStatus = "SUBMITTED";
+  order.paymentStatus = "PENDING_VERIFICATION";
   order.updatedAt = now;
 
   const farmerNotif = {
@@ -1701,8 +2069,8 @@ async function submitOrderPayment(orderId, { paymentMethod, senderNumber, transa
     senderRole: "BUYER",
     orderId: order.id,
     type: "ORDER_PAYMENT_SUBMITTED",
-    titleBn: `ক্রেতা পেমেন্ট তথ্য জমা দিয়েছেন (${order.orderCode})`,
-    messageBn: `ক্রেতা ${buyer.fullName} ${formatBdt(order.grandTotal)} (TxID: ${cleanTx || "রসিদ"}) পাঠিয়েছেন। টাকা বুঝে পেলে 'টাকা বুঝে পেয়েছি' অনুমোদন দিলেই অর্ডার Confirmed হবে।`,
+    titleBn: `নতুন অগ্রিম/আংশিক পেমেন্ট (${order.orderCode})`,
+    messageBn: `ক্রেতা ${buyer.fullName} ${formatBdt(payment.amount)} (${payment.paymentMethod}, TxID: ${cleanTx}) পাঠিয়েছেন। নিজ অ্যাকাউন্ট ব্যালেন্স দেখে নিশ্চিত করুন।`,
     isRead: false,
     createdAt: now
   };
@@ -1710,48 +2078,75 @@ async function submitOrderPayment(orderId, { paymentMethod, senderNumber, transa
     id: shortId("aud"),
     actorId: buyer.id,
     actorRole: buyer.role,
-    actionBn: "অর্ডার পেমেন্ট তথ্য জমা (ওয়েব)",
-    targetEntity: "Order",
-    targetId: order.id,
-    detailsBn: `${order.orderCode} — ${order.paymentMethod} | TxID: ${cleanTx || "রসিদ"}`,
+    actionBn: "অর্ডার অগ্রিম/আংশিক পেমেন্ট জমা (ওয়েব)",
+    targetEntity: "OrderPayment",
+    targetId: payment.id,
+    detailsBn: `${order.orderCode} — ${formatBdt(payment.amount)} (${payment.paymentMethod}, TxID: ${cleanTx})`,
     createdAt: now
   };
   state.notifications.unshift(farmerNotif);
   state.auditLogs.unshift(audit);
   saveLocalSnapshot();
 
+  await rtdbPush(`orderPayments/${payment.id}`, payment);
   await rtdbPush(`orders/${order.id}`, order);
   await rtdbPush(`notifications/${farmerNotif.id}`, farmerNotif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
-  showToast("পেমেন্ট তথ্য জমা হয়েছে! কৃষক টাকা প্রাপ্তি অনুমোদন করলে অর্ডার Confirmed হবে।", "success");
+  showToast("পেমেন্ট তথ্য জমা হয়েছে! কৃষক যাচাই করে নিশ্চিত করলে অগ্রিম ব্যালেন্সে যোগ হবে।", "success");
   closeModal();
   renderCurrentView();
   return true;
 }
 
-async function farmerConfirmPaymentReceived(orderId) {
-  const farmer = requireActiveMarketplaceUser("টাকা প্রাপ্তি নিশ্চিতকরণ");
+async function farmerVerifyOrderPayment(paymentId, approved, rejectionReason = "") {
+  const farmer = requireActiveMarketplaceUser("পেমেন্ট যাচাই ও নিশ্চিতকরণ");
   if (!farmer) return false;
-  const order = state.orders.find((o) => o.id === orderId);
+  const payment = state.orderPayments.find((p) => p.id === paymentId);
+  if (!payment) {
+    showToast("পেমেন্ট রেকর্ড পাওয়া যায়নি।", "error");
+    return false;
+  }
+  if (payment.farmerId !== farmer.id) {
+    showToast("শুধুমাত্র সংশ্লিষ্ট কৃষক এই পেমেন্ট যাচাই করতে পারেন।", "error");
+    return false;
+  }
+  if (payment.status !== "PENDING_VERIFICATION") {
+    showToast("এই পেমেন্টটি ইতোমধ্যে যাচাই করা হয়েছে।", "info");
+    return false;
+  }
+  const order = state.orders.find((o) => o.id === payment.orderId);
   if (!order) return false;
-  if (order.farmerId !== farmer.id && farmer.role !== "ADMIN") {
-    showToast("শুধুমাত্র সংশ্লিষ্ট কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ দিতে পারেন।", "error");
-    return false;
-  }
-  if (["PENDING", "REJECTED", "CANCELLED"].includes(order.status)) {
-    showToast("এই অবস্থায় টাকা প্রাপ্তি নিশ্চিত করা যাবে না।", "error");
-    return false;
-  }
 
   const now = Date.now();
-  order.farmerPaymentConfirmed = true;
-  order.farmerPaymentConfirmedAt = now;
-  const readyToConfirm = ["ACCEPTED", "PROCESSING", "READY_FOR_PICKUP", "READY", "SHIPPED", "DELIVERED"].includes(order.status);
-  if (readyToConfirm) {
+  payment.status = approved ? "CONFIRMED" : "REJECTED";
+  payment.rejectionReason = approved ? "" : (String(rejectionReason || "").trim() || "কৃষক অ্যাকাউন্টে টাকা পাওয়া যায়নি বা তথ্য মেলেনি।");
+  payment.verifiedBy = farmer.id;
+  payment.verifiedAt = now;
+  payment.updatedAt = now;
+
+  const confirmedSumRaw = state.orderPayments
+    .filter((p) => p.orderId === order.id && p.status === "CONFIRMED")
+    .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  const confirmedSum = Math.min(Number(order.grandTotal || 0), Math.round(confirmedSumRaw * 100) / 100);
+  const newRemaining = Math.max(0, Math.round((Number(order.grandTotal || 0) - confirmedSum) * 100) / 100);
+  const meetsRequired = confirmedSum > 0 && (Number(order.advanceAmountRequested || 0) <= 0 || confirmedSum + 0.01 >= Number(order.advanceAmountRequested || 0));
+
+  order.verifiedAdvanceTotal = confirmedSum;
+  order.remainingDue = newRemaining;
+  order.farmerPaymentConfirmed = confirmedSum > 0;
+  if (confirmedSum > 0) order.farmerPaymentConfirmedAt = now;
+  if (approved && meetsRequired && ["PAYMENT_PENDING", "PENDING", "ACCEPTED"].includes(order.status)) {
     order.status = "CONFIRMED";
-    order.paymentStatus = "PAID";
   }
+  order.paymentStatus =
+    newRemaining <= 0.01 && confirmedSum > 0
+      ? "PAID"
+      : confirmedSum > 0
+      ? "PARTIAL_ADVANCE_VERIFIED"
+      : approved
+      ? order.paymentStatus
+      : "REJECTED";
   order.updatedAt = now;
 
   const buyerNotif = {
@@ -1760,9 +2155,11 @@ async function farmerConfirmPaymentReceived(orderId) {
     targetRole: "BUYER",
     senderRole: "FARMER",
     orderId: order.id,
-    type: "FARMER_PAYMENT_CONFIRMED",
-    titleBn: `কৃষক টাকা বুঝে পেয়েছেন (${order.orderCode})`,
-    messageBn: `কৃষক ${farmer.fullName} টাকা প্রাপ্তি নিশ্চিত ও পেমেন্ট অনুমোদন করায় অর্ডারটি চূড়ান্ত নিশ্চিত (Confirmed) হয়েছে।`,
+    type: approved ? "ORDER_PAYMENT_VERIFIED" : "ORDER_PAYMENT_REJECTED",
+    titleBn: approved ? `অগ্রিম পেমেন্ট নিশ্চিত হয়েছে (${order.orderCode})` : `অগ্রিম পেমেন্ট প্রত্যাখ্যাত হয়েছে (${order.orderCode})`,
+    messageBn: approved
+      ? `কৃষক ${farmer.fullName} ${formatBdt(payment.amount)} (TxID: ${payment.transactionId}) নিশ্চিত করেছেন। মোট যাচাইকৃত অগ্রিম: ${formatBdt(confirmedSum)}, অবশিষ্ট বকেয়া: ${formatBdt(newRemaining)}।`
+      : `কারণ: ${payment.rejectionReason}`,
     isRead: false,
     createdAt: now
   };
@@ -1770,73 +2167,66 @@ async function farmerConfirmPaymentReceived(orderId) {
     id: shortId("aud"),
     actorId: farmer.id,
     actorRole: farmer.role,
-    actionBn: "কৃষক কর্তৃক টাকা প্রাপ্তি নিশ্চিতকরণ ও পেমেন্ট অনুমোদন (ওয়েব)",
-    targetEntity: "Order",
-    targetId: order.id,
-    detailsBn: `${order.orderCode} — কৃষক ${farmer.fullName} টাকা বুঝে পেয়েছেন`,
+    actionBn: approved ? "কৃষক অগ্রিম পেমেন্ট নিশ্চিতকরণ (ওয়েব)" : "কৃষক অগ্রিম পেমেন্ট প্রত্যাখ্যান (ওয়েব)",
+    targetEntity: "OrderPayment",
+    targetId: payment.id,
+    detailsBn: `${order.orderCode} | ${formatBdt(payment.amount)} | VerifiedTotal=${formatBdt(confirmedSum)} | Due=${formatBdt(newRemaining)}`,
     createdAt: now
   };
   state.notifications.unshift(buyerNotif);
   state.auditLogs.unshift(audit);
   saveLocalSnapshot();
 
+  await rtdbPush(`orderPayments/${payment.id}`, payment);
   await rtdbPush(`orders/${order.id}`, order);
   await rtdbPush(`notifications/${buyerNotif.id}`, buyerNotif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
-  showToast("টাকা প্রাপ্তি নিশ্চিত ও অনুমোদিত হয়েছে — অর্ডার চূড়ান্ত Confirmed সম্পন্ন!", "success");
+
+  closeModal();
+  showToast(approved ? "পেমেন্ট নিশ্চিত ও অগ্রিম ব্যালেন্স আপডেট হয়েছে!" : "পেমেন্ট প্রত্যাখ্যাত হয়েছে।", approved ? "success" : "info");
   renderCurrentView();
   return true;
 }
 
-async function adminVerifyOrderPayment(orderId, approved, notes = "") {
-  const admin = getActiveUser();
-  if (!admin || admin.role !== "ADMIN") {
-    showToast("শুধুমাত্র সুপার অ্যাডমিন অর্ডার পেমেন্ট যাচাই করতে পারেন।", "error");
-    return false;
-  }
+async function farmerApproveZeroAdvanceOrder(orderId) {
+  const farmer = requireActiveMarketplaceUser("শূন্য-অগ্রিম অর্ডার অনুমোদন");
+  if (!farmer) return false;
   const order = state.orders.find((o) => o.id === orderId);
   if (!order) return false;
-
-  const now = Date.now();
-  order.adminPaymentVerified = Boolean(approved);
-  order.adminPaymentVerifiedBy = admin.id;
-  order.adminPaymentVerifiedAt = now;
-  order.paymentStatus = approved ? "VERIFIED" : "REJECTED";
-  if (!approved) {
-    order.farmerPaymentConfirmed = false;
-  } else {
-    const readyToConfirm = ["ACCEPTED", "PROCESSING", "READY_FOR_PICKUP", "READY", "SHIPPED", "DELIVERED"].includes(order.status);
-    if (order.farmerPaymentConfirmed && readyToConfirm) {
-      order.status = "CONFIRMED";
-      order.paymentStatus = "PAID";
-    }
+  if (order.farmerId !== farmer.id) {
+    showToast("শুধুমাত্র সংশ্লিষ্ট কৃষক এই অর্ডার অনুমোদন করতে পারেন।", "error");
+    return false;
   }
+  if (!["PAYMENT_PENDING", "PENDING"].includes(order.status)) {
+    showToast("এই অর্ডারটি ইতোমধ্যে অনুমোদিত বা সম্পন্ন হয়েছে।", "info");
+    return false;
+  }
+  const now = Date.now();
+  order.status = "CONFIRMED";
+  order.paymentStatus = "ZERO_ADVANCE_APPROVED";
+  order.remainingDue = Math.max(0, Number(order.grandTotal || 0) - Number(order.verifiedAdvanceTotal || 0));
   order.updatedAt = now;
 
   const buyerNotif = {
     id: shortId("not"),
     userId: order.buyerId,
     targetRole: "BUYER",
-    senderRole: "ADMIN",
+    senderRole: "FARMER",
     orderId: order.id,
-    type: "ORDER_PAYMENT_VERIFICATION",
-    titleBn: approved ? `অর্ডার পেমেন্ট যাচাই সম্পন্ন (${order.orderCode})` : `অর্ডার পেমেন্ট যাচাই প্রত্যাখ্যাত (${order.orderCode})`,
-    messageBn: approved && order.farmerPaymentConfirmed
-      ? "অ্যাডমিন যাচাই এবং কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ সম্পন্ন হওয়ায় অর্ডারটি চূড়ান্ত Confirmed হয়েছে।"
-      : approved
-      ? "অ্যাডমিন পেমেন্ট যাচাই করেছেন। কৃষক 'টাকা বুঝে পেয়েছি' নিশ্চিত করলে অর্ডার চূড়ান্ত Confirmed হবে।"
-      : (notes || "পেমেন্ট তথ্যে অমিল পাওয়া গেছে। অনুগ্রহ করে সঠিক তথ্য জমা দিন।"),
+    type: "ZERO_ADVANCE_APPROVED",
+    titleBn: `কৃষক অর্ডার অনুমোদন করেছেন (${order.orderCode})`,
+    messageBn: `কৃষক ${farmer.fullName} শূন্য-অগ্রিম অর্ডারটি Confirmed করেছেন। অবশিষ্ট বকেয়া: ${formatBdt(order.remainingDue)}।`,
     isRead: false,
     createdAt: now
   };
   const audit = {
     id: shortId("aud"),
-    actorId: admin.id,
-    actorRole: "ADMIN",
-    actionBn: `অর্ডার পেমেন্ট যাচাই (${order.paymentStatus})`,
+    actorId: farmer.id,
+    actorRole: farmer.role,
+    actionBn: "শূন্য-অগ্রিম অর্ডার অনুমোদন (ওয়েব)",
     targetEntity: "Order",
     targetId: order.id,
-    detailsBn: `${order.orderCode} — ${order.paymentStatus}${notes ? ` (${notes})` : ""}`,
+    detailsBn: `${order.orderCode} — অবশিষ্ট বকেয়া ${formatBdt(order.remainingDue)}`,
     createdAt: now
   };
   state.notifications.unshift(buyerNotif);
@@ -1846,7 +2236,40 @@ async function adminVerifyOrderPayment(orderId, approved, notes = "") {
   await rtdbPush(`orders/${order.id}`, order);
   await rtdbPush(`notifications/${buyerNotif.id}`, buyerNotif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
-  showToast(approved ? "অর্ডার পেমেন্ট যাচাই অনুমোদিত!" : "অর্ডার পেমেন্ট প্রত্যাখ্যাত হয়েছে।", approved ? "success" : "info");
+  showToast("শূন্য-অগ্রিম অর্ডার অনুমোদিত ও Confirmed হয়েছে!", "success");
+  renderCurrentView();
+  return true;
+}
+
+async function farmerConfirmPaymentReceived(orderId) {
+  const pending = state.orderPayments.filter((p) => p.orderId === orderId && p.status === "PENDING_VERIFICATION");
+  if (pending.length) {
+    let ok = true;
+    for (const p of pending) {
+      const res = await farmerVerifyOrderPayment(p.id, true);
+      if (!res) ok = false;
+    }
+    return ok;
+  }
+  const farmer = requireActiveMarketplaceUser("টাকা প্রাপ্তি নিশ্চিতকরণ");
+  if (!farmer) return false;
+  const order = state.orders.find((o) => o.id === orderId);
+  if (!order) return false;
+  if (order.farmerId !== farmer.id) {
+    showToast("শুধুমাত্র সংশ্লিষ্ট কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ দিতে পারেন।", "error");
+    return false;
+  }
+  const now = Date.now();
+  order.verifiedAdvanceTotal = Number(order.grandTotal || 0);
+  order.remainingDue = 0;
+  order.farmerPaymentConfirmed = true;
+  order.farmerPaymentConfirmedAt = now;
+  order.status = "CONFIRMED";
+  order.paymentStatus = "PAID";
+  order.updatedAt = now;
+  saveLocalSnapshot();
+  await rtdbPush(`orders/${order.id}`, order);
+  showToast("সম্পূর্ণ পেমেন্ট নিশ্চিত ও অর্ডার Confirmed হয়েছে!", "success");
   renderCurrentView();
   return true;
 }
@@ -1868,16 +2291,15 @@ async function updateOrderStatus(orderId, newStatus) {
     showToast("ক্রেতা শুধুমাত্র অর্ডার বাতিল বা সম্পন্ন করতে পারেন।", "error");
     return;
   }
-  if (isBuyer && newStatus === "CANCELLED" && order.status !== "PENDING") {
+  if (isBuyer && newStatus === "CANCELLED" && !["PENDING", "PAYMENT_PENDING"].includes(order.status)) {
     showToast("অর্ডার প্রক্রিয়াধীন হলে বাতিল করা যাবে না।", "error");
     return;
   }
 
-  // Strict Security Rule: Order CANNOT be Confirmed or Completed using buyer screenshot alone!
-  // Only Farmer's payment received confirmation is required (no admin approval needed).
+  // Strict Security Rule: Order CANNOT be Confirmed or Completed using buyer submission/screenshot alone!
   if (newStatus === "CONFIRMED" || newStatus === "COMPLETED") {
-    if (!order.farmerPaymentConfirmed) {
-      showToast("শুধু ক্রেতার পেমেন্ট রসিদ বা স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না — কৃষক 'টাকা বুঝে পেয়েছি' অনুমোদন দিলে অর্ডার কনফার্ম বা সম্পন্ন হবে।", "error");
+    if (!order.farmerPaymentConfirmed && order.paymentStatus !== "ZERO_ADVANCE_APPROVED") {
+      showToast("অগ্রিম বা পেমেন্ট তথ্য কৃষক নিজ অ্যাকাউন্ট দেখে নিশ্চিত করলে অর্ডার Confirmed বা Completed হবে।", "error");
       return;
     }
   }
@@ -2219,7 +2641,7 @@ async function adminSaveAdConfig(nextConfig) {
     actionBn: "বিজ্ঞাপন ও মনিটাইজেশন আপডেট (ওয়েব)",
     targetEntity: "AdConfig",
     targetId: "adConfig",
-    detailsBn: `Ads: ${merged.adsEnabled ? "চালু" : "বন্ধ"}, AdSense: ${merged.adsenseEnabled ? "চালু" : "বন্ধ"}, Adsterra: ${merged.adsterraEnabled ? "চালু" : "বন্ধ"}, Monetag: ${merged.monetagEnabled ? "চালু" : "বন্ধ"}, AdMob: ${merged.androidAdsEnabled ? "চালু" : "বন্ধ"}`,
+    detailsBn: `Ads: ${merged.adsEnabled ? "চালু" : "বন্ধ"}, LevelPlay AppKey: ${merged.mediationAppKey ? "সেট" : "ফাঁকা"}, AdSense: ${merged.adsenseEnabled ? "চালু" : "বন্ধ"}, Adsterra: ${merged.adsterraEnabled ? "চালু" : "বন্ধ"}, Monetag: ${merged.monetagEnabled ? "চালু" : "বন্ধ"}`,
     createdAt: now
   };
   state.auditLogs.unshift(audit);
@@ -2518,8 +2940,7 @@ function getFilteredProducts() {
     const matchDist = !distN || normBn(p.district) === distN;
     const matchUpz = !upzN || normBn(p.upazila) === upzN;
     const matchUnion = !unionN || normBn(p.unionName) === unionN;
-    const matchW = f.wholesaleOnly === "" || String(Boolean(p.isWholesale)) === f.wholesaleOnly;
-    return matchQ && matchCat && matchDiv && matchDist && matchUpz && matchUnion && matchW;
+    return matchQ && matchCat && matchDiv && matchDist && matchUpz && matchUnion;
   });
 
   if (f.sort === "PRICE_LOW_HIGH") return [...list].sort((a, b) => a.pricePerUnit - b.pricePerUnit);
@@ -2568,7 +2989,7 @@ function renderProductCard(p) {
     <div class="bg-white rounded-3xl border border-emerald-100 shadow-sm hover:shadow-md transition overflow-hidden flex flex-col">
       <button onclick="window.kbApp.navigate('product-detail', { id: '${escapeHtml(p.id)}' })" class="text-left block w-full relative">
         ${imgHtml}
-        ${p.isWholesale ? `<span class="absolute top-3 left-3 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500 text-white shadow">পাইকারি</span>` : ""}
+        <span class="absolute top-3 left-3 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500 text-white shadow">পাইকারি মাত্র</span>
         ${p.farmerVerified ? `<span class="absolute top-3 right-3 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#168447] text-white shadow">✓ যাচাইকৃত</span>` : ""}
       </button>
       <div class="p-4 flex-1 flex flex-col justify-between gap-3">
@@ -2976,11 +3397,9 @@ function renderBrowsePage() {
           ${state.categories.map((c) => `<option value="${escapeHtml(c.id)}" ${f.categoryId === c.id ? "selected" : ""}>${escapeHtml(c.emoji || "")} ${escapeHtml(c.nameBn)}</option>`).join("")}
         </select>
 
-        <select onchange="window.kbApp.setFilter('wholesaleOnly', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
-          <option value="" ${f.wholesaleOnly === "" ? "selected" : ""}>সব ধরন (পাইকারি/খুচরা)</option>
-          <option value="true" ${f.wholesaleOnly === "true" ? "selected" : ""}>পাইকারি</option>
-          <option value="false" ${f.wholesaleOnly === "false" ? "selected" : ""}>খুচরা</option>
-        </select>
+        <div class="px-3 py-2.5 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-xs font-bold flex items-center">
+          📦 পাইকারি বাজার মাত্র (খুচরা বন্ধ)
+        </div>
 
         <select onchange="window.kbApp.setFilter('sort', this.value)" class="px-3 py-2.5 rounded-xl border border-emerald-200 text-sm bg-white">
           <option value="NEWEST" ${f.sort === "NEWEST" ? "selected" : ""}>নতুন আগে</option>
@@ -3030,7 +3449,7 @@ function renderProductDetailPage() {
           <div class="flex flex-wrap items-center gap-2">
             <span class="px-3 py-1 rounded-full bg-[#EAF7EF] text-[#105B34] text-xs font-bold">${escapeHtml(prod.categoryNameBn)}</span>
             <span class="px-3 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-[#105B34] text-xs font-bold">১ মণ = ${MON_TO_KG} কেজি</span>
-            ${prod.isWholesale ? `<span class="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-bold">পাইকারি</span>` : ""}
+            <span class="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-bold">পাইকারি মাত্র</span>
             ${prod.farmerVerified ? `<span class="px-3 py-1 rounded-full bg-emerald-600 text-white text-xs font-bold">✓ যাচাইকৃত কৃষক</span>` : ""}
           </div>
           <h1 class="text-2xl sm:text-3xl font-extrabold text-[#202820]">${escapeHtml(prod.nameBn)}</h1>
@@ -3259,7 +3678,13 @@ function renderLoginPage() {
         </div>
         <div>
           <label class="text-xs font-bold text-gray-700 block mb-1">পাসওয়ার্ড</label>
-          <input name="password" type="password" required placeholder="******" class="w-full px-4 py-3 rounded-xl border border-emerald-200 text-sm" />
+          <div class="relative">
+            <input id="login-password-input" name="password" type="password" required placeholder="******" class="w-full px-4 py-3 pr-16 rounded-xl border border-emerald-200 text-sm" />
+            <button type="button" onclick="window.kbApp.togglePasswordVisibility('login-password-input', this)" class="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-1 text-xs font-bold text-[#168447] hover:bg-[#EAF7EF] rounded-lg">দেখুন</button>
+          </div>
+          <div class="text-right mt-1">
+            <button type="button" onclick="window.kbApp.openForgotPasswordModal()" class="text-xs font-semibold text-[#168447] hover:underline">পাসওয়ার্ড ভুলে গেছেন?</button>
+          </div>
         </div>
         <button type="submit" class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm">লগইন করুন</button>
       </form>
@@ -3293,7 +3718,7 @@ function renderRegisterPage(defaultRole) {
 
       <div class="bg-[#EAF7EF] border border-emerald-200 rounded-2xl p-3.5 text-xs text-[#105B34] space-y-1">
         <div class="font-bold">💡 ২ বছরের অ্যাকাউন্ট সক্রিয়করণ ফি: ৳${FIXED_ACTIVATION_FEE_BDT}</div>
-        <p>নিবন্ধনের পর বিকাশ বা নগদে ৳${FIXED_ACTIVATION_FEE_BDT} পেমেন্ট তথ্য জমা দিয়ে অ্যাডমিন অনুমোদন পেলে ২ বছরের জন্য সকল ফসল কেনাবেচা চালু হবে।</p>
+        <p>নিবন্ধনের পর বিকাশ বা নগদে ৳${FIXED_ACTIVATION_FEE_BDT} পেমেন্ট তথ্য জমা দিয়ে অ্যাডমিন অনুমোদন পেলে ২ বছরের জন্য সকল পাইকারি কেনাবেচা চালু হবে।</p>
       </div>
 
       <form onsubmit="window.kbApp.handleRegisterSubmit(event)" class="space-y-3.5">
@@ -3312,11 +3737,17 @@ function renderRegisterPage(defaultRole) {
         <div class="grid sm:grid-cols-2 gap-3">
           <div>
             <label class="text-xs font-bold text-gray-700 block mb-1">পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর) *</label>
-            <input name="password" type="password" minlength="6" required class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+            <div class="relative">
+              <input id="reg-password-input" name="password" type="password" minlength="6" required class="w-full px-3.5 py-2.5 pr-16 rounded-xl border border-emerald-200 text-sm" />
+              <button type="button" onclick="window.kbApp.togglePasswordVisibility('reg-password-input', this)" class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs font-bold text-[#168447] hover:bg-[#EAF7EF] rounded-lg">দেখুন</button>
+            </div>
           </div>
           <div>
             <label class="text-xs font-bold text-gray-700 block mb-1">পাসওয়ার্ড নিশ্চিত করুন *</label>
-            <input name="confirmPassword" type="password" minlength="6" required class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+            <div class="relative">
+              <input id="reg-confirm-password-input" name="confirmPassword" type="password" minlength="6" required class="w-full px-3.5 py-2.5 pr-16 rounded-xl border border-emerald-200 text-sm" />
+              <button type="button" onclick="window.kbApp.togglePasswordVisibility('reg-confirm-password-input', this)" class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs font-bold text-[#168447] hover:bg-[#EAF7EF] rounded-lg">দেখুন</button>
+            </div>
           </div>
         </div>
 
@@ -3631,17 +4062,19 @@ function renderActivationPage() {
 }
 
 function renderOrderSecuritySteps(o) {
+  const verifiedAdv = Number(o.verifiedAdvanceTotal || 0);
+  const due = Math.max(0, Number(o.grandTotal || 0) - verifiedAdv);
   const step1 = true;
-  const step2 = !["PENDING", "REJECTED", "CANCELLED"].includes(o.status);
-  const step3 = Boolean(o.transactionReference || o.paymentReceiptUri || ["SUBMITTED", "VERIFIED", "PAID"].includes(o.paymentStatus));
-  const step4 = Boolean(o.farmerPaymentConfirmed);
-  const step5 = Boolean(o.farmerPaymentConfirmed) && ["CONFIRMED", "COMPLETED"].includes(o.status);
+  const step2 = Number(o.advanceAmountRequested || 0) > 0 || state.orderPayments.some((p) => p.orderId === o.id);
+  const step3 = verifiedAdv > 0 || o.paymentStatus === "ZERO_ADVANCE_APPROVED";
+  const step4 = ["CONFIRMED", "PROCESSING", "READY_FOR_PICKUP", "READY", "SHIPPED", "DELIVERED", "COMPLETED"].includes(o.status);
+  const step5 = o.status === "COMPLETED" && due <= 0.01;
   const steps = [
     ["১. অর্ডার", step1],
-    ["২. কৃষক গ্রহণ", step2],
-    ["৩. পেমেন্ট জমা", step3],
-    ["৪. কৃষক অনুমোদন", step4],
-    ["৫. নিশ্চিত/সম্পন্ন", step5]
+    ["২. অগ্রিম তথ্য", step2],
+    ["৩. কৃষক যাচাই", step3],
+    ["৪. অর্ডার Confirmed", step4],
+    ["৫. বকেয়া ও সম্পন্ন", step5]
   ];
   return `
     <div class="grid grid-cols-5 gap-1.5 pt-1">
@@ -3661,18 +4094,53 @@ function renderOrderSecuritySteps(o) {
 }
 
 function renderOrderPaymentBadgeRow(o) {
-  const farmerBadge = o.farmerPaymentConfirmed
-    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">✓ কৃষক টাকা পেয়েছেন ও অনুমোদিত</span>`
-    : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">⏳ কৃষকের টাকা প্রাপ্তি ও অনুমোদন বাকি</span>`;
-  const policyBadge = o.farmerPaymentConfirmed
-    ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">✓ চূড়ান্ত Confirmed</span>`
-    : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-700">অ্যাডমিন অনুমোদন প্রয়োজন নেই</span>`;
+  const verifiedAdv = Number(o.verifiedAdvanceTotal || 0);
+  const remainingDue = Math.max(0, Number(o.grandTotal || 0) - verifiedAdv);
+  const payments = state.orderPayments.filter((p) => p.orderId === o.id);
+  const pendingCount = payments.filter((p) => p.status === "PENDING_VERIFICATION").length;
   return `
-    <div class="flex flex-wrap items-center gap-1.5 pt-1">
-      ${farmerBadge}
-      ${policyBadge}
-      ${o.transactionReference ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-800">TxID: ${escapeHtml(o.transactionReference)}</span>` : ""}
-      ${o.paymentReceiptUri ? `<button type="button" onclick="window.kbApp.openReceiptPreviewModal('${escapeHtml(o.id)}', 'order')" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#EAF7EF] text-[#105B34] border border-emerald-200">🖼️ রসিদ দেখুন</button>` : ""}
+    <div class="space-y-1.5 pt-1">
+      <div class="flex flex-wrap items-center gap-1.5 text-[11px] font-bold">
+        <span class="px-2.5 py-0.5 rounded-full bg-emerald-50 text-[#105B34] border border-emerald-200">মোট: ${formatBdt(o.grandTotal)}</span>
+        <span class="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-900">যাচাইকৃত অগ্রিম: ${formatBdt(verifiedAdv)}</span>
+        <span class="px-2.5 py-0.5 rounded-full ${remainingDue > 0 ? "bg-amber-100 text-amber-900" : "bg-emerald-600 text-white"}">অবশিষ্ট বকেয়া: ${formatBdt(remainingDue)}</span>
+        ${pendingCount > 0 ? `<span class="px-2.5 py-0.5 rounded-full bg-amber-600 text-white">${pendingCount}টি পেমেন্ট যাচাই বাকি</span>` : ""}
+        <span class="px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">পাইকারি লেনদেন (সরাসরি কৃষককে)</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderOrderPaymentsList(o, viewer) {
+  const list = state.orderPayments.filter((p) => p.orderId === o.id);
+  if (!list.length) return "";
+  const isFarmer = viewer && viewer.id === o.farmerId && viewer.role === "FARMER";
+  return `
+    <div class="space-y-1.5 pt-1 border-t border-emerald-50">
+      <div class="text-[11px] font-bold text-[#105B34]">📜 সরাসরি অগ্রিম ও আংশিক পেমেন্ট ইতিহাস (${list.length})</div>
+      ${list
+        .map((p) => {
+          const pMeta = ORDER_PAYMENT_STATUS_META[p.status] || ORDER_PAYMENT_STATUS_META.PENDING_VERIFICATION;
+          return `
+            <div class="p-2.5 rounded-2xl bg-[#F7FAF7] border border-emerald-100 text-xs flex flex-wrap items-center justify-between gap-2">
+              <div class="space-y-0.5">
+                <div class="font-bold text-[#105B34]">${escapeHtml(p.paymentMethod)} • ${formatBdt(p.amount)} • TxID: <span class="font-mono">${escapeHtml(p.transactionId)}</span></div>
+                <div class="text-[11px] text-gray-600">প্রেরক: ${escapeHtml(p.senderNumber || "-")} ${p.receiverNumber ? `→ প্রাপক: ${escapeHtml(p.receiverNumber)}` : ""} ${p.referenceNote ? `• নোট: ${escapeHtml(p.referenceNote)}` : ""}</div>
+                ${p.rejectionReason ? `<div class="text-[11px] text-red-700 font-semibold">কারণ: ${escapeHtml(p.rejectionReason)}</div>` : ""}
+              </div>
+              <div class="flex flex-wrap items-center gap-1.5">
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${pMeta.color}">${pMeta.labelBn}</span>
+                ${
+                  isFarmer && p.status === "PENDING_VERIFICATION"
+                    ? `<button onclick="window.kbApp.farmerVerifyOrderPayment('${escapeHtml(p.id)}', true)" class="px-2.5 py-1 rounded-xl bg-[#168447] text-white text-[11px] font-bold">✓ টাকা পেয়েছি (নিশ্চিত)</button>
+                       <button onclick="window.kbApp.openRejectOrderPaymentModal('${escapeHtml(p.id)}')" class="px-2.5 py-1 rounded-xl bg-red-600 text-white text-[11px] font-bold">✕ প্রত্যাখ্যান</button>`
+                    : ""
+                }
+              </div>
+            </div>
+          `;
+        })
+        .join("")}
     </div>
   `;
 }
@@ -3705,7 +4173,7 @@ function renderFarmerDashboardPage() {
           }
           <div>
             <div class="flex flex-wrap items-center gap-2">
-              <h1 class="text-2xl font-bold text-[#105B34]">👨‍🌾 কৃষক ড্যাশবোর্ড</h1>
+              <h1 class="text-2xl font-bold text-[#105B34]">👨‍🌾 কৃষক পাইকারি ড্যাশবোর্ড</h1>
               <span class="px-2.5 py-0.5 rounded-full text-xs font-bold ${stMeta.color}">${stMeta.labelBn}</span>
               ${user.verificationStatus === "VERIFIED" ? `<span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">✓ যাচাইকৃত</span>` : ""}
             </div>
@@ -3715,7 +4183,7 @@ function renderFarmerDashboardPage() {
         <div class="flex flex-wrap gap-2 items-center">
           <div class="px-4 py-2 rounded-2xl bg-[#EAF7EF] text-center"><div class="font-extrabold text-[#105B34]">${myProducts.length}</div><div class="text-[11px]">আমার ফসল</div></div>
           <div class="px-4 py-2 rounded-2xl bg-[#EAF7EF] text-center"><div class="font-extrabold text-[#105B34]">${myOrders.length}</div><div class="text-[11px]">মোট অর্ডার</div></div>
-          <div class="px-4 py-2 rounded-2xl bg-[#EAF7EF] text-center"><div class="font-extrabold text-[#105B34]">${formatBdt(totalSales)}</div><div class="text-[11px]">মোট বিক্রয়</div></div>
+          <div class="px-4 py-2 rounded-2xl bg-[#EAF7EF] text-center"><div class="font-extrabold text-[#105B34]">${formatBdt(totalSales)}</div><div class="text-[11px]">মোট পাইকারি বিক্রয়</div></div>
           <button onclick="window.kbApp.navigate('profile')" class="px-3.5 py-2 rounded-2xl border border-emerald-200 text-xs font-bold text-[#105B34] hover:bg-[#EAF7EF]">✏️ প্রোফাইল</button>
         </div>
       </div>
@@ -3724,15 +4192,61 @@ function renderFarmerDashboardPage() {
       <div class="flex flex-wrap gap-2">
         <button onclick="window.kbApp.setFarmerTab('orders')" class="px-4 py-2 rounded-xl text-sm font-bold ${tab === "orders" ? "bg-[#168447] text-white" : "bg-white border border-emerald-200 text-[#105B34]"}">📦 প্রাপ্ত অর্ডার (${myOrders.length})</button>
         <button onclick="window.kbApp.setFarmerTab('products')" class="px-4 py-2 rounded-xl text-sm font-bold ${tab === "products" ? "bg-[#168447] text-white" : "bg-white border border-emerald-200 text-[#105B34]"}">🌾 আমার ফসল (${myProducts.length})</button>
-        <button onclick="window.kbApp.setFarmerTab('add')" class="px-4 py-2 rounded-xl text-sm font-bold ${tab === "add" ? "bg-[#168447] text-white" : "bg-white border border-emerald-200 text-[#105B34]"}">+ নতুন ফসল যোগ করুন</button>
+        <button onclick="window.kbApp.setFarmerTab('add')" class="px-4 py-2 rounded-xl text-sm font-bold ${tab === "add" ? "bg-[#168447] text-white" : "bg-white border border-emerald-200 text-[#105B34]"}">+ নতুন পাইকারি ফসল</button>
+        <button onclick="window.kbApp.setFarmerTab('payment-settings')" class="px-4 py-2 rounded-xl text-sm font-bold ${tab === "payment-settings" ? "bg-[#168447] text-white" : "bg-white border border-emerald-200 text-[#105B34]"}">💳 পেমেন্ট সেটিংস</button>
       </div>
 
-      ${tab === "orders" ? renderFarmerOrdersTab(myOrders, active) : tab === "products" ? renderFarmerProductsTab(myProducts, active) : renderAddProductTab(user, active)}
+      ${
+        tab === "orders"
+          ? renderFarmerOrdersTab(myOrders, active, user)
+          : tab === "products"
+          ? renderFarmerProductsTab(myProducts, active)
+          : tab === "payment-settings"
+          ? renderFarmerPaymentSettingsTab(user)
+          : renderAddProductTab(user, active)
+      }
     </div>
   `;
 }
 
-function renderFarmerOrdersTab(myOrders, active) {
+function renderFarmerPaymentSettingsTab(user) {
+  const fps = getFarmerPaymentSettings(user.id);
+  return `
+    <div class="bg-white rounded-3xl p-6 sm:p-8 border border-emerald-100 shadow-sm max-w-2xl space-y-4">
+      <div>
+        <h2 class="text-lg font-bold text-[#105B34]">💳 সরাসরি পেমেন্ট গ্রহণ সেটিংস (শুধুমাত্র আপনার অর্ডারে প্রদর্শিত)</h2>
+        <p class="text-xs text-gray-600 mt-1">ক্রেতারা পাইকারি চেকআউটের সময় সরাসরি আপনার নির্বাচিত নম্বরে অগ্রিম টাকা পাঠাবেন। প্ল্যাটফর্ম কখনোই এই টাকা গ্রহণ বা কেটে রাখে না। অন্য কোনো কৃষকের নম্বর কখনোই দেখানো হবে না।</p>
+      </div>
+      <form onsubmit="window.kbApp.handleFarmerPaymentSettingsSubmit(event)" class="space-y-3.5 text-sm">
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs font-bold block mb-1">bKash (বিকাশ) নম্বর</label>
+            <input name="bKashNumber" value="${escapeHtml(fps.bKashNumber || "")}" placeholder="017XXXXXXXX" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200" />
+          </div>
+          <div>
+            <label class="text-xs font-bold block mb-1">Nagad (নগদ) নম্বর</label>
+            <input name="nagadNumber" value="${escapeHtml(fps.nagadNumber || "")}" placeholder="018XXXXXXXX" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200" />
+          </div>
+        </div>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs font-bold block mb-1">Rocket (রকেট) নম্বর</label>
+            <input name="rocketNumber" value="${escapeHtml(fps.rocketNumber || "")}" placeholder="019XXXXXXXX" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200" />
+          </div>
+          <div>
+            <label class="text-xs font-bold block mb-1">ব্যাংক অ্যাকাউন্ট তথ্য (ঐচ্ছিক)</label>
+            <input name="bankAccountInfo" value="${escapeHtml(fps.bankAccountInfo || "")}" placeholder="ব্যাংক নাম, শাখা, অ্যাকাউন্ট নম্বর" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200" />
+          </div>
+        </div>
+        <button type="submit" class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold">
+          💾 সরাসরি পেমেন্ট নম্বর সংরক্ষণ করুন
+        </button>
+      </form>
+    </div>
+  `;
+}
+
+function renderFarmerOrdersTab(myOrders, active, farmerUser) {
   if (!myOrders.length) {
     return `<div class="bg-white rounded-3xl p-10 text-center border border-dashed border-emerald-200">এখনো কোনো অর্ডার আসেনি। ক্রেতা অর্ডার করলেই এখানে ও নোটিফিকেশনে সাথে সাথে দেখাবে।</div>`;
   }
@@ -3740,13 +4254,13 @@ function renderFarmerOrdersTab(myOrders, active) {
     <div class="space-y-4">
       ${myOrders
         .map((o) => {
-          const meta = ORDER_STATUS_META[o.status] || ORDER_STATUS_META.PENDING;
-          const canConfirmMoney =
+          const meta = ORDER_STATUS_META[o.status] || ORDER_STATUS_META.PAYMENT_PENDING;
+          const farmerApproved = Boolean(o.farmerPaymentConfirmed || o.paymentStatus === "ZERO_ADVANCE_APPROVED");
+          const canApproveZeroAdvance =
             active &&
-            !o.farmerPaymentConfirmed &&
-            o.status !== "PENDING" &&
-            !["CANCELLED", "REJECTED"].includes(o.status);
-          const farmerApproved = Boolean(o.farmerPaymentConfirmed);
+            ["PAYMENT_PENDING", "PENDING"].includes(o.status) &&
+            Number(o.advanceAmountRequested || 0) <= 0 &&
+            !state.orderPayments.some((p) => p.orderId === o.id && p.status === "PENDING_VERIFICATION");
           return `
             <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
               <div class="flex flex-wrap items-center justify-between gap-2">
@@ -3759,39 +4273,31 @@ function renderFarmerOrdersTab(myOrders, active) {
               <div class="text-sm font-semibold">${escapeHtml(o.itemsSummary)}</div>
               <div class="text-xs text-gray-600 grid sm:grid-cols-2 gap-1">
                 <div>ক্রেতা: <strong>${escapeHtml(o.buyerName)}</strong> (<a class="text-[#168447] underline" href="tel:${escapeHtml(o.buyerPhone)}">${escapeHtml(o.buyerPhone)}</a>)</div>
-                <div>মোট মূল্য: <strong class="text-[#168447]">${formatBdt(o.grandTotal)}</strong> (${escapeHtml(o.paymentMethod)})</div>
+                <div>মোট পাইকারি মূল্য: <strong class="text-[#168447]">${formatBdt(o.grandTotal)}</strong> (${escapeHtml(o.paymentMethod)})</div>
                 <div class="sm:col-span-2">ঠিকানা: ${escapeHtml(o.deliveryAddress)}</div>
               </div>
               ${renderOrderSecuritySteps(o)}
               ${renderOrderPaymentBadgeRow(o)}
+              ${renderOrderPaymentsList(o, farmerUser || getActiveUser())}
               <div class="flex flex-wrap gap-2 pt-1">
                 ${
-                  o.status === "PENDING"
+                  ["PAYMENT_PENDING", "PENDING"].includes(o.status)
                     ? `
-                      <button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'ACCEPTED')" class="px-3.5 py-2 rounded-xl bg-[#168447] disabled:opacity-50 text-white text-xs font-bold">✓ অর্ডার গ্রহণ করুন</button>
+                      ${canApproveZeroAdvance ? `<button ${!active ? "disabled" : ""} onclick="window.kbApp.farmerApproveZeroAdvanceOrder('${escapeHtml(o.id)}')" class="px-3.5 py-2 rounded-xl bg-[#168447] disabled:opacity-50 text-white text-xs font-bold">✓ শূন্য-অগ্রিম অর্ডার অনুমোদন (Confirmed)</button>` : ""}
                       <button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'REJECTED')" class="px-3.5 py-2 rounded-xl bg-red-600 disabled:opacity-50 text-white text-xs font-bold">✕ প্রত্যাখ্যান করুন</button>
                     `
                     : ""
                 }
-                ${
-                  canConfirmMoney
-                    ? `<button onclick="window.kbApp.farmerConfirmPaymentReceived('${escapeHtml(o.id)}')" class="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold">💰 টাকা বুঝে পেয়েছি ও অনুমোদন</button>`
-                    : ""
-                }
-                ${o.status === "ACCEPTED" ? `<button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'PROCESSING')" class="px-3.5 py-2 rounded-xl bg-sky-600 disabled:opacity-50 text-white text-xs font-bold">প্রস্তুত হচ্ছে</button>` : ""}
+                ${o.status === "CONFIRMED" ? `<button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'PROCESSING')" class="px-3.5 py-2 rounded-xl bg-sky-600 disabled:opacity-50 text-white text-xs font-bold">প্রস্তুত হচ্ছে</button>` : ""}
                 ${o.status === "PROCESSING" ? `<button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'READY_FOR_PICKUP')" class="px-3.5 py-2 rounded-xl bg-teal-600 disabled:opacity-50 text-white text-xs font-bold">সংগ্রহের জন্য প্রস্তুত</button>` : ""}
                 ${["READY_FOR_PICKUP", "READY"].includes(o.status) ? `<button ${!active ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'SHIPPED')" class="px-3.5 py-2 rounded-xl bg-indigo-600 disabled:opacity-50 text-white text-xs font-bold">পথে পাঠানো হয়েছে</button>` : ""}
                 ${
-                  ["READY_FOR_PICKUP", "READY", "SHIPPED", "DELIVERED", "CONFIRMED"].includes(o.status)
-                    ? `<button ${!active || !farmerApproved ? "disabled" : ""} title="${farmerApproved ? "" : "আপনার 'টাকা বুঝে পেয়েছি' ও পেমেন্ট অনুমোদন প্রয়োজন"}" onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-2 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ সম্পন্ন হয়েছে</button>`
+                  ["CONFIRMED", "PROCESSING", "READY_FOR_PICKUP", "READY", "SHIPPED", "DELIVERED"].includes(o.status)
+                    ? `<button ${!active || !farmerApproved ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-2 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ ডেলিভারি ও সম্পূর্ণ সম্পন্ন</button>`
                     : ""
                 }
               </div>
-              ${
-                !farmerApproved && !["PENDING", "CANCELLED", "REJECTED", "COMPLETED"].includes(o.status)
-                  ? `<p class="text-[11px] text-amber-800 bg-amber-50 rounded-xl px-3 py-1.5 border border-amber-200">🔒 নিরাপত্তা নিয়ম: শুধুমাত্র আপনার "টাকা বুঝে পেয়েছি" নিশ্চিতকরণ ও পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed / Completed হবে (অ্যাডমিনের অনুমোদন লাগবে না)।</p>`
-                  : ""
-              }
+              <p class="text-[11px] text-amber-800 bg-amber-50 rounded-xl px-3 py-1.5 border border-amber-200">🔒 আপনার প্রকৃত bKash/Nagad/Rocket অ্যাকাউন্টে টাকা দেখে তবেই 'টাকা পেয়েছি (নিশ্চিত)' বাটনে চাপ দিন — কেবল স্ক্রিনশট বা ক্রেতার তথ্যে অর্ডার Confirmed হবে না।</p>
             </div>
           `;
         })
@@ -3930,7 +4436,7 @@ function renderAddProductTab(user, active) {
         <div class="grid sm:grid-cols-3 gap-3 items-center bg-[#F7FAF7] p-3.5 rounded-2xl text-xs font-semibold">
           <label class="flex items-center gap-2"><input type="checkbox" name="supportsFarmPickup" checked ${!active ? "disabled" : ""} /> খামার থেকে সংগ্রহ</label>
           <label class="flex items-center gap-2"><input type="checkbox" name="supportsDirectDelivery" checked ${!active ? "disabled" : ""} /> সরাসরি ডেলিভারি</label>
-          <label class="flex items-center gap-2"><input type="checkbox" name="isWholesale" ${!active ? "disabled" : ""} /> পাইকারি বিক্রি</label>
+          <span class="px-3 py-1.5 rounded-xl bg-amber-100 text-amber-900 font-bold text-center">📦 পাইকারি মাত্র (১ মণ = ${MON_TO_KG} কেজি)</span>
         </div>
 
         <div class="grid sm:grid-cols-2 gap-3">
@@ -3958,8 +4464,8 @@ function renderCartPage() {
     return `
       <div class="bg-white rounded-3xl p-12 text-center border border-emerald-100 max-w-lg mx-auto space-y-3">
         <div class="text-5xl">🛒</div>
-        <h1 class="text-xl font-bold text-[#105B34]">আপনার কার্ট খালি</h1>
-        <p class="text-sm text-gray-600">তাজা কৃষিপণ্য মণ হিসেবে কার্টে যোগ করে সরাসরি কৃষকের কাছ থেকে অর্ডার করুন।</p>
+        <h1 class="text-xl font-bold text-[#105B34]">আপনার পাইকারি কার্ট খালি</h1>
+        <p class="text-sm text-gray-600">তাজা কৃষিপণ্য মণ হিসেবে কার্টে যোগ করে সরাসরি কৃষকের কাছ থেকে পাইকারি অর্ডার করুন।</p>
         <button onclick="window.kbApp.navigate('browse')" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">ফসল খুঁজুন</button>
       </div>
     `;
@@ -3970,13 +4476,34 @@ function renderCartPage() {
   const totalKg = totalMon * MON_TO_KG;
   const active = user && isMarketplaceActive(user);
 
+  // Per-farmer isolated payment channels: ONLY farmers present in the buyer's cart!
+  const farmerIdsInCart = Array.from(new Set(state.cart.map((c) => c.farmerId)));
+  const farmerChannelsHtml = farmerIdsInCart
+    .map((fId) => {
+      const fName = state.cart.find((c) => c.farmerId === fId)?.farmerName || "কৃষক";
+      const fps = getFarmerPaymentSettings(fId);
+      const lines = [
+        fps.bKashNumber ? `bKash: <strong>${escapeHtml(fps.bKashNumber)}</strong>` : "",
+        fps.nagadNumber ? `Nagad: <strong>${escapeHtml(fps.nagadNumber)}</strong>` : "",
+        fps.rocketNumber ? `Rocket: <strong>${escapeHtml(fps.rocketNumber)}</strong>` : "",
+        fps.bankAccountInfo ? `Bank: <strong>${escapeHtml(fps.bankAccountInfo)}</strong>` : ""
+      ].filter(Boolean);
+      return `
+        <div class="p-3 rounded-2xl bg-[#EAF7EF] border border-emerald-200 text-xs space-y-1">
+          <div class="font-bold text-[#105B34]">👨‍🌾 ${escapeHtml(fName)} — সরাসরি পেমেন্ট নম্বর</div>
+          ${lines.length ? `<div class="text-gray-800 space-y-0.5">${lines.map((l) => `<div>• ${l}</div>`).join("")}</div>` : `<div class="text-amber-800">এই কৃষক এখনো ডিজিটাল নম্বর সেট করেননি (শূন্য অগ্রিম ৳০ বা সরাসরি নগদ দিয়ে অর্ডার করুন)</div>`}
+        </div>
+      `;
+    })
+    .join("");
+
   return `
     <div class="space-y-4">
       ${user ? renderAccountStatusBanner(user) : ""}
       <div class="grid lg:grid-cols-3 gap-6">
         <div class="lg:col-span-2 space-y-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <h1 class="text-2xl font-bold text-[#105B34]">🛒 আপনার শপিং কার্ট (${state.cart.length}টি আইটেম)</h1>
+            <h1 class="text-2xl font-bold text-[#105B34]">🛒 পাইকারি শপিং কার্ট (${state.cart.length}টি আইটেম)</h1>
             <span class="px-3 py-1 rounded-full bg-[#EAF7EF] text-[#105B34] text-xs font-bold">মোট: ${formatQty(totalMon)} মণ (${formatQty(totalKg)} কেজি)</span>
           </div>
           ${state.cart
@@ -3985,7 +4512,7 @@ function renderCartPage() {
               return `
                 <div class="bg-white rounded-2xl p-4 border border-emerald-100 flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h3 class="font-bold text-sm text-[#202820]">${escapeHtml(c.productNameBn)}</h3>
+                    <h3 class="font-bold text-sm text-[#202820]">${escapeHtml(c.productNameBn)} <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold">পাইকারি</span></h3>
                     <p class="text-xs text-gray-500">কৃষক: ${escapeHtml(c.farmerName)} • ${formatBdt(c.pricePerUnit)} / মণ (${formatQty(c.quantity)} মণ = ${formatQty(kg)} কেজি)</p>
                   </div>
                   <div class="flex items-center gap-2">
@@ -4001,7 +4528,8 @@ function renderCartPage() {
         </div>
 
         <div class="bg-white rounded-3xl p-6 border border-emerald-100 shadow-sm h-fit space-y-4">
-          <h2 class="text-lg font-bold text-[#105B34]">চেকআউট ও অর্ডার জমা</h2>
+          <h2 class="text-lg font-bold text-[#105B34]">পাইকারি চেকআউট ও সরাসরি অগ্রিম পেমেন্ট</h2>
+          ${farmerChannelsHtml}
           <form onsubmit="window.kbApp.handleCheckoutSubmit(event)" class="space-y-3 text-sm">
             <div>
               <label class="text-xs font-bold block mb-1">সংগ্রহ / ডেলিভারি পদ্ধতি</label>
@@ -4012,35 +4540,59 @@ function renderCartPage() {
             </div>
             <div>
               <div class="flex items-center justify-between mb-1">
-                <label class="text-xs font-bold">ডেলিভারি ঠিকানা (হোম ডেলিভারির ক্ষেত্রে)</label>
+                <label class="text-xs font-bold">ডেলিভারি ঠিকানা</label>
                 <div class="flex gap-1">
-                  <button type="button" onclick="window.kbApp.detectBrowserLocation('checkout')" class="px-2 py-0.5 rounded-lg bg-[#EAF7EF] text-[#105B34] text-[11px] font-bold">📍 GPS অটো</button>
+                  <button type="button" onclick="window.kbApp.detectBrowserLocation('checkout')" class="px-2 py-0.5 rounded-lg bg-[#EAF7EF] text-[#105B34] text-[11px] font-bold">📍 GPS</button>
                   <button type="button" onclick="window.kbApp.openLocationMapModal('checkout')" class="px-2 py-0.5 rounded-lg border border-emerald-200 text-[#105B34] text-[11px] font-bold">🗺️ ম্যাপ</button>
                 </div>
               </div>
               <input id="checkout-delivery-address" name="deliveryAddress" value="${escapeHtml(user ? `${user.village ? user.village + ", " : ""}${user.unionName ? user.unionName + ", " : ""}${user.upazila}, ${user.district}` : "")}" placeholder="বাড়ি, গ্রাম, ইউনিয়ন, উপজেলা, জেলা" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200" />
             </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">সম্ভাব্য পেমেন্ট মাধ্যম</label>
-              <select name="paymentMethod" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 bg-white">
-                <option value="CASH_ON_PICKUP">নগদ (খামারে সংগ্রহ / ক্যাশ অন ডেলিভারি)</option>
-                <option value="BKASH">বিকাশ (bKash)</option>
-                <option value="NAGAD">নগদ (Nagad)</option>
-                <option value="BANK_TRANSFER">ব্যাংক ট্রান্সফার</option>
-              </select>
-            </div>
-            <div class="border-t border-emerald-100 pt-3 space-y-1">
-              <div class="flex justify-between text-xs text-gray-600">
-                <span>মোট পরিমাণ</span>
-                <span>${formatQty(totalMon)} মণ (${formatQty(totalKg)} কেজি)</span>
-              </div>
-              <div class="flex justify-between font-bold text-base">
-                <span>মোট পণ্যের দাম</span>
+
+            <div class="border-t border-emerald-100 pt-3 space-y-1.5">
+              <div class="flex justify-between font-bold text-sm">
+                <span>মোট পাইকারি অর্ডার মূল্য</span>
                 <span class="text-[#168447]">${formatBdt(productTotal)}</span>
               </div>
+              <div>
+                <label class="text-xs font-bold block mb-1">Advance Payment Amount (অগ্রিম ৳০ – ${formatBdt(productTotal)})</label>
+                <input id="checkout-advance-input" name="advanceAmount" type="number" min="0" max="${productTotal}" step="1" value="0"
+                  oninput="window.kbApp.updateCartAdvancePreview(${productTotal})"
+                  class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 font-bold text-[#105B34]" />
+              </div>
+              <div class="flex justify-between text-xs font-bold bg-amber-50 px-3 py-2 rounded-xl border border-amber-200">
+                <span>অবশিষ্ট বকেয়া (Remaining Due)</span>
+                <span id="checkout-remaining-due" class="text-amber-900">${formatBdt(productTotal)}</span>
+              </div>
             </div>
-            <p class="text-[11px] text-gray-500">১. অর্ডার জমার পর কৃষক গ্রহণ করলে পেমেন্ট ও রসিদ জমা দিন। ২. শুধুমাত্র কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ ও পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed হবে (অ্যাডমিন অনুমোদন লাগবে না)।</p>
-            <button type="submit" ${user && !active ? "disabled" : ""} class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] disabled:opacity-50 text-white font-bold">অর্ডার জমা দিন</button>
+
+            <div>
+              <label class="text-xs font-bold block mb-1">পেমেন্ট মাধ্যম</label>
+              <select name="paymentMethod" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 bg-white">
+                <option value="BKASH">bKash (বিকাশ)</option>
+                <option value="NAGAD">Nagad (নগদ)</option>
+                <option value="ROCKET">Rocket (রকেট)</option>
+                <option value="BANK_TRANSFER">ব্যাংক ট্রান্সফার</option>
+                <option value="CASH_ON_PICKUP">খামারে সংগ্রহ / নগদ (৳০ অগ্রিম)</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-xs font-bold block mb-1">প্রেরক মোবাইল</label>
+                <input name="senderNumber" value="${escapeHtml(user?.phone || "")}" placeholder="017XXXXXXXX" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              </div>
+              <div>
+                <label class="text-xs font-bold block mb-1">Transaction ID</label>
+                <input name="transactionRef" placeholder="অগ্রিম > ৳০ হলে দিন" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs uppercase" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">পেমেন্ট রেফারেন্স নোট (ঐচ্ছিক)</label>
+              <input name="referenceNote" placeholder="যেমন: অগ্রিম অংশ বা ক্রেতার নোট" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+
+            <p class="text-[11px] text-gray-500">টাকা সরাসরি কৃষকের নিজ অ্যাকাউন্টে পাঠান। প্ল্যাটফর্ম কখনোই টাকা নেয় বা কেটে রাখে না। কৃষক নিজ ব্যালেন্স দেখে নিশ্চিত করলেই অগ্রিম যোগ ও অর্ডার Confirmed হবে।</p>
+            <button type="submit" ${user && !active ? "disabled" : ""} class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] disabled:opacity-50 text-white font-bold">পাইকারি অর্ডার জমা দিন</button>
           </form>
         </div>
       </div>
@@ -4071,7 +4623,7 @@ function renderOrdersPage() {
             user.role === "FARMER"
               ? `👨‍🌾 আমার অর্ডার ও সরবরাহ (${myOrders.length})`
               : user.role === "BUYER"
-              ? `🛍️ আমার ক্রয় অর্ডার ও পেমেন্ট (${myOrders.length})`
+              ? `🛍️ আমার পাইকারি অর্ডার ও পেমেন্ট (${myOrders.length})`
               : `🛡️ সকল প্ল্যাটফর্ম অর্ডার (${myOrders.length})`
           }</h1>
           ${user.role !== "ADMIN" ? `<span class="px-2.5 py-1 rounded-full text-xs font-bold ${stMeta.color}">${stMeta.labelBn}</span>` : ""}
@@ -4087,23 +4639,23 @@ function renderOrdersPage() {
           ? `<div class="bg-white rounded-3xl p-10 text-center border border-dashed border-emerald-200">কোনো অর্ডার পাওয়া যায়নি।</div>`
           : myOrders
               .map((o) => {
-                const meta = ORDER_STATUS_META[o.status] || ORDER_STATUS_META.PENDING;
+                const meta = ORDER_STATUS_META[o.status] || ORDER_STATUS_META.PAYMENT_PENDING;
                 const isBuyer = o.buyerId === user.id;
                 const isFarmer = o.farmerId === user.id;
-                const canCancel = isBuyer && o.status === "PENDING";
-                const canSubmitPayment =
+                const remainingDue = Math.max(0, Number(o.grandTotal || 0) - Number(o.verifiedAdvanceTotal || 0));
+                const canCancel = isBuyer && ["PENDING", "PAYMENT_PENDING"].includes(o.status);
+                const canSubmitPartialPayment =
                   active &&
                   isBuyer &&
-                  o.status !== "PENDING" &&
-                  !["CANCELLED", "REJECTED", "COMPLETED"].includes(o.status) &&
-                  !o.farmerPaymentConfirmed;
-                const canFarmerConfirmMoney =
+                  remainingDue > 0 &&
+                  !["CANCELLED", "REJECTED", "COMPLETED"].includes(o.status);
+                const farmerApproved = Boolean(o.farmerPaymentConfirmed || o.paymentStatus === "ZERO_ADVANCE_APPROVED");
+                const canApproveZeroAdvance =
                   active &&
                   isFarmer &&
-                  !o.farmerPaymentConfirmed &&
-                  o.status !== "PENDING" &&
-                  !["CANCELLED", "REJECTED"].includes(o.status);
-                const farmerApproved = Boolean(o.farmerPaymentConfirmed);
+                  ["PAYMENT_PENDING", "PENDING"].includes(o.status) &&
+                  Number(o.advanceAmountRequested || 0) <= 0 &&
+                  !state.orderPayments.some((p) => p.orderId === o.id && p.status === "PENDING_VERIFICATION");
                 const canBuyerComplete =
                   active &&
                   isBuyer &&
@@ -4124,34 +4676,30 @@ function renderOrdersPage() {
                     <div class="text-xs text-gray-600 grid sm:grid-cols-3 gap-2">
                       <div>কৃষক: <strong>${escapeHtml(o.farmerName)}</strong> (${active ? escapeHtml(o.farmerPhone || "-") : "🔒 সক্রিয় হলে দৃশ্যমান"})</div>
                       <div>এলাকা: ${escapeHtml(o.upazila)}, ${escapeHtml(o.district)}</div>
-                      <div>মোট: <strong class="text-[#168447]">${formatBdt(o.grandTotal)}</strong> (${escapeHtml(o.paymentMethod)})</div>
+                      <div>মোট পাইকারি: <strong class="text-[#168447]">${formatBdt(o.grandTotal)}</strong> (${escapeHtml(o.paymentMethod)})</div>
                     </div>
                     ${renderOrderSecuritySteps(o)}
                     ${renderOrderPaymentBadgeRow(o)}
+                    ${renderOrderPaymentsList(o, user)}
                     <div class="flex flex-wrap gap-2 pt-1">
                       ${
-                        isBuyer && o.status === "PENDING"
-                          ? `<span class="px-3 py-1.5 rounded-xl bg-amber-50 text-amber-900 border border-amber-200 text-xs font-semibold">⏳ কৃষক অর্ডারটি Accept করলে পেমেন্ট জমা দিতে পারবেন।</span>`
+                        canSubmitPartialPayment
+                          ? `<button onclick="window.kbApp.openOrderPaymentModal('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">💳 অগ্রিম / আংশিক পেমেন্ট জমা (${formatBdt(remainingDue)} বাকি)</button>`
                           : ""
                       }
                       ${
-                        canSubmitPayment
-                          ? `<button onclick="window.kbApp.openOrderPaymentModal('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">💳 ${o.paymentStatus === "SUBMITTED" ? "পেমেন্ট তথ্য আপডেট করুন" : "পেমেন্ট ও রসিদ জমা দিন"}</button>`
-                          : ""
-                      }
-                      ${
-                        canFarmerConfirmMoney
-                          ? `<button onclick="window.kbApp.farmerConfirmPaymentReceived('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl bg-amber-600 text-white text-xs font-bold">💰 টাকা বুঝে পেয়েছি ও অনুমোদন</button>`
+                        canApproveZeroAdvance
+                          ? `<button onclick="window.kbApp.farmerApproveZeroAdvanceOrder('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">✓ শূন্য-অগ্রিম অর্ডার অনুমোদন</button>`
                           : ""
                       }
                       ${
                         canBuyerComplete
-                          ? `<button ${!farmerApproved ? "disabled" : ""} title="${farmerApproved ? "" : "কৃষকের টাকা প্রাপ্তি ও পেমেন্ট অনুমোদন প্রয়োজন"}" onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-1.5 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ ডেলিভারি সম্পন্ন</button>`
+                          ? `<button ${!farmerApproved ? "disabled" : ""} onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'COMPLETED')" class="px-3.5 py-1.5 rounded-xl bg-emerald-700 disabled:opacity-40 text-white text-xs font-bold">✓ ডেলিভারি সম্পন্ন</button>`
                           : ""
                       }
-                      ${canCancel ? `<button onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'CANCELLED')" class="px-3 py-1.5 rounded-xl bg-red-50 text-red-700 border border-red-200 text-xs font-bold">অর্ডার বাতিল করুন</button>` : ""}
-                      ${canReview ? `<button onclick="window.kbApp.openReviewModal('${escapeHtml(o.id)}')" class="px-3 py-1.5 rounded-xl bg-amber-50 text-amber-800 border border-amber-200 text-xs font-bold">★ রিভিউ দিন</button>` : ""}
-                      <button onclick="window.kbApp.openComplaintModal('${escapeHtml(o.id)}')" class="px-3 py-1.5 rounded-xl border border-gray-200 text-gray-700 text-xs font-semibold">অভিযোগ জানান</button>
+                      ${canCancel ? `<button onclick="window.kbApp.updateOrderStatus('${escapeHtml(o.id)}', 'CANCELLED')" class="px-3.5 py-1.5 rounded-xl bg-red-50 text-red-700 border border-red-200 text-xs font-bold">অর্ডার বাতিল করুন</button>` : ""}
+                      ${canReview ? `<button onclick="window.kbApp.openReviewModal('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl bg-amber-50 text-amber-800 border border-amber-200 text-xs font-bold">★ রিভিউ দিন</button>` : ""}
+                      <button onclick="window.kbApp.openComplaintModal('${escapeHtml(o.id)}')" class="px-3.5 py-1.5 rounded-xl border border-gray-200 text-gray-700 text-xs font-semibold">অভিযোগ জানান</button>
                     </div>
                   </div>
                 `;
@@ -4547,19 +5095,19 @@ function renderAdminDashboardPage() {
     const oFilter = state.adminOrderFilter || "ALL";
     const filteredOrders =
       oFilter === "PAYMENT_VERIFY_REQ"
-        ? state.orders.filter((o) => !o.farmerPaymentConfirmed && !["PENDING", "CANCELLED", "REJECTED", "COMPLETED"].includes(o.status))
+        ? state.orders.filter((o) => state.orderPayments.some((p) => p.orderId === o.id && p.status === "PENDING_VERIFICATION"))
         : state.orders;
 
     bodyHtml = `
       <div class="space-y-4">
         <div class="bg-white rounded-2xl p-4 border border-emerald-100 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 class="font-bold text-sm text-[#105B34]">অর্ডার ও পেমেন্ট নিরাপত্তা যাচাই</h3>
-            <p class="text-xs text-gray-600">শুধুমাত্র কৃষকের টাকা প্রাপ্তি নিশ্চিতকরণ এবং কৃষকের পেমেন্ট অনুমোদনেই অর্ডার চূড়ান্ত Confirmed হবে — অ্যাডমিন অনুমোদনের প্রয়োজন নেই।</p>
+            <h3 class="font-bold text-sm text-[#105B34]">পাইকারি অর্ডার ও সরাসরি পেমেন্ট অডিট লগ (Read-Only)</h3>
+            <p class="text-xs text-gray-600">ক্রেতা সরাসরি কৃষককে অগ্রিম টাকা দেন — প্ল্যাটফর্ম/অ্যাডমিন কখনোই অর্ডারের টাকা গ্রহণ বা নিশ্চিত করেন না। শুধুমাত্র সংশ্লিষ্ট কৃষক টাকা দেখে নিশ্চিত করেন।</p>
           </div>
           <div class="flex gap-2">
             <button onclick="window.kbApp.setAdminOrderFilter('ALL')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${oFilter === "ALL" ? "bg-[#105B34] text-white" : "bg-[#EAF7EF] text-[#105B34]"}">সব অর্ডার (${state.orders.length})</button>
-            <button onclick="window.kbApp.setAdminOrderFilter('PAYMENT_VERIFY_REQ')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${oFilter === "PAYMENT_VERIFY_REQ" ? "bg-[#105B34] text-white" : "bg-sky-50 text-sky-900 border border-sky-200"}">কৃষকের অনুমোদন বাকি (${orderPayVerifyCount})</button>
+            <button onclick="window.kbApp.setAdminOrderFilter('PAYMENT_VERIFY_REQ')" class="px-3 py-1.5 rounded-xl text-xs font-bold ${oFilter === "PAYMENT_VERIFY_REQ" ? "bg-[#105B34] text-white" : "bg-sky-50 text-sky-900 border border-sky-200"}">কৃষক যাচাই বাকি</button>
           </div>
         </div>
 
@@ -4569,7 +5117,7 @@ function renderAdminDashboardPage() {
               ? `<div class="bg-white rounded-2xl p-8 text-center text-sm text-gray-500">এই ফিল্টারে কোনো অর্ডার নেই।</div>`
               : filteredOrders
                   .map((o) => {
-                    const meta = ORDER_STATUS_META[o.status] || ORDER_STATUS_META.PENDING;
+                    const meta = ORDER_STATUS_META[o.status] || ORDER_STATUS_META.PAYMENT_PENDING;
                     return `
                       <div class="bg-white rounded-2xl p-4 border border-emerald-100 space-y-2.5 text-xs">
                         <div class="flex flex-wrap justify-between items-center gap-2">
@@ -4586,6 +5134,7 @@ function renderAdminDashboardPage() {
                         </div>
                         ${renderOrderSecuritySteps(o)}
                         ${renderOrderPaymentBadgeRow(o)}
+                        ${renderOrderPaymentsList(o, user)}
                       </div>
                     `;
                   })
@@ -4622,21 +5171,96 @@ function renderAdminDashboardPage() {
       <form onsubmit="window.kbApp.handleAdminSaveAdConfig(event)" class="space-y-5">
         <div class="bg-emerald-50 border border-emerald-200 rounded-3xl p-5 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 class="text-lg font-bold text-[#105B34]">💰 ওয়েবসাইট ও মোবাইল অ্যাপ — সব অ্যাড নেটওয়ার্ক মনিটাইজেশন</h3>
-            <p class="text-xs text-gray-700">এখান থেকে Google AdSense, Adsterra, Monetag, Ezoic/Custom HTML, Direct Sponsor এবং Android AdMob একসাথে নিয়ন্ত্রণ করুন (Firebase RTDB-তে তাৎক্ষণিক সেভ হবে)।</p>
+            <h3 class="text-lg font-bold text-[#105B34]">💰 Unity LevelPlay (৮টি নেটওয়ার্ক ও ৫ ফরম্যাট) ও ওয়েব মনিটাইজেশন</h3>
+            <p class="text-xs text-gray-700">Android অ্যাপ থেকে AdMob সম্পূর্ণভাবে অপসারণ করা হয়েছে। Unity Ads সরাসরি সক্রিয় করা যায় এবং বাকি ৭টি নেটওয়ার্কের জন্য নিজস্ব পাবলিশার অ্যাকাউন্ট ও অনুমোদন প্রয়োজন। (Firebase RTDB-তে তাৎক্ষণিক সিঙ্ক হবে)</p>
           </div>
-          <div class="flex flex-wrap gap-4 text-xs font-bold">
-            <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="adsEnabled" ${cfg.adsEnabled ? "checked" : ""} /> সব বিজ্ঞাপন চালু</label>
-            <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="showAdsLabel" ${cfg.showAdsLabel ? "checked" : ""} /> Sponsored ব্যাজ দেখান</label>
+          <div class="flex flex-wrap gap-3 text-xs font-bold">
+            <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="adsEnabled" ${cfg.adsEnabled ? "checked" : ""} /> মাস্টার বিজ্ঞাপন চালু</label>
+            <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="showAdsLabel" ${cfg.showAdsLabel ? "checked" : ""} /> Sponsored ব্যাজ</label>
+            <label class="flex items-center gap-2 bg-white px-3 py-2 rounded-xl border border-amber-200"><input type="checkbox" name="adTestMode" ${cfg.adTestMode ? "checked" : ""} /> টেস্ট মোড</label>
           </div>
         </div>
 
         <div class="grid md:grid-cols-2 gap-5">
-          <!-- Google AdSense -->
+          <!-- Unity LevelPlay Mediation & 5 Ad Formats -->
           <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
             <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">1️⃣ Google AdSense (Website)</h4>
-              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="adsenseEnabled" ${cfg.adsenseEnabled ? "checked" : ""} /> সক্রিয়</label>
+              <h4 class="font-bold text-[#105B34]">1️⃣ Android Mediation — Unity LevelPlay ও ৫ ফরম্যাট</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="androidAdsEnabled" ${cfg.androidAdsEnabled ? "checked" : ""} /> Android বিজ্ঞাপন চালু</label>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">Unity LevelPlay App Key *</label>
+              <input name="mediationAppKey" value="${escapeHtml(cfg.mediationAppKey || "")}" placeholder="যেমন: 85460dcd (LevelPlay Dashboard)" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div class="grid grid-cols-2 gap-2.5 pt-1 text-xs">
+              <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="bannerEnabled" ${cfg.bannerEnabled !== false ? "checked" : ""} /> Adaptive Banner</label>
+                <input name="androidBannerId" value="${escapeHtml(cfg.androidBannerId || "")}" placeholder="Banner Ad Unit ID" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+              </div>
+              <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="nativeEnabled" ${cfg.nativeEnabled !== false ? "checked" : ""} /> Native Ad</label>
+                <input name="androidNativePlacement" value="${escapeHtml(cfg.androidNativePlacement || "")}" placeholder="Native Placement Name" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+              </div>
+              <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="interstitialEnabled" ${cfg.interstitialEnabled !== false ? "checked" : ""} /> Interstitial</label>
+                <input name="androidInterstitialId" value="${escapeHtml(cfg.androidInterstitialId || "")}" placeholder="Interstitial Ad Unit ID" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+              </div>
+              <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="rewardedEnabled" ${cfg.rewardedEnabled ? "checked" : ""} /> Rewarded Video</label>
+                <input name="androidRewardedId" value="${escapeHtml(cfg.androidRewardedId || "")}" placeholder="Rewarded Ad Unit ID" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+              </div>
+            </div>
+            <div class="p-2.5 rounded-xl bg-[#F7FAF7] border border-emerald-100 space-y-1 text-xs">
+              <label class="font-bold flex items-center gap-1.5"><input type="checkbox" name="appOpenEnabled" ${cfg.appOpenEnabled ? "checked" : ""} /> App Open Ad</label>
+              <input name="androidAppOpenId" value="${escapeHtml(cfg.androidAppOpenId || "")}" placeholder="App Open Ad Unit / Placement" class="w-full px-2.5 py-1.5 rounded-lg border border-emerald-200 text-xs" />
+            </div>
+          </div>
+
+          <!-- 8 Individual Android Mediation Networks -->
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-2.5">
+            <h4 class="font-bold text-[#105B34]">2️⃣ ৮টি মিডিয়েশন নেটওয়ার্ক নিয়ন্ত্রণ (AdMob-মুক্ত)</h4>
+            <p class="text-[11px] text-amber-800 bg-amber-50 p-2 rounded-xl border border-amber-200">ℹ️ শুধু <strong>Unity Ads</strong> সরাসরি প্রস্তুত; বাকি ৭টির (AppLovin MAX, Meta, Mintegral, Pangle, InMobi, Liftoff, DT Exchange) জন্য নিজস্ব পাবলিশার অ্যাকাউন্ট ও অনুমোদন আবশ্যক।</p>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="unityAdsEnabled" ${cfg.unityAdsEnabled !== false ? "checked" : ""} /> Unity Ads (প্রস্তুত)</label>
+                <input name="unityGameId" value="${escapeHtml(cfg.unityGameId || "")}" placeholder="Unity Game ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="appLovinEnabled" ${cfg.appLovinEnabled ? "checked" : ""} /> AppLovin MAX</label>
+                <input name="appLovinSdkKey" value="${escapeHtml(cfg.appLovinSdkKey || "")}" placeholder="AppLovin SDK Key" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="metaAudienceEnabled" ${cfg.metaAudienceEnabled ? "checked" : ""} /> Meta Audience</label>
+                <input name="metaPlacementId" value="${escapeHtml(cfg.metaPlacementId || "")}" placeholder="Meta Placement/App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="mintegralEnabled" ${cfg.mintegralEnabled ? "checked" : ""} /> Mintegral</label>
+                <input name="mintegralAppId" value="${escapeHtml(cfg.mintegralAppId || "")}" placeholder="Mintegral App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="pangleEnabled" ${cfg.pangleEnabled ? "checked" : ""} /> Pangle</label>
+                <input name="pangleAppId" value="${escapeHtml(cfg.pangleAppId || "")}" placeholder="Pangle App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="inMobiEnabled" ${cfg.inMobiEnabled ? "checked" : ""} /> InMobi</label>
+                <input name="inMobiAccountId" value="${escapeHtml(cfg.inMobiAccountId || "")}" placeholder="InMobi Account ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="liftoffEnabled" ${cfg.liftoffEnabled ? "checked" : ""} /> Liftoff Monetize</label>
+                <input name="liftoffAppId" value="${escapeHtml(cfg.liftoffAppId || "")}" placeholder="Liftoff App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+              <div class="p-2 rounded-xl border border-emerald-100 space-y-1">
+                <label class="font-bold flex items-center gap-1"><input type="checkbox" name="dtExchangeEnabled" ${cfg.dtExchangeEnabled ? "checked" : ""} /> DT Exchange</label>
+                <input name="dtExchangeAppId" value="${escapeHtml(cfg.dtExchangeAppId || "")}" placeholder="DT Exchange App ID" class="w-full px-2 py-1 rounded-lg border border-emerald-200" />
+              </div>
+            </div>
+          </div>
+
+          <!-- Google AdSense & Hybrid Web Fallback -->
+          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="font-bold text-[#105B34]">3️⃣ Google AdSense ও মোবাইল ওয়েব ব্যাকআপ</h4>
+              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="adsenseEnabled" ${cfg.adsenseEnabled ? "checked" : ""} /> AdSense সক্রিয়</label>
             </div>
             <div>
               <label class="text-xs font-bold block mb-1">Publisher Client ID (ca-pub-...)</label>
@@ -4647,112 +5271,75 @@ function renderAdminDashboardPage() {
               <div><label class="text-[11px] font-bold block mb-1">Feed Slot</label><input name="adsenseFeedSlot" value="${escapeHtml(cfg.adsenseFeedSlot)}" placeholder="2345678901" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
               <div><label class="text-[11px] font-bold block mb-1">Footer Slot</label><input name="adsenseFooterSlot" value="${escapeHtml(cfg.adsenseFooterSlot)}" placeholder="3456789012" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
             </div>
-          </div>
-
-          <!-- Android Google AdMob + Multi-Network Mobile Controls -->
-          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
-            <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">2️⃣ মোবাইল অ্যাপ মনিটাইজেশন (AdMob + সব নেটওয়ার্ক)</h4>
-              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="androidAdsEnabled" ${cfg.androidAdsEnabled ? "checked" : ""} /> AdMob সক্রিয়</label>
-            </div>
-            <label class="text-xs font-bold flex items-center gap-1.5 bg-[#EAF7EF] px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="mobileWebAdsEnabled" ${cfg.mobileWebAdsEnabled !== false ? "checked" : ""} /> মোবাইলে Multi-Network Ads (Adsterra/Monetag/AdSense/Custom) চালু</label>
+            <label class="text-xs font-bold flex items-center gap-1.5 bg-[#EAF7EF] px-3 py-2 rounded-xl border border-emerald-200"><input type="checkbox" name="mobileWebAdsEnabled" ${cfg.mobileWebAdsEnabled !== false ? "checked" : ""} /> মোবাইলে Hybrid Web Fallback চালু</label>
             <div>
-              <label class="text-xs font-bold block mb-1">মোবাইল অগ্রাধিকার নেটওয়ার্ক</label>
+              <label class="text-xs font-bold block mb-1">অগ্রাধিকার নেটওয়ার্ক</label>
               <select name="mobileAdNetworkPriority" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs bg-white">
-                <option value="ALL" ${(cfg.mobileAdNetworkPriority || "ALL") === "ALL" ? "selected" : ""}>সব নেটওয়ার্ক (All Networks)</option>
-                <option value="ADMOB" ${cfg.mobileAdNetworkPriority === "ADMOB" ? "selected" : ""}>Google AdMob / Mediation</option>
+                <option value="ALL" ${(cfg.mobileAdNetworkPriority || "ALL") === "ALL" ? "selected" : ""}>সব সক্রিয় নেটওয়ার্ক (Unity LevelPlay + Web)</option>
+                <option value="UNITY_LEVELPLAY" ${cfg.mobileAdNetworkPriority === "UNITY_LEVELPLAY" ? "selected" : ""}>Unity LevelPlay Mediation</option>
                 <option value="ADSTERRA" ${cfg.mobileAdNetworkPriority === "ADSTERRA" ? "selected" : ""}>Adsterra</option>
                 <option value="MONETAG" ${cfg.mobileAdNetworkPriority === "MONETAG" ? "selected" : ""}>Monetag / PropellerAds</option>
-                <option value="ADSENSE" ${cfg.mobileAdNetworkPriority === "ADSENSE" ? "selected" : ""}>Google AdSense</option>
-                <option value="CUSTOM" ${cfg.mobileAdNetworkPriority === "CUSTOM" ? "selected" : ""}>Unity / AppLovin / Start.io / Custom HTML</option>
-                <option value="SPONSOR" ${cfg.mobileAdNetworkPriority === "SPONSOR" ? "selected" : ""}>শুধুমাত্র সরাসরি স্পন্সর</option>
+                <option value="ADSENSE" ${cfg.mobileAdNetworkPriority === "ADSENSE" ? "selected" : ""}>Google AdSense (Web)</option>
+                <option value="CUSTOM" ${cfg.mobileAdNetworkPriority === "CUSTOM" ? "selected" : ""}>Custom HTML</option>
+                <option value="SPONSOR" ${cfg.mobileAdNetworkPriority === "SPONSOR" ? "selected" : ""}>সরাসরি কৃষি স্পন্সর</option>
               </select>
             </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">Android Banner Ad Unit ID (ফাঁকা থাকলে Google Test ID)</label>
-              <input name="androidBannerId" value="${escapeHtml(cfg.androidBannerId)}" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
-            </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">Android Interstitial Ad Unit ID</label>
-              <input name="androidInterstitialId" value="${escapeHtml(cfg.androidInterstitialId)}" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
-            </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">মোবাইল Direct Link / SmartLink URL</label>
-              <input name="mobileDirectLinkUrl" value="${escapeHtml(cfg.mobileDirectLinkUrl || "")}" placeholder="https://..." class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
-            </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">মোবাইল Custom HTML5 / Unity / AppLovin / Start.io ট্যাগ</label>
-              <textarea name="mobileCustomAdHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.mobileCustomAdHtml || "")}</textarea>
-            </div>
+            <input name="mobileDirectLinkUrl" value="${escapeHtml(cfg.mobileDirectLinkUrl || "")}" placeholder="Direct Link / SmartLink URL (https://...)" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            <textarea name="mobileCustomAdHtml" rows="2" placeholder="মোবাইল Custom HTML5 ট্যাগ" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.mobileCustomAdHtml || "")}</textarea>
           </div>
 
-          <!-- Adsterra -->
-          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
-            <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">3️⃣ Adsterra Ad Network</h4>
-              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="adsterraEnabled" ${cfg.adsterraEnabled ? "checked" : ""} /> সক্রিয়</label>
-            </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">Adsterra Banner Key</label>
+          <!-- Adsterra & Monetag -->
+          <div class="space-y-4">
+            <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+              <div class="flex items-center justify-between">
+                <h4 class="font-bold text-[#105B34]">4️⃣ Adsterra Ad Network</h4>
+                <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="adsterraEnabled" ${cfg.adsterraEnabled ? "checked" : ""} /> সক্রিয়</label>
+              </div>
               <input name="adsterraBannerKey" value="${escapeHtml(cfg.adsterraBannerKey)}" placeholder="32-char Adsterra key" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              <input name="adsterraScriptUrl" value="${escapeHtml(cfg.adsterraScriptUrl)}" placeholder="Banner invoke.js URL" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              <input name="adsterraSocialBarUrl" value="${escapeHtml(cfg.adsterraSocialBarUrl)}" placeholder="Social Bar / Popunder Script URL" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
             </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">Banner invoke.js URL</label>
-              <input name="adsterraScriptUrl" value="${escapeHtml(cfg.adsterraScriptUrl)}" placeholder="https://www.topcreativeformat.com/.../invoke.js" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
-            </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">Social Bar / Popunder Script URL</label>
-              <input name="adsterraSocialBarUrl" value="${escapeHtml(cfg.adsterraSocialBarUrl)}" placeholder="https://pl...effectivegatecpm.com/...js" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
-            </div>
-          </div>
-
-          <!-- Monetag / PropellerAds -->
-          <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
-            <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">4️⃣ Monetag / PropellerAds</h4>
-              <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="monetagEnabled" ${cfg.monetagEnabled ? "checked" : ""} /> সক্রিয়</label>
-            </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">Monetag Zone ID</label>
+            <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
+              <div class="flex items-center justify-between">
+                <h4 class="font-bold text-[#105B34]">5️⃣ Monetag / PropellerAds</h4>
+                <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="monetagEnabled" ${cfg.monetagEnabled ? "checked" : ""} /> সক্রিয়</label>
+              </div>
               <input name="monetagZoneId" value="${escapeHtml(cfg.monetagZoneId)}" placeholder="Zone ID (e.g. 8123456)" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
-            </div>
-            <div>
-              <label class="text-xs font-bold block mb-1">Monetag Script Tag URL</label>
               <input name="monetagScriptUrl" value="${escapeHtml(cfg.monetagScriptUrl)}" placeholder="https://alwingulla.com/88/tag.min.js" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
             </div>
           </div>
         </div>
 
-        <!-- Ezoic / Media.net / Custom HTML + Direct Sponsor -->
+        <!-- Custom HTML & Direct Sponsor -->
         <div class="grid md:grid-cols-2 gap-5">
           <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
             <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">5️⃣ Ezoic / Media.net / Infolinks / Custom Tag</h4>
+              <h4 class="font-bold text-[#105B34]">6️⃣ Ezoic / Media.net / Custom HTML</h4>
               <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="customAdEnabled" ${cfg.customAdEnabled ? "checked" : ""} /> সক্রিয়</label>
             </div>
             <input name="customAdName" value="${escapeHtml(cfg.customAdName)}" placeholder="Network Name" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
-            <div><label class="text-[11px] font-bold block mb-1">Top Banner HTML / Embed</label><textarea name="customTopHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customTopHtml)}</textarea></div>
-            <div><label class="text-[11px] font-bold block mb-1">In-Feed Banner HTML / Embed</label><textarea name="customFeedHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customFeedHtml)}</textarea></div>
-            <div><label class="text-[11px] font-bold block mb-1">Footer Banner HTML / Embed</label><textarea name="customFooterHtml" rows="2" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customFooterHtml)}</textarea></div>
+            <textarea name="customTopHtml" rows="2" placeholder="Top Banner HTML" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customTopHtml)}</textarea>
+            <textarea name="customFeedHtml" rows="2" placeholder="In-Feed Banner HTML" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customFeedHtml)}</textarea>
+            <textarea name="customFooterHtml" rows="2" placeholder="Footer Banner HTML" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs font-mono">${escapeHtml(cfg.customFooterHtml)}</textarea>
           </div>
 
           <div class="bg-white rounded-3xl p-5 border border-emerald-100 shadow-sm space-y-3">
             <div class="flex items-center justify-between">
-              <h4 class="font-bold text-[#105B34]">6️⃣ সরাসরি কৃষি স্পন্সর ব্যানার (Direct Ads)</h4>
+              <h4 class="font-bold text-[#105B34]">7️⃣ সরাসরি কৃষি স্পন্সর ব্যানার</h4>
               <label class="text-xs font-bold flex items-center gap-1.5"><input type="checkbox" name="sponsorEnabled" ${cfg.sponsorEnabled ? "checked" : ""} /> সক্রিয়</label>
             </div>
-            <div><label class="text-[11px] font-bold block mb-1">স্পন্সর শিরোনাম</label><input name="sponsorTitle" value="${escapeHtml(cfg.sponsorTitle)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
-            <div><label class="text-[11px] font-bold block mb-1">সংক্ষিপ্ত বিবরণ</label><input name="sponsorSubtitle" value="${escapeHtml(cfg.sponsorSubtitle)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
-            <div><label class="text-[11px] font-bold block mb-1">ব্যানার ছবি URL (ঐচ্ছিক)</label><input name="sponsorImageUrl" value="${escapeHtml(cfg.sponsorImageUrl)}" placeholder="https://..." class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+            <input name="sponsorTitle" value="${escapeHtml(cfg.sponsorTitle)}" placeholder="স্পন্সর শিরোনাম" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            <input name="sponsorSubtitle" value="${escapeHtml(cfg.sponsorSubtitle)}" placeholder="সংক্ষিপ্ত বিবরণ" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+            <input name="sponsorImageUrl" value="${escapeHtml(cfg.sponsorImageUrl)}" placeholder="ব্যানার ছবি URL" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
             <div class="grid grid-cols-2 gap-2">
-              <div><label class="text-[11px] font-bold block mb-1">লিংক URL</label><input name="sponsorTargetUrl" value="${escapeHtml(cfg.sponsorTargetUrl)}" placeholder="https://..." class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
-              <div><label class="text-[11px] font-bold block mb-1">বাটন টেক্সট</label><input name="sponsorCtaText" value="${escapeHtml(cfg.sponsorCtaText)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" /></div>
+              <input name="sponsorTargetUrl" value="${escapeHtml(cfg.sponsorTargetUrl)}" placeholder="লিংক URL" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              <input name="sponsorCtaText" value="${escapeHtml(cfg.sponsorCtaText)}" placeholder="বাটন টেক্সট" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
             </div>
           </div>
         </div>
 
         <button type="submit" class="w-full py-3.5 rounded-2xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm shadow">
-          💾 সব বিজ্ঞাপন সেটিংস সেভ করুন (অ্যাপ ও ওয়েবসাইটে লাইভ হবে)
+          💾 সব বিজ্ঞাপন ও LevelPlay সেটিংস সেভ করুন (অ্যাপ ও ওয়েবসাইটে লাইভ হবে)
         </button>
       </form>
     `;
@@ -4783,7 +5370,7 @@ function renderInfoPage() {
   const content = {
     about: `<h2 class="text-xl font-bold text-[#105B34]">আমাদের সম্পর্কে</h2><p class="text-sm text-gray-700 leading-relaxed">কৃষি বন্ধু (Krishi Bondhu) হলো বাংলাদেশের কৃষকদের ন্যায্য মূল্য নিশ্চিত করার জন্য নির্মিত একটি ১০০% দালালমুক্ত, শূন্য-কমিশন ডিজিটাল কৃষিপণ্য বাজার। কুষ্টিয়া জেলা থেকে সূচনা হয়ে এখন সারা বাংলাদেশের ৮টি বিভাগ ও ৬৪টি জেলায় কৃষক ও ক্রেতার মধ্যে সরাসরি সংযোগ স্থাপন করছে।</p>`,
     contact: `<h2 class="text-xl font-bold text-[#105B34]">যোগাযোগ</h2><p class="text-sm text-gray-700">সহায়তা কেন্দ্র: support@krishibondhu.bd • হেল্পলাইন: +৮৮০ ১৭০০-০০০০০০ • সারা বাংলাদেশ (৬৪ জেলা)</p>`,
-    privacy: `<h2 class="text-xl font-bold text-[#105B34]">গোপনীয়তা নীতি (Privacy Policy)</h2><p class="text-sm text-gray-700 leading-relaxed">ব্যবহারকারীদের পাসওয়ার্ড SHA-256 হ্যাশ দিয়ে সুরক্ষিত রাখা হয় এবং প্রতিটি নোটিফিকেশন শুধুমাত্র নির্দিষ্ট প্রাপক বা অনুমোদিত ঘোষণার মধ্যেই সীমাবদ্ধ থাকে।</p><p class="text-sm text-gray-700 leading-relaxed mt-2">বিজ্ঞাপন ও মনিটাইজেশন: মোবাইল অ্যাপে Google AdMob এবং ওয়েবসাইটে Google AdSense, Adsterra, Monetag বা অনুমোদিত বিজ্ঞাপন নেটওয়ার্ক ব্যবহার হতে পারে। প্রাসঙ্গিক বিজ্ঞাপন দেখাতে কুকি বা Advertising ID ব্যবহৃত হতে পারে, তবে আপনার এনআইডি বা পাসওয়ার্ড কখনোই বিজ্ঞাপনদাতার সাথে শেয়ার করা হয় না।</p>`,
+    privacy: `<h2 class="text-xl font-bold text-[#105B34]">গোপনীয়তা নীতি (Privacy Policy)</h2><p class="text-sm text-gray-700 leading-relaxed">ব্যবহারকারীদের পাসওয়ার্ড SHA-256 হ্যাশ দিয়ে সুরক্ষিত রাখা হয় এবং প্রতিটি নোটিফিকেশন শুধুমাত্র নির্দিষ্ট প্রাপক বা অনুমোদিত ঘোষণার মধ্যেই সীমাবদ্ধ থাকে।</p><p class="text-sm text-gray-700 leading-relaxed mt-2">বিজ্ঞাপন ও মনিটাইজেশন: মোবাইল অ্যাপে Unity LevelPlay mediation (Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff, DT Exchange) এবং ওয়েবসাইটে Google AdSense, Adsterra, Monetag বা অনুমোদিত বিজ্ঞাপন নেটওয়ার্ক ব্যবহার হতে পারে। প্রাসঙ্গিক বিজ্ঞাপন দেখাতে কুকি বা Advertising ID ব্যবহৃত হতে পারে, তবে আপনার এনআইডি বা পাসওয়ার্ড কখনোই বিজ্ঞাপনদাতার সাথে শেয়ার করা হয় না।</p><p class="text-xs text-gray-500 mt-2">ভার্সন ${APP_VERSION_NAME} • বিল্ড ${APP_BUILD_VERSION}</p>`,
     terms: `<h2 class="text-xl font-bold text-[#105B34]">শর্তাবলী</h2><p class="text-sm text-gray-700 leading-relaxed">কৃষক নিজেই ফসলের দাম ও মান নির্ধারণ করেন। প্ল্যাটফর্ম কোনো দালাল বা বাধ্যতামূলক লেনদেন কমিশন গ্রহণ করে না। অ্যাপ ও ওয়েবসাইটের রক্ষণাবেক্ষণের জন্য নির্ধারিত স্থানে বিজ্ঞাপন প্রদর্শিত হতে পারে।</p>`
   };
 
@@ -4907,7 +5494,7 @@ window.kbApp = {
     renderCurrentView();
   },
   resetFilters() {
-    state.filters = { query: "", categoryId: "", division: "", district: "", upazila: "", union: "", wholesaleOnly: "", sort: "NEWEST" };
+    state.filters = { query: "", categoryId: "", division: "", district: "", upazila: "", union: "", sort: "NEWEST" };
     renderCurrentView();
   },
   applyMyAreaFilter() {
@@ -4960,6 +5547,53 @@ window.kbApp = {
   onRegDistrictChange(distBn) {
     window.kbApp.onLocationCascadeChange("reg", null, distBn);
   },
+  togglePasswordVisibility(inputId, btn) {
+    const inp = document.getElementById(inputId);
+    if (!inp) return;
+    const isHidden = inp.type === "password";
+    inp.type = isHidden ? "text" : "password";
+    if (btn) btn.textContent = isHidden ? "লুকান" : "দেখুন";
+  },
+  openForgotPasswordModal() {
+    openModal(`
+      <div class="space-y-4">
+        <div class="flex items-center justify-between">
+          <h3 class="text-lg font-bold text-[#105B34]">🔑 পাসওয়ার্ড রিসেট (OTP ছাড়াই)</h3>
+          <button type="button" onclick="window.kbApp.closeModal()" class="text-gray-500 hover:text-black font-bold px-2">✕</button>
+        </div>
+        <p class="text-xs text-gray-600">আপনার নিবন্ধিত মোবাইল নম্বর দিয়ে সরাসরি নতুন পাসওয়ার্ড সেট করুন (অ্যাপ ও ওয়েবসাইটে সাথে সাথে কাজ করবে)।</p>
+        <form onsubmit="window.kbApp.handleForgotPasswordSubmit(event)" class="space-y-3 text-sm">
+          <div>
+            <label class="text-xs font-bold block mb-1">নিবন্ধিত মোবাইল নম্বর *</label>
+            <input name="phone" required placeholder="017XXXXXXXX" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200" />
+          </div>
+          <div>
+            <label class="text-xs font-bold block mb-1">নতুন পাসওয়ার্ড (কমপক্ষে ৬ অক্ষর) *</label>
+            <div class="relative">
+              <input id="fp-new-pass" name="newPassword" type="password" minlength="6" required class="w-full px-3.5 py-2.5 pr-16 rounded-xl border border-emerald-200" />
+              <button type="button" onclick="window.kbApp.togglePasswordVisibility('fp-new-pass', this)" class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs font-bold text-[#168447] rounded-lg">দেখুন</button>
+            </div>
+          </div>
+          <div>
+            <label class="text-xs font-bold block mb-1">পাসওয়ার্ড নিশ্চিত করুন *</label>
+            <div class="relative">
+              <input id="fp-confirm-pass" name="confirmPassword" type="password" minlength="6" required class="w-full px-3.5 py-2.5 pr-16 rounded-xl border border-emerald-200" />
+              <button type="button" onclick="window.kbApp.togglePasswordVisibility('fp-confirm-pass', this)" class="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 text-xs font-bold text-[#168447] rounded-lg">দেখুন</button>
+            </div>
+          </div>
+          <div class="flex gap-2 justify-end pt-1">
+            <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+            <button type="submit" class="px-4 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">পাসওয়ার্ড পরিবর্তন করুন</button>
+          </div>
+        </form>
+      </div>
+    `);
+  },
+  async handleForgotPasswordSubmit(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    await resetPassword(fd.get("phone"), fd.get("newPassword"), fd.get("confirmPassword"));
+  },
   async handleLoginSubmit(e) {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -4974,6 +5608,16 @@ window.kbApp = {
     e.preventDefault();
     const fd = new FormData(e.target);
     await updateUserProfile(Object.fromEntries(fd.entries()));
+  },
+  async handleFarmerPaymentSettingsSubmit(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    await saveFarmerPaymentSettings({
+      bKashNumber: fd.get("bKashNumber"),
+      nagadNumber: fd.get("nagadNumber"),
+      rocketNumber: fd.get("rocketNumber"),
+      bankAccountInfo: fd.get("bankAccountInfo")
+    });
   },
   async handleActivationPaymentSubmit(e) {
     e.preventDefault();
@@ -5202,13 +5846,22 @@ window.kbApp = {
       pickupAddress: fd.get("pickupAddress"),
       supportsFarmPickup: fd.get("supportsFarmPickup") === "on",
       supportsDirectDelivery: fd.get("supportsDirectDelivery") === "on",
-      isWholesale: fd.get("isWholesale") === "on",
+      isWholesale: true,
       deliveryCharge: fd.get("deliveryCharge"),
       harvestDate: fd.get("harvestDate")
     });
   },
   addToCart,
   updateCartQty,
+  updateCartAdvancePreview(grandTotal) {
+    const inp = document.getElementById("checkout-advance-input");
+    const out = document.getElementById("checkout-remaining-due");
+    if (!inp || !out) return;
+    const raw = Number(inp.value || 0);
+    const capped = Math.max(0, Math.min(Number(grandTotal || 0), Number.isNaN(raw) ? 0 : raw));
+    const rem = Math.max(0, Number(grandTotal || 0) - capped);
+    out.textContent = formatBdt(rem);
+  },
   async handleCheckoutSubmit(e) {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -5221,14 +5874,35 @@ window.kbApp = {
     if (!preview) return;
     const kg = Math.max(0, qty) * MON_TO_KG;
     const total = Math.max(0, qty) * Math.max(0, price);
-    preview.innerHTML = `<span>মোট ওজন: ${formatQty(kg)} কেজি</span><span>মোট বিক্রয় মূল্য: ${formatBdt(total)}</span>`;
+    preview.innerHTML = `<span>মোট ওজন: ${formatQty(kg)} কেজি</span><span>মোট পাইকারি মূল্য: ${formatBdt(total)}</span>`;
   },
   updateFarmerPriceAndStock,
   updateOrderStatus,
+  farmerVerifyOrderPayment,
+  farmerApproveZeroAdvanceOrder,
   farmerConfirmPaymentReceived,
-  adminVerifyOrderPayment,
   adminApproveActivationPayment,
   adminSetAccountStatus,
+  openRejectOrderPaymentModal(paymentId) {
+    openModal(`
+      <h3 class="text-lg font-bold text-[#105B34] mb-3">✕ অগ্রিম পেমেন্ট প্রত্যাখ্যান করুন</h3>
+      <form onsubmit="window.kbApp.handleRejectOrderPaymentSubmit(event, '${escapeHtml(paymentId)}')" class="space-y-3">
+        <div>
+          <label class="text-xs font-bold block mb-1">প্রত্যাখ্যানের কারণ *</label>
+          <textarea name="reason" rows="3" required placeholder="যেমন: অ্যাকাউন্ট ব্যালেন্সে টাকা পাওয়া যায়নি বা TxID সঠিক নয়।" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm"></textarea>
+        </div>
+        <div class="flex gap-2 justify-end">
+          <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+          <button type="submit" class="px-4 py-2 rounded-xl bg-red-600 text-white text-xs font-bold">প্রত্যাখ্যান নিশ্চিত</button>
+        </div>
+      </form>
+    `);
+  },
+  async handleRejectOrderPaymentSubmit(e, paymentId) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    await farmerVerifyOrderPayment(paymentId, false, fd.get("reason"));
+  },
   setFarmerTab(t) { state.farmerTab = t; renderCurrentView(); },
   setAdminTab(t) { state.adminTab = t; renderCurrentView(); },
   setAdminUserFilter(f) { state.adminUserFilter = f; renderCurrentView(); },
@@ -5286,41 +5960,50 @@ window.kbApp = {
   openOrderPaymentModal(orderId) {
     const order = state.orders.find((o) => o.id === orderId);
     if (!order) return;
-    const ps = state.paymentSettings || DEFAULT_PAYMENT_SETTINGS;
+    const remainingDue = Math.max(0, Number(order.grandTotal || 0) - Number(order.verifiedAdvanceTotal || 0));
+    const fps = getFarmerPaymentSettings(order.farmerId);
+    const channels = [
+      fps.bKashNumber ? `bKash: ${fps.bKashNumber}` : "",
+      fps.nagadNumber ? `Nagad: ${fps.nagadNumber}` : "",
+      fps.rocketNumber ? `Rocket: ${fps.rocketNumber}` : "",
+      fps.bankAccountInfo ? `Bank: ${fps.bankAccountInfo}` : ""
+    ].filter(Boolean);
     openModal(`
-      <h3 class="text-lg font-bold text-[#105B34] mb-2">💳 অর্ডার পেমেন্ট ও রসিদ জমা (${escapeHtml(order.orderCode)})</h3>
-      <p class="text-xs text-gray-600 mb-3">মোট দেয়: <strong class="text-[#168447]">${formatBdt(order.grandTotal)}</strong> • কৃষক: ${escapeHtml(order.farmerName)} (${escapeHtml(order.farmerPhone)})</p>
+      <h3 class="text-lg font-bold text-[#105B34] mb-2">💳 অগ্রিম / আংশিক পেমেন্ট জমা (${escapeHtml(order.orderCode)})</h3>
+      <p class="text-xs text-gray-600 mb-3">মোট: <strong>${formatBdt(order.grandTotal)}</strong> • যাচাইকৃত অগ্রিম: <strong>${formatBdt(order.verifiedAdvanceTotal || 0)}</strong> • অবশিষ্ট বকেয়া: <strong class="text-amber-800">${formatBdt(remainingDue)}</strong></p>
       <div class="bg-[#EAF7EF] rounded-2xl p-3 text-[11px] text-[#105B34] mb-3">
-        অফিশিয়াল নম্বর — bKash: ${escapeHtml(ps.bKashNumber)} (${escapeHtml(ps.bKashAccountType)}) • Nagad: ${escapeHtml(ps.nagadNumber)} (${escapeHtml(ps.nagadAccountType)})
+        কৃষক <strong>${escapeHtml(order.farmerName)}</strong>-এর সরাসরি নম্বর: ${channels.length ? escapeHtml(channels.join(" • ")) : "নম্বর সেট করা হয়নি"}
       </div>
       <form onsubmit="window.kbApp.handleOrderPaymentSubmit(event, '${escapeHtml(order.id)}')" class="space-y-3">
-        <div>
-          <label class="text-xs font-bold block mb-1">পেমেন্ট মাধ্যম *</label>
-          <select name="paymentMethod" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 bg-white text-sm">
-            <option value="BKASH" ${order.paymentMethod === "BKASH" ? "selected" : ""}>বিকাশ (bKash)</option>
-            <option value="NAGAD" ${order.paymentMethod === "NAGAD" ? "selected" : ""}>নগদ (Nagad)</option>
-            <option value="BANK_TRANSFER" ${order.paymentMethod === "BANK_TRANSFER" ? "selected" : ""}>ব্যাংক ট্রান্সফার</option>
-            <option value="CASH_ON_PICKUP" ${order.paymentMethod === "CASH_ON_PICKUP" ? "selected" : ""}>সরাসরি নগদ প্রদান</option>
-          </select>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="text-xs font-bold block mb-1">পেমেন্টের পরিমাণ (৳) *</label>
+            <input name="amount" type="number" min="1" max="${remainingDue}" step="1" required value="${remainingDue}" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 text-sm font-bold text-[#105B34]" />
+          </div>
+          <div>
+            <label class="text-xs font-bold block mb-1">পেমেন্ট মাধ্যম *</label>
+            <select name="paymentMethod" class="w-full px-3 py-2.5 rounded-xl border border-emerald-200 bg-white text-sm">
+              <option value="BKASH">বিকাশ (bKash)</option>
+              <option value="NAGAD">নগদ (Nagad)</option>
+              <option value="ROCKET">রকেট (Rocket)</option>
+              <option value="BANK_TRANSFER">ব্যাংক ট্রান্সফার</option>
+              <option value="CASH_ON_PICKUP">সরাসরি নগদ প্রদান</option>
+            </select>
+          </div>
         </div>
         <div class="grid grid-cols-2 gap-2">
           <div>
-            <label class="text-xs font-bold block mb-1">প্রেরক মোবাইল নম্বর</label>
-            <input name="senderNumber" value="${escapeHtml(order.paymentSenderNumber || "")}" placeholder="017XXXXXXXX" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
+            <label class="text-xs font-bold block mb-1">প্রেরক মোবাইল নম্বর *</label>
+            <input name="senderNumber" required value="${escapeHtml(order.paymentSenderNumber || "")}" placeholder="017XXXXXXXX" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
           </div>
           <div>
-            <label class="text-xs font-bold block mb-1">Transaction ID</label>
-            <input name="transactionReference" value="${escapeHtml(order.transactionReference || "")}" placeholder="TxID" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm uppercase" />
+            <label class="text-xs font-bold block mb-1">Transaction ID *</label>
+            <input name="transactionId" required placeholder="TxID লিখুন" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm uppercase" />
           </div>
         </div>
-        <div class="space-y-2">
-          <label class="text-xs font-bold block">পেমেন্ট রসিদ / স্ক্রিনশট (ঐচ্ছিক)</label>
-          <label class="inline-flex cursor-pointer px-3 py-1.5 rounded-xl bg-[#EAF7EF] border border-emerald-200 text-[#105B34] text-xs font-bold">
-            📎 রসিদ আপলোড
-            <input type="file" accept="image/*" onchange="window.kbApp.handleCompressedImageUpload(this, 'ord-pay-receipt-uri', 'ord-pay-receipt-preview')" class="hidden" />
-          </label>
-          <input type="hidden" name="receiptUri" id="ord-pay-receipt-uri" value="${escapeHtml(order.paymentReceiptUri || "")}" />
-          <img id="ord-pay-receipt-preview" src="${escapeHtml(order.paymentReceiptUri || "")}" class="${order.paymentReceiptUri ? "" : "hidden"} max-h-36 rounded-xl border border-emerald-200 object-contain" alt="রসিদ" />
+        <div>
+          <label class="text-xs font-bold block mb-1">রেফারেন্স নোট (ঐচ্ছিক)</label>
+          <input name="referenceNote" placeholder="যেমন: ২য় আংশিক পেমেন্ট" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
         </div>
         <div class="flex gap-2 justify-end pt-1">
           <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
@@ -5332,11 +6015,12 @@ window.kbApp = {
   async handleOrderPaymentSubmit(e, orderId) {
     e.preventDefault();
     const fd = new FormData(e.target);
-    await submitOrderPayment(orderId, {
+    await submitOrderAdvancePayment(orderId, {
+      amount: fd.get("amount"),
       paymentMethod: fd.get("paymentMethod"),
       senderNumber: fd.get("senderNumber"),
-      transactionReference: fd.get("transactionReference"),
-      receiptUri: fd.get("receiptUri")
+      transactionId: fd.get("transactionId"),
+      referenceNote: fd.get("referenceNote")
     });
   },
   async handleAdminSavePaymentSettings(e) {
@@ -5393,8 +6077,35 @@ window.kbApp = {
       adsEnabled: fd.get("adsEnabled") === "on",
       showAdsLabel: fd.get("showAdsLabel") === "on",
       androidAdsEnabled: fd.get("androidAdsEnabled") === "on",
+      mediationPlatform: "UNITY_LEVELPLAY",
+      mediationAppKey: String(fd.get("mediationAppKey") || "").trim(),
+      adTestMode: fd.get("adTestMode") === "on",
+      bannerEnabled: fd.get("bannerEnabled") === "on",
       androidBannerId: String(fd.get("androidBannerId") || "").trim(),
+      nativeEnabled: fd.get("nativeEnabled") === "on",
+      androidNativePlacement: String(fd.get("androidNativePlacement") || "").trim(),
+      interstitialEnabled: fd.get("interstitialEnabled") === "on",
       androidInterstitialId: String(fd.get("androidInterstitialId") || "").trim(),
+      rewardedEnabled: fd.get("rewardedEnabled") === "on",
+      androidRewardedId: String(fd.get("androidRewardedId") || "").trim(),
+      appOpenEnabled: fd.get("appOpenEnabled") === "on",
+      androidAppOpenId: String(fd.get("androidAppOpenId") || "").trim(),
+      unityAdsEnabled: fd.get("unityAdsEnabled") === "on",
+      unityGameId: String(fd.get("unityGameId") || "").trim(),
+      appLovinEnabled: fd.get("appLovinEnabled") === "on",
+      appLovinSdkKey: String(fd.get("appLovinSdkKey") || "").trim(),
+      metaAudienceEnabled: fd.get("metaAudienceEnabled") === "on",
+      metaPlacementId: String(fd.get("metaPlacementId") || "").trim(),
+      mintegralEnabled: fd.get("mintegralEnabled") === "on",
+      mintegralAppId: String(fd.get("mintegralAppId") || "").trim(),
+      pangleEnabled: fd.get("pangleEnabled") === "on",
+      pangleAppId: String(fd.get("pangleAppId") || "").trim(),
+      inMobiEnabled: fd.get("inMobiEnabled") === "on",
+      inMobiAccountId: String(fd.get("inMobiAccountId") || "").trim(),
+      liftoffEnabled: fd.get("liftoffEnabled") === "on",
+      liftoffAppId: String(fd.get("liftoffAppId") || "").trim(),
+      dtExchangeEnabled: fd.get("dtExchangeEnabled") === "on",
+      dtExchangeAppId: String(fd.get("dtExchangeAppId") || "").trim(),
       mobileWebAdsEnabled: fd.get("mobileWebAdsEnabled") === "on",
       mobileAdNetworkPriority: String(fd.get("mobileAdNetworkPriority") || "ALL").trim() || "ALL",
       mobileCustomAdHtml: String(fd.get("mobileCustomAdHtml") || ""),

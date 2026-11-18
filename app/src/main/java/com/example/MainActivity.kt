@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        AdMonetizationManager.initialize(this)
+        AdMonetizationManager.setCurrentActivity(this)
         setContent {
             val viewModel: KrishiBondhuViewModel = viewModel()
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -44,12 +44,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            LaunchedEffect(uiState.adConfig.adsEnabled, uiState.adConfig.androidAdsEnabled, uiState.adConfig.androidInterstitialId) {
-                AdMonetizationManager.preloadInterstitial(
-                    context = this@MainActivity,
-                    overrideUnitId = uiState.adConfig.androidInterstitialId,
-                    enabled = uiState.adConfig.adsEnabled && uiState.adConfig.androidAdsEnabled
-                )
+            LaunchedEffect(uiState.adConfig) {
+                AdMonetizationManager.syncConfig(this@MainActivity, uiState.adConfig)
             }
 
             KrishiBondhuTheme(darkTheme = uiState.darkMode) {

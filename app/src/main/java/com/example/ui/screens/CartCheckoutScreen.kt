@@ -8,8 +8,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AccountBalanceWallet
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
@@ -23,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.data.local.CartItemEntity
 import com.example.data.model.*
@@ -32,6 +35,7 @@ import com.example.ui.theme.*
 import com.example.ui.viewmodel.MarketplaceUiState
 import com.example.util.LocationHelper
 import kotlinx.coroutines.launch
+import kotlin.math.max
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,7 +45,15 @@ fun CartCheckoutScreen(
     onBrowseClick: () -> Unit,
     onUpdateQty: (CartItemEntity, Double) -> Unit,
     onRemoveItem: (String) -> Unit,
-    onPlaceOrder: (DeliveryOption, String, PaymentMethod, String) -> Unit,
+    onPlaceOrder: (
+        deliveryOption: DeliveryOption,
+        deliveryAddress: String,
+        paymentMethod: PaymentMethod,
+        transactionRef: String,
+        advanceByFarmer: Map<String, Double>,
+        senderNumber: String,
+        referenceNote: String
+    ) -> Unit,
     onOpenActivation: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -60,9 +72,13 @@ fun CartCheckoutScreen(
             ).joinToString(", ")
         )
     }
-    var selectedPayment by remember { mutableStateOf(PaymentMethod.CASH_ON_PICKUP) }
+    var selectedPayment by remember { mutableStateOf(PaymentMethod.BKASH) }
+    var senderNumber by remember(uiState.activeUser) { mutableStateOf(uiState.activeUser?.phone.orEmpty()) }
     var transactionRef by remember { mutableStateOf("") }
+    var referenceNote by remember { mutableStateOf("") }
     var showMapDialog by remember { mutableStateOf(false) }
+
+    val advanceInputByFarmer = remember { mutableStateMapOf<String, String>() }
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -85,10 +101,33 @@ fun CartCheckoutScreen(
     else grouped.values.sumOf { farmerList -> farmerList.maxOfOrNull { it.deliveryChargeEstimate } ?: 0.0 }
     val grandTotal = productTotal + deliveryTotal
 
+    val parsedAdvanceByFarmer = grouped.keys.associateWith { fid ->
+        val farmerItems = grouped[fid].orEmpty()
+        val fProd = farmerItems.sumOf { it.pricePerUnit * it.quantity }
+        val fDeliv = if (selectedDelivery == DeliveryOption.FARM_PICKUP) 0.0 else (farmerItems.maxOfOrNull { it.deliveryChargeEstimate } ?: 0.0)
+        val fTotal = fProd + fDeliv
+        val raw = advanceInputByFarmer[fid]?.toDoubleOrNull() ?: 0.0
+        raw.coerceIn(0.0, fTotal)
+    }
+    val totalRequestedAdvance = parsedAdvanceByFarmer.values.sum()
+    val totalRemainingDue = max(0.0, grandTotal - totalRequestedAdvance)
+    val needsDigitalTxnProof = totalRequestedAdvance > 0.0 && selectedPayment.isDigital
+    val hasInvalidAdvance = grouped.any { (fid, items) ->
+        val fProd = items.sumOf { it.pricePerUnit * it.quantity }
+        val fDeliv = if (selectedDelivery == DeliveryOption.FARM_PICKUP) 0.0 else (items.maxOfOrNull { it.deliveryChargeEstimate } ?: 0.0)
+        val fTotal = fProd + fDeliv
+        val rawStr = advanceInputByFarmer[fid]
+        if (rawStr.isNullOrBlank()) false
+        else {
+            val v = rawStr.toDoubleOrNull()
+            v == null || v < 0.0 || v > fTotal
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (lang == AppLanguage.BENGALI) "শপিং কার্ট ও চেকআউট" else "Cart & Checkout") },
+                title = { Text(if (lang == AppLanguage.BENGALI) "পাইকারি কার্ট ও চেকআউট" else "Wholesale Cart & Checkout") },
                 navigationIcon = {
                     IconButton(onClick = onBack, modifier = Modifier.testTag("cart_back_button")) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "ফিরে যান")
@@ -106,8 +145,8 @@ fun CartCheckoutScreen(
             ) {
                 EmptyStateView(
                     emoji = "🛒",
-                    title = "আপনার কার্ট খালি",
-                    subtitle = "সরাসরি কৃষকদের কাছ থেকে তাজা ফসল কার্টে যোগ করুন।",
+                    title = "আপনার পাইকারি কার্ট খালি",
+                    subtitle = "সরাসরি কৃষকদের কাছ থেকে পাইকারি ফসল কার্টে যোগ করুন।",
                     actionText = "ফসল দেখুন",
                     onAction = onBrowseClick
                 )
@@ -150,7 +189,7 @@ fun CartCheckoutScreen(
                 }
             }
 
-            // Split-order rule notice
+            // Wholesale & Direct Farmer Payment Notice
             item {
                 Surface(
                     color = InfoBlueLight,
@@ -164,7 +203,7 @@ fun CartCheckoutScreen(
                         Icon(Icons.Filled.Info, contentDescription = null, tint = InfoBlue)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "নিয়ম: প্রতিটি অর্ডার একজন কৃষকের জন্য (১ মণ = ৪০ কেজি)। আপনার কার্টে ${grouped.size} জন কৃষকের পণ্য থাকায় ${grouped.size}টি আলাদা অর্ডার তৈরি হবে।",
+                            text = "শুধুমাত্র পাইকারি বিক্রয় (১ মণ = ৪০ কেজি)। আপনি যেকোনো পরিমাণ অগ্রিম (০ থেকে মোট মূল্য পর্যন্ত) সরাসরি কৃষকের নম্বরে পাঠাতে পারবেন। প্ল্যাটফর্ম কখনোই অগ্রিম টাকা গ্রহণ বা জমা রাখে না।",
                             style = MaterialTheme.typography.bodySmall,
                             color = InfoBlue
                         )
@@ -172,8 +211,19 @@ fun CartCheckoutScreen(
                 }
             }
 
-            // Grouped farmer sections
+            // Grouped farmer sections with isolated payment channels & editable Advance Payment Amount
             grouped.forEach { (farmerId, items) ->
+                val fProd = items.sumOf { it.pricePerUnit * it.quantity }
+                val fDeliv = if (selectedDelivery == DeliveryOption.FARM_PICKUP) 0.0 else (items.maxOfOrNull { it.deliveryChargeEstimate } ?: 0.0)
+                val fTotal = fProd + fDeliv
+                // Strictly ONLY look up THIS farmer's registered payment settings — never expose other farmers' numbers
+                val farmerSettings = uiState.farmerPaymentSettings.firstOrNull { it.farmerId == farmerId }
+                val advanceRaw = advanceInputByFarmer[farmerId] ?: "0"
+                val advanceParsed = advanceRaw.toDoubleOrNull()
+                val advanceInvalid = advanceRaw.isNotBlank() && (advanceParsed == null || advanceParsed < 0.0 || advanceParsed > fTotal)
+                val clampedAdvance = (advanceParsed ?: 0.0).coerceIn(0.0, fTotal)
+                val farmerRemainingDue = max(0.0, fTotal - clampedAdvance)
+
                 item(key = "group_$farmerId") {
                     Card(
                         shape = RoundedCornerShape(16.dp),
@@ -185,7 +235,7 @@ fun CartCheckoutScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             Text(
-                                text = "কৃষক: ${items.first().farmerName}",
+                                text = "কৃষক: ${items.first().farmerName} (পাইকারি মোট: ${fTotal.formatBdt()})",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = DarkGreen
@@ -218,6 +268,69 @@ fun CartCheckoutScreen(
                                     }
                                 }
                             }
+
+                            HorizontalDivider()
+                            // Isolated Farmer Payment Numbers (only for this farmer)
+                            Surface(
+                                color = LightGreen,
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.35f))
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Filled.AccountBalanceWallet, contentDescription = null, tint = DarkGreen, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "কৃষকের নিবন্ধিত সরাসরি পেমেন্ট নম্বর",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold,
+                                            color = DarkGreen
+                                        )
+                                    }
+                                    if (farmerSettings == null || !farmerSettings.hasAnyNumber()) {
+                                        Text(
+                                            text = "কৃষক এখনো ডিজিটাল পেমেন্ট নম্বর যুক্ত করেননি — শূন্য (৳০) অগ্রিম দিয়ে অর্ডার পাঠাতে পারেন।",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color(0xFF92400E)
+                                        )
+                                    } else {
+                                        if (farmerSettings.bKashNumber.isNotBlank()) {
+                                            Text("bKash: ${farmerSettings.bKashNumber}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = DarkGreen)
+                                        }
+                                        if (farmerSettings.nagadNumber.isNotBlank()) {
+                                            Text("Nagad: ${farmerSettings.nagadNumber}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = DarkGreen)
+                                        }
+                                        if (farmerSettings.rocketNumber.isNotBlank()) {
+                                            Text("Rocket: ${farmerSettings.rocketNumber}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = DarkGreen)
+                                        }
+                                        if (farmerSettings.bankAccountInfo.isNotBlank()) {
+                                            Text("Bank: ${farmerSettings.bankAccountInfo}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = DarkGreen)
+                                        }
+                                    }
+                                }
+                            }
+
+                            OutlinedTextField(
+                                value = advanceRaw,
+                                onValueChange = { advanceInputByFarmer[farmerId] = it },
+                                label = { Text("Advance Payment Amount / অগ্রিম পেমেন্ট (৳) — ০ থেকে ${fTotal.formatBdt()}") },
+                                singleLine = true,
+                                isError = advanceInvalid,
+                                supportingText = {
+                                    if (advanceInvalid) {
+                                        Text("অগ্রিম ০ থেকে ${fTotal.formatBdt()} এর মধ্যে হতে হবে", color = AlertRed)
+                                    } else {
+                                        Text("অবশিষ্ট বকেয়া (Remaining Due): ${farmerRemainingDue.formatBdt()} • অগ্রিম ৳০ দিলে PAYMENT_PENDING হিসেবে অর্ডার যাবে")
+                                    }
+                                },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("checkout_advance_input_$farmerId")
+                            )
                         }
                     }
                 }
@@ -290,15 +403,21 @@ fun CartCheckoutScreen(
                 }
             }
 
-            // Payment Method Selection
+            // Direct Payment Method & Advance Proof Selection
             item {
                 Card(
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                 ) {
                     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("পেমেন্ট পদ্ধতি", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        PaymentMethod.entries.forEach { method ->
+                        Text("সরাসরি কৃষককে অগ্রিম পেমেন্ট পদ্ধতি", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        listOf(
+                            PaymentMethod.BKASH,
+                            PaymentMethod.NAGAD,
+                            PaymentMethod.ROCKET,
+                            PaymentMethod.BANK_TRANSFER,
+                            PaymentMethod.CASH_ON_PICKUP
+                        ).forEach { method ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
@@ -310,29 +429,44 @@ fun CartCheckoutScreen(
                                 Text(method.display(lang), style = MaterialTheme.typography.bodyMedium)
                             }
                         }
-                        if (selectedPayment.isDigital) {
+                        if (totalRequestedAdvance > 0.0) {
                             Surface(color = HarvestGoldLight, shape = RoundedCornerShape(10.dp)) {
                                 Text(
-                                    text = "নিরাপদ পেমেন্ট নীতি: শুধু ট্রানজেকশন/স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না। কৃষক টাকা বুঝে পেয়ে অনুমোদন করলেই অর্ডার চূড়ান্ত Confirmed হবে (অ্যাডমিন অনুমোদনের প্রয়োজন নেই)।",
+                                    text = "নিরাপদ পেমেন্ট নীতি: শুধু ট্রানজেকশন/রেফারেন্স দিলে অটো-কনফার্ম হবে না। কৃষক নিজের অ্যাকাউন্টে টাকা যাচাই করে অনুমোদন করলে অগ্রিম ব্যালেন্স যুক্ত হবে ও অর্ডার Confirmed হবে।",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color(0xFF78350F),
                                     modifier = Modifier.padding(10.dp)
                                 )
                             }
                             OutlinedTextField(
+                                value = senderNumber,
+                                onValueChange = { senderNumber = it },
+                                label = { Text("প্রেরকের মোবাইল / অ্যাকাউন্ট নম্বর") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                                modifier = Modifier.fillMaxWidth().testTag("checkout_sender_number_input")
+                            )
+                            OutlinedTextField(
                                 value = transactionRef,
-                                onValueChange = { transactionRef = it },
-                                label = { Text("${selectedPayment.labelBn} ট্রানজেকশন রেফারেন্স *") },
+                                onValueChange = { transactionRef = it.uppercase() },
+                                label = { Text("${selectedPayment.labelBn} Transaction ID${if (needsDigitalTxnProof) " *" else ""}") },
                                 placeholder = { Text("যেমন: TXN-8A94K2") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth().testTag("checkout_txn_ref_input")
+                            )
+                            OutlinedTextField(
+                                value = referenceNote,
+                                onValueChange = { referenceNote = it },
+                                label = { Text("পেমেন্ট রেফারেন্স নোট (ঐচ্ছিক)") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().testTag("checkout_reference_note_input")
                             )
                         }
                     }
                 }
             }
 
-            // Cost Breakdown (Transparent, Zero Commission)
+            // Wholesale Cost & Remaining Due Breakdown
             item {
                 Card(
                     shape = RoundedCornerShape(16.dp),
@@ -343,11 +477,13 @@ fun CartCheckoutScreen(
                         modifier = Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        SummaryRow("পণ্যের মোট মূল্য", productTotal.formatBdt())
+                        SummaryRow("পাইকারি পণ্যের মোট মূল্য", productTotal.formatBdt())
                         SummaryRow("ডেলিভারি চার্জ", deliveryTotal.formatBdt())
-                        SummaryRow("প্ল্যাটফর্ম/দালাল কমিশন", "৳ ০ (সম্পূর্ণ ফ্রি)")
+                        SummaryRow("প্ল্যাটফর্ম/দালাল কমিশন", "৳ ০ (সরাসরি কৃষককে পেমেন্ট)")
                         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                        SummaryRow("সর্বমোট (Grand Total)", grandTotal.formatBdt(), bold = true)
+                        SummaryRow("মোট পাইকারি অর্ডার মূল্য", grandTotal.formatBdt(), bold = true)
+                        SummaryRow("জমাকৃত অগ্রিম (যাচাই অপেক্ষমাণ)", totalRequestedAdvance.formatBdt())
+                        SummaryRow("সম্ভাব্য অবশিষ্ট বকেয়া", totalRemainingDue.formatBdt(), bold = true)
                     }
                 }
             }
@@ -358,9 +494,18 @@ fun CartCheckoutScreen(
                         if (isUserInactive) {
                             onOpenActivation()
                         } else {
-                            onPlaceOrder(selectedDelivery, deliveryAddress, selectedPayment, transactionRef)
+                            onPlaceOrder(
+                                selectedDelivery,
+                                deliveryAddress,
+                                selectedPayment,
+                                transactionRef.trim(),
+                                parsedAdvanceByFarmer,
+                                senderNumber.trim(),
+                                referenceNote.trim()
+                            )
                         }
                     },
+                    enabled = !hasInvalidAdvance && (!needsDigitalTxnProof || transactionRef.isNotBlank()),
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -368,7 +513,13 @@ fun CartCheckoutScreen(
                         .testTag("place_order_button")
                 ) {
                     Text(
-                        text = if (isUserInactive) "প্রথমে অ্যাকাউন্ট সক্রিয় করুন" else "অর্ডার পাঠান (${grandTotal.formatBdt()})",
+                        text = if (isUserInactive) {
+                            "প্রথমে অ্যাকাউন্ট সক্রিয় করুন"
+                        } else if (totalRequestedAdvance > 0.0) {
+                            "অর্ডার ও অগ্রিম তথ্য পাঠান (${totalRequestedAdvance.formatBdt()} অগ্রিম)"
+                        } else {
+                            "পাইকারি অর্ডার পাঠান (${grandTotal.formatBdt()})"
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )

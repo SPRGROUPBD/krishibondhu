@@ -43,9 +43,20 @@ class MarketplaceRepository(
     val paymentSettings: Flow<PaymentSettingsEntity> = db.paymentSettingsDao().observeSettings().map {
         it ?: PaymentSettingsEntity()
     }
+    val farmerPaymentSettings: Flow<List<FarmerPaymentSettingsEntity>> = db.farmerPaymentSettingsDao().observeAll()
+    val orderPayments: Flow<List<OrderPaymentEntity>> = db.orderPaymentDao().observeAllPayments()
 
     private val _adConfig = MutableStateFlow(AdConfig())
     val adConfig: StateFlow<AdConfig> = _adConfig.asStateFlow()
+
+    fun observeFarmerPaymentSettings(farmerId: String): Flow<FarmerPaymentSettingsEntity?> =
+        db.farmerPaymentSettingsDao().observeForFarmer(farmerId)
+
+    fun observeOrderPayments(orderId: String): Flow<List<OrderPaymentEntity>> =
+        db.orderPaymentDao().observePaymentsForOrder(orderId)
+
+    suspend fun getFarmerPaymentSettingsOnce(farmerId: String): FarmerPaymentSettingsEntity? =
+        db.farmerPaymentSettingsDao().getForFarmerOnce(farmerId)
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
@@ -902,6 +913,71 @@ class MarketplaceRepository(
         return Result.success(updated)
     }
 
+    suspend fun saveFarmerPaymentSettings(
+        farmer: UserEntity,
+        bKashNumber: String,
+        nagadNumber: String,
+        rocketNumber: String,
+        bankAccountInfo: String
+    ): Result<FarmerPaymentSettingsEntity> {
+        if (farmer.role != UserRole.FARMER.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র কৃষক নিজস্ব পেমেন্ট নম্বর সেটিংস সংরক্ষণ করতে পারেন।"))
+        }
+        val cleanBkash = if (bKashNumber.isBlank()) "" else SecurityHashUtil.normalizePhone(bKashNumber)
+        val cleanNagad = if (nagadNumber.isBlank()) "" else SecurityHashUtil.normalizePhone(nagadNumber)
+        val cleanRocket = if (rocketNumber.isBlank()) "" else SecurityHashUtil.normalizePhone(rocketNumber)
+        val cleanBank = bankAccountInfo.trim()
+
+        if (cleanBkash.isNotEmpty() && cleanBkash.length < 10) {
+            return Result.failure(IllegalArgumentException("সঠিক বিকাশ (bKash) মোবাইল নম্বর লিখুন।"))
+        }
+        if (cleanNagad.isNotEmpty() && cleanNagad.length < 10) {
+            return Result.failure(IllegalArgumentException("সঠিক নগদ (Nagad) মোবাইল নম্বর লিখুন।"))
+        }
+        if (cleanRocket.isNotEmpty() && cleanRocket.length < 10) {
+            return Result.failure(IllegalArgumentException("সঠিক রকেট (Rocket) মোবাইল নম্বর লিখুন।"))
+        }
+        if (cleanBkash.isEmpty() && cleanNagad.isEmpty() && cleanRocket.isEmpty() && cleanBank.isEmpty()) {
+            return Result.failure(IllegalArgumentException("অন্তত একটি পেমেন্ট মাধ্যম (bKash / Nagad / Rocket / Bank) লিখুন।"))
+        }
+
+        val now = System.currentTimeMillis()
+        val settings = FarmerPaymentSettingsEntity(
+            farmerId = farmer.id,
+            bKashNumber = cleanBkash,
+            nagadNumber = cleanNagad,
+            rocketNumber = cleanRocket,
+            bankAccountInfo = cleanBank,
+            updatedAt = now
+        )
+        db.farmerPaymentSettingsDao().upsert(settings)
+        rtdbSync.pushFarmerPaymentSettings(settings)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = farmer.id,
+            actorRole = farmer.role,
+            actionBn = "কৃষকের সরাসরি পেমেন্ট নম্বর আপডেট",
+            targetEntity = "FarmerPaymentSettings",
+            targetId = farmer.id,
+            detailsBn = "bKash: ${cleanBkash.ifBlank { "-" }}, Nagad: ${cleanNagad.ifBlank { "-" }}, Rocket: ${cleanRocket.ifBlank { "-" }}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(settings)
+    }
+
+    private suspend fun isDuplicateTransactionIdAnywhere(txNormalized: String): Boolean {
+        if (txNormalized.isBlank()) return false
+        rtdbSync.fetchAllOrderPayments(db)
+        rtdbSync.fetchAllActivationPayments(db)
+        val inOrderPayments = db.orderPaymentDao().findByNormalizedTxId(txNormalized) != null
+        val inActivation = db.activationPaymentDao().getAllPaymentsOnce().any {
+            normalizeTransactionId(it.transactionId) == txNormalized
+        }
+        return inOrderPayments || inActivation
+    }
+
     suspend fun addToCart(product: ProductEntity, requestedQty: Double, actor: UserEntity? = null): Result<Unit> {
         if (actor != null) {
             val gate = requireActiveMarketplaceUser(actor, "কার্টে ফসল যোগ করার")
@@ -957,7 +1033,10 @@ class MarketplaceRepository(
         deliveryOption: DeliveryOption,
         deliveryAddress: String,
         paymentMethod: PaymentMethod,
-        transactionRef: String
+        transactionRef: String,
+        advanceByFarmer: Map<String, Double> = emptyMap(),
+        senderNumber: String = "",
+        paymentReferenceNote: String = ""
     ): Result<List<OrderEntity>> {
         val gate = requireActiveMarketplaceUser(buyer, "অর্ডার করার")
         if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
@@ -969,21 +1048,37 @@ class MarketplaceRepository(
         if (deliveryOption == DeliveryOption.DIRECT_DELIVERY && deliveryAddress.isBlank()) {
             return Result.failure(IllegalArgumentException("ডেলিভারির ঠিকানা লিখুন।"))
         }
-        if (paymentMethod.isDigital && transactionRef.isBlank()) {
-            return Result.failure(
-                IllegalArgumentException("${paymentMethod.labelBn} পেমেন্টের জন্য ট্রানজেকশন রেফারেন্স দিন।")
-            )
+
+        val cleanTxId = normalizeTransactionId(transactionRef)
+        val cleanSender = SecurityHashUtil.normalizePhone(senderNumber).ifBlank { buyer.phone }
+        val groupedByFarmer = items.groupBy { it.farmerId }
+        val totalRequestedAdvance = groupedByFarmer.keys.sumOf { fId -> advanceByFarmer[fId] ?: 0.0 }
+
+        if (totalRequestedAdvance > 0.0) {
+            if (cleanTxId.length < 4) {
+                return Result.failure(
+                    IllegalArgumentException("অগ্রিম পেমেন্টের জন্য সঠিক Transaction ID লিখুন।")
+                )
+            }
+            if (isDuplicateTransactionIdAnywhere(cleanTxId)) {
+                return Result.failure(
+                    IllegalArgumentException("এই Transaction ID ($cleanTxId) পূর্বেই ব্যবহার করা হয়েছে। নতুন ও সঠিক Transaction ID দিন।")
+                )
+            }
         }
 
         val now = System.currentTimeMillis()
         val createdBundles = mutableListOf<Triple<OrderEntity, List<OrderItemEntity>, NotificationEntity>>()
+        val createdPayments = mutableListOf<OrderPaymentEntity>()
+        val createdAudits = mutableListOf<AuditLogEntity>()
         val updatedProducts = mutableListOf<ProductEntity>()
 
         return runCatching {
             db.withTransaction {
-                val groupedByFarmer = items.groupBy { it.farmerId }
+                var txUsedForOrder = false
                 groupedByFarmer.forEach { (farmerId, farmerItems) ->
                     val farmer = db.userDao().getUserById(farmerId)
+                    val farmerPay = db.farmerPaymentSettingsDao().getForFarmerOnce(farmerId)
                     var productTotal = 0.0
                     var maxDeliveryFee = 0.0
                     val orderId = "ord_${UUID.randomUUID().toString().take(8)}"
@@ -1017,14 +1112,43 @@ class MarketplaceRepository(
 
                     val deliveryCharge = if (deliveryOption == DeliveryOption.FARM_PICKUP) 0.0 else maxDeliveryFee
                     val grandTotal = productTotal + deliveryCharge
+                    val requestedAdvance = kotlin.math.round((advanceByFarmer[farmerId] ?: 0.0) * 100.0) / 100.0
+                    if (requestedAdvance < 0.0 || requestedAdvance > grandTotal + 0.01) {
+                        throw IllegalArgumentException(
+                            "অগ্রিম পেমেন্টের পরিমাণ ০ থেকে মোট মূল্যের (${grandTotal.formatBdt()}) মধ্যে হতে হবে।"
+                        )
+                    }
+                    val cappedAdvance = requestedAdvance.coerceIn(0.0, grandTotal)
+
+                    val receiverNumber = when (paymentMethod) {
+                        PaymentMethod.BKASH -> farmerPay?.bKashNumber.orEmpty()
+                        PaymentMethod.NAGAD -> farmerPay?.nagadNumber.orEmpty()
+                        PaymentMethod.ROCKET -> farmerPay?.rocketNumber.orEmpty()
+                        PaymentMethod.BANK_TRANSFER -> farmerPay?.bankAccountInfo.orEmpty()
+                        else -> ""
+                    }
+                    if (cappedAdvance > 0.0 && paymentMethod in setOf(PaymentMethod.BKASH, PaymentMethod.NAGAD, PaymentMethod.ROCKET, PaymentMethod.BANK_TRANSFER)) {
+                        if (receiverNumber.isBlank()) {
+                            throw IllegalArgumentException(
+                                "কৃষক ${farmer?.fullName ?: farmerItems.first().farmerName} এখনো ${paymentMethod.labelEn} নম্বর সেট করেননি। অন্য পেমেন্ট মাধ্যম অথবা শূন্য (৳0) অগ্রিম বেছে নিন।"
+                            )
+                        }
+                    }
+
                     val summary = farmerItems.joinToString(", ") {
                         "${it.productNameBn} × ${it.quantity.formatQty()} মণ"
                     }
-                    val paymentStatus = when {
-                        transactionRef.isNotBlank() -> "SUBMITTED"
-                        paymentMethod.isDigital -> "AWAITING_GATEWAY"
-                        else -> "PENDING"
+                    val orderTxId = if (cappedAdvance > 0.0) {
+                        if (!txUsedForOrder) {
+                            txUsedForOrder = true
+                            cleanTxId
+                        } else {
+                            "${cleanTxId}_${farmerId.takeLast(4)}"
+                        }
+                    } else {
+                        ""
                     }
+                    val paymentStatus = if (cappedAdvance > 0.0) "PENDING_VERIFICATION" else "ZERO_ADVANCE_PENDING"
 
                     val order = OrderEntity(
                         id = orderId,
@@ -1035,7 +1159,7 @@ class MarketplaceRepository(
                         farmerId = farmerId,
                         farmerName = farmer?.fullName ?: farmerItems.first().farmerName,
                         farmerPhone = farmer?.phone ?: "",
-                        status = OrderStatus.PENDING.name,
+                        status = OrderStatus.PAYMENT_PENDING.name,
                         deliveryOption = deliveryOption.name,
                         deliveryAddress = if (deliveryOption == DeliveryOption.FARM_PICKUP) {
                             "সরাসরি কৃষকের খামার থেকে সংগ্রহ"
@@ -1049,47 +1173,92 @@ class MarketplaceRepository(
                         deliveryCharge = deliveryCharge,
                         grandTotal = grandTotal,
                         paymentMethod = paymentMethod.name,
-                        transactionReference = transactionRef.trim(),
+                        transactionReference = orderTxId,
                         paymentStatus = paymentStatus,
                         itemsSummary = summary,
                         createdAt = now,
                         updatedAt = now,
                         isDemoRecord = false,
-                        paymentSenderNumber = if (transactionRef.isNotBlank()) buyer.phone else "",
+                        paymentSenderNumber = if (cappedAdvance > 0.0) cleanSender else "",
                         paymentReceiptUri = "",
                         farmerPaymentConfirmed = false,
                         farmerPaymentConfirmedAt = 0L,
                         adminPaymentVerified = false,
                         adminPaymentVerifiedBy = "",
-                        adminPaymentVerifiedAt = 0L
+                        adminPaymentVerifiedAt = 0L,
+                        advanceAmountRequested = cappedAdvance,
+                        verifiedAdvanceTotal = 0.0,
+                        remainingDue = grandTotal
                     )
 
+                    if (cappedAdvance > 0.0) {
+                        val op = OrderPaymentEntity(
+                            id = "op_${UUID.randomUUID().toString().take(8)}",
+                            orderId = orderId,
+                            orderCode = orderCode,
+                            buyerId = buyer.id,
+                            buyerName = buyer.fullName,
+                            farmerId = farmerId,
+                            farmerName = order.farmerName,
+                            amount = cappedAdvance,
+                            paymentMethod = paymentMethod.name,
+                            receiverNumber = receiverNumber,
+                            senderNumber = cleanSender,
+                            transactionId = orderTxId,
+                            transactionIdNormalized = normalizeTransactionId(orderTxId),
+                            referenceNote = paymentReferenceNote.trim(),
+                            status = OrderPaymentStatus.PENDING_VERIFICATION.name,
+                            createdAt = now,
+                            updatedAt = now
+                        )
+                        db.orderPaymentDao().upsertPayment(op)
+                        createdPayments.add(op)
+                    }
+
+                    val notifMsg = if (cappedAdvance > 0.0) {
+                        "ক্রেতা ${buyer.fullName} $summary (মোট ${grandTotal.formatBdt()}) অর্ডার করেছেন এবং ${cappedAdvance.formatBdt()} অগ্রিম পেমেন্ট (${paymentMethod.labelEn}, TxID: $orderTxId) জমা দিয়েছেন। নিজ অ্যাকাউন্টে টাকা দেখে যাচাই করে নিশ্চিত করুন।"
+                    } else {
+                        "ক্রেতা ${buyer.fullName} $summary (মোট ${grandTotal.formatBdt()}) অর্ডার করেছেন (অগ্রিম ৳০)। অনুগ্রহ করে অর্ডারটি অনুমোদন বা প্রত্যাখ্যান করুন।"
+                    }
                     val farmerNotification = NotificationEntity(
                         id = "not_${UUID.randomUUID().toString().take(8)}",
                         userId = farmerId,
                         targetRole = UserRole.FARMER.name,
                         senderRole = UserRole.BUYER.name,
                         orderId = orderId,
-                        type = "ORDER_NEW",
-                        titleBn = "নতুন অর্ডার এসেছে ($orderCode)",
-                        messageBn = "ক্রেতা ${buyer.fullName} (${buyer.upazila}, ${buyer.district}) $summary অর্ডার করেছেন — মোট ${grandTotal.formatBdt()}। অনুগ্রহ করে অর্ডার গ্রহণ বা প্রত্যাখ্যান করুন।",
+                        type = if (cappedAdvance > 0.0) "ORDER_ADVANCE_SUBMITTED" else "ORDER_NEW",
+                        titleBn = if (cappedAdvance > 0.0) "নতুন অর্ডার ও অগ্রিম পেমেন্ট ($orderCode)" else "নতুন পাইকারি অর্ডার ($orderCode)",
+                        messageBn = notifMsg,
                         isRead = false,
                         createdAt = now
+                    )
+                    val audit = AuditLogEntity(
+                        id = "aud_${UUID.randomUUID().toString().take(8)}",
+                        actorId = buyer.id,
+                        actorRole = buyer.role,
+                        actionBn = "পাইকারি অর্ডার ও অগ্রিম তথ্য তৈরি",
+                        targetEntity = "Order",
+                        targetId = orderId,
+                        detailsBn = "$orderCode — মোট ${grandTotal.formatBdt()}, প্রস্তাবিত অগ্রিম ${cappedAdvance.formatBdt()}, অবশিষ্ট বকেয়া ${grandTotal.formatBdt()}"
                     )
 
                     db.orderDao().insertOrders(listOf(order))
                     db.orderDao().insertOrderItems(orderLineEntities)
                     db.notificationAuditDao().insertNotification(farmerNotification)
+                    db.notificationAuditDao().insertAuditLog(audit)
                     createdBundles.add(Triple(order, orderLineEntities, farmerNotification))
+                    createdAudits.add(audit)
                 }
                 db.cartDao().clearCart()
             }
 
             updatedProducts.forEach { rtdbSync.pushProduct(it) }
+            createdPayments.forEach { rtdbSync.pushOrderPayment(it) }
             createdBundles.forEach { (order, lineItems, notif) ->
                 rtdbSync.pushOrder(order, lineItems)
                 rtdbSync.pushNotification(notif)
             }
+            createdAudits.forEach { rtdbSync.pushAuditLog(it) }
             createdBundles.map { it.first }
         }
     }
@@ -1109,7 +1278,7 @@ class MarketplaceRepository(
         supportsFarmPickup: Boolean,
         supportsDirectDelivery: Boolean,
         deliveryCharge: Double,
-        isWholesale: Boolean
+        isWholesale: Boolean = true
     ): Result<ProductEntity> {
         if (farmer.role != UserRole.FARMER.name) {
             return Result.failure(IllegalStateException("শুধুমাত্র কৃষক নিজস্ব ফসল তালিকাভুক্ত করতে পারেন।"))
@@ -1119,11 +1288,11 @@ class MarketplaceRepository(
 
         if (!ProductUnit.isAllowedUnit(unit)) {
             return Result.failure(
-                IllegalArgumentException("কৃষি বন্ধুতে কেজি নয়, শুধুমাত্র 'মণ' এককে ফসল বিক্রি করা যাবে (১ মণ = ৪০ কেজি)।")
+                IllegalArgumentException("কৃষি বন্ধু পাইকারি বাজারে শুধুমাত্র 'মণ' এককে ফসল বিক্রি করা যাবে (১ মণ = ৪০ কেজি)।")
             )
         }
         if (nameBn.isBlank() || quantity <= 0.0 || pricePerUnit <= 0.0 || deliveryCharge < 0.0) {
-            return Result.failure(IllegalArgumentException("ফসলের নাম, সঠিক পরিমাণ (মণ) ও প্রতি মণের দাম দিন।"))
+            return Result.failure(IllegalArgumentException("ফসলের নাম, সঠিক পরিমাণ (মণ) ও প্রতি মণের পাইকারি দাম দিন।"))
         }
         val activeFarmer = gate.getOrThrow()
         val now = System.currentTimeMillis()
@@ -1156,7 +1325,7 @@ class MarketplaceRepository(
             supportsFarmPickup = supportsFarmPickup,
             supportsDirectDelivery = supportsDirectDelivery,
             deliveryChargeEstimate = if (supportsDirectDelivery) deliveryCharge else 0.0,
-            isWholesale = isWholesale,
+            isWholesale = true,
             isPopular = false,
             status = "ACTIVE",
             createdAt = now,
@@ -1207,15 +1376,16 @@ class MarketplaceRepository(
         return Result.success(Unit)
     }
 
-    suspend fun submitOrderPayment(
+    suspend fun submitOrderAdvancePayment(
         orderId: String,
         buyer: UserEntity,
+        amount: Double,
         paymentMethod: PaymentMethod,
         senderNumber: String,
-        transactionReference: String,
-        receiptUri: String
-    ): Result<OrderEntity> {
-        val gate = requireActiveMarketplaceUser(buyer, "অর্ডার পেমেন্ট জমা দেওয়ার")
+        transactionId: String,
+        referenceNote: String = ""
+    ): Result<OrderPaymentEntity> {
+        val gate = requireActiveMarketplaceUser(buyer, "অগ্রিম পেমেন্ট জমা দেওয়ার")
         if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
 
         val order = db.orderDao().getOrderById(orderId)
@@ -1223,42 +1393,86 @@ class MarketplaceRepository(
         if (order.buyerId != buyer.id) {
             return Result.failure(IllegalAccessException("শুধুমাত্র অর্ডারকারী ক্রেতা পেমেন্ট তথ্য জমা দিতে পারবেন।"))
         }
-        if (order.status == OrderStatus.REJECTED.name || order.status == OrderStatus.CANCELLED.name) {
-            return Result.failure(IllegalStateException("বাতিল বা প্রত্যাখ্যাত অর্ডারে পেমেন্ট জমা দেওয়া যাবে না।"))
-        }
-        if (order.status == OrderStatus.PENDING.name) {
-            return Result.failure(IllegalStateException("কৃষক অর্ডারটি গ্রহণ (Accept) করার পর পেমেন্ট জমা দিন।"))
+        if (order.status in setOf(OrderStatus.REJECTED.name, OrderStatus.CANCELLED.name, OrderStatus.COMPLETED.name)) {
+            return Result.failure(IllegalStateException("এই অবস্থায় অর্ডারে পেমেন্ট জমা দেওয়া যাবে না।"))
         }
 
+        val currentRemainingDue = kotlin.math.max(0.0, order.grandTotal - order.verifiedAdvanceTotal)
+        if (currentRemainingDue <= 0.0) {
+            return Result.failure(IllegalStateException("এই অর্ডারের সম্পূর্ণ অর্থ ইতোমধ্যে পরিশোধিত।"))
+        }
+        val roundedAmount = kotlin.math.round(amount * 100.0) / 100.0
+        if (roundedAmount <= 0.0 || roundedAmount > currentRemainingDue + 0.01) {
+            return Result.failure(
+                IllegalArgumentException("পেমেন্টের পরিমাণ অবশ্যই ৳১ থেকে অবশিষ্ট বকেয়া (${currentRemainingDue.formatBdt()}) এর মধ্যে হতে হবে।")
+            )
+        }
+        val cleanTxId = normalizeTransactionId(transactionId)
+        if (cleanTxId.length < 4) {
+            return Result.failure(IllegalArgumentException("সঠিক ট্রানজেকশন আইডি (Transaction ID) লিখুন।"))
+        }
+        if (isDuplicateTransactionIdAnywhere(cleanTxId)) {
+            return Result.failure(
+                IllegalArgumentException("এই ট্রানজেকশন আইডি ($cleanTxId) পূর্বেই ব্যবহার করা হয়েছে।")
+            )
+        }
+
+        val farmerPay = db.farmerPaymentSettingsDao().getForFarmerOnce(order.farmerId)
+        val receiverNumber = when (paymentMethod) {
+            PaymentMethod.BKASH -> farmerPay?.bKashNumber.orEmpty()
+            PaymentMethod.NAGAD -> farmerPay?.nagadNumber.orEmpty()
+            PaymentMethod.ROCKET -> farmerPay?.rocketNumber.orEmpty()
+            PaymentMethod.BANK_TRANSFER -> farmerPay?.bankAccountInfo.orEmpty()
+            else -> ""
+        }
         val cleanSender = SecurityHashUtil.normalizePhone(senderNumber).ifBlank { buyer.phone }
-        val cleanTxId = normalizeTransactionId(transactionReference)
-        if (paymentMethod.isDigital && cleanTxId.length < 4 && receiptUri.isBlank()) {
-            return Result.failure(IllegalArgumentException("ডিজিটাল পেমেন্টের জন্য সঠিক Transaction ID অথবা রসিদ ছবি দিন।"))
-        }
-
         val now = System.currentTimeMillis()
-        db.orderDao().updateBuyerPaymentSubmission(
-            orderId = orderId,
+        val payment = OrderPaymentEntity(
+            id = "op_${UUID.randomUUID().toString().take(8)}",
+            orderId = order.id,
+            orderCode = order.orderCode,
+            buyerId = buyer.id,
+            buyerName = buyer.fullName,
+            farmerId = order.farmerId,
+            farmerName = order.farmerName,
+            amount = roundedAmount.coerceAtMost(currentRemainingDue),
             paymentMethod = paymentMethod.name,
+            receiverNumber = receiverNumber,
             senderNumber = cleanSender,
-            txId = cleanTxId,
-            receiptUri = receiptUri.trim(),
-            paymentStatus = "SUBMITTED",
-            now = now
+            transactionId = cleanTxId,
+            transactionIdNormalized = cleanTxId,
+            referenceNote = referenceNote.trim(),
+            status = OrderPaymentStatus.PENDING_VERIFICATION.name,
+            createdAt = now,
+            updatedAt = now
         )
-        val updatedOrder = db.orderDao().getOrderById(orderId)!!
-        val items = db.orderDao().getOrderItemsOnce(orderId)
-        rtdbSync.pushOrder(updatedOrder, items)
+
+        db.withTransaction {
+            db.orderPaymentDao().upsertPayment(payment)
+            db.orderDao().updateBuyerPaymentSubmission(
+                orderId = order.id,
+                paymentMethod = paymentMethod.name,
+                senderNumber = cleanSender,
+                txId = cleanTxId,
+                receiptUri = "",
+                paymentStatus = "PENDING_VERIFICATION",
+                now = now
+            )
+        }
+        rtdbSync.pushOrderPayment(payment)
+        db.orderDao().getOrderById(order.id)?.let { updatedOrder ->
+            rtdbSync.pushOrder(updatedOrder, db.orderDao().getOrderItemsOnce(order.id))
+        }
 
         val farmerNotif = NotificationEntity(
             id = "not_${UUID.randomUUID().toString().take(8)}",
             userId = order.farmerId,
             targetRole = UserRole.FARMER.name,
             senderRole = UserRole.BUYER.name,
-            orderId = orderId,
+            orderId = order.id,
             type = "ORDER_PAYMENT_SUBMITTED",
-            titleBn = "ক্রেতা পেমেন্ট তথ্য জমা দিয়েছেন (${order.orderCode})",
-            messageBn = "ক্রেতা ${buyer.fullName} ${order.grandTotal.formatBdt()} (${paymentMethod.labelEn}, TxID: ${cleanTxId.ifBlank { "রসিদ" }}) পাঠিয়েছেন। টাকা বুঝে পেলে 'টাকা বুঝে পেয়েছি' অনুমোদন দিলেই অর্ডার Confirmed হবে।",
+            titleBn = "নতুন অগ্রিম/আংশিক পেমেন্ট জমা (${order.orderCode})",
+            messageBn = "ক্রেতা ${buyer.fullName} ${payment.amount.formatBdt()} (${paymentMethod.labelEn}, TxID: $cleanTxId) পাঠিয়েছেন। নিজ অ্যাকাউন্টের ব্যালেন্স দেখে নিশ্চিত করুন।",
             isRead = false,
             createdAt = now
         )
@@ -1269,14 +1483,212 @@ class MarketplaceRepository(
             id = "aud_${UUID.randomUUID().toString().take(8)}",
             actorId = buyer.id,
             actorRole = buyer.role,
-            actionBn = "অর্ডার পেমেন্ট তথ্য জমা",
-            targetEntity = "Order",
-            targetId = orderId,
-            detailsBn = "${order.orderCode} — ${paymentMethod.labelEn} | TxID: ${cleanTxId.ifBlank { "নগদ/রসিদ" }}"
+            actionBn = "অর্ডার অগ্রিম/আংশিক পেমেন্ট জমা",
+            targetEntity = "OrderPayment",
+            targetId = payment.id,
+            detailsBn = "${order.orderCode} — ${payment.amount.formatBdt()} (${paymentMethod.labelEn}, TxID: $cleanTxId)"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(payment)
+    }
+
+    suspend fun farmerVerifyOrderPayment(
+        paymentId: String,
+        farmer: UserEntity,
+        approved: Boolean,
+        rejectionReason: String = ""
+    ): Result<OrderEntity> {
+        val gate = requireActiveMarketplaceUser(farmer, "পেমেন্ট যাচাই করার")
+        if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+
+        val payment = db.orderPaymentDao().getPaymentById(paymentId)
+            ?: return Result.failure(IllegalArgumentException("পেমেন্ট রেকর্ড পাওয়া যায়নি।"))
+        if (payment.farmerId != farmer.id) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সংশ্লিষ্ট কৃষক এই পেমেন্ট যাচাই করতে পারবেন।"))
+        }
+        if (payment.status != OrderPaymentStatus.PENDING_VERIFICATION.name) {
+            return Result.failure(IllegalStateException("এই পেমেন্টটি ইতোমধ্যে যাচাই করা হয়েছে (${payment.status})।"))
+        }
+        val order = db.orderDao().getOrderById(payment.orderId)
+            ?: return Result.failure(IllegalArgumentException("সংশ্লিষ্ট অর্ডার পাওয়া যায়নি।"))
+
+        val now = System.currentTimeMillis()
+        val updatedPayment = if (approved) {
+            payment.copy(
+                status = OrderPaymentStatus.CONFIRMED.name,
+                rejectionReason = "",
+                verifiedBy = farmer.id,
+                verifiedAt = now,
+                updatedAt = now
+            )
+        } else {
+            payment.copy(
+                status = OrderPaymentStatus.REJECTED.name,
+                rejectionReason = rejectionReason.trim().ifBlank { "কৃষক অ্যাকাউন্টে টাকা পাওয়া যায়নি বা তথ্য মেলেনি।" },
+                verifiedBy = farmer.id,
+                verifiedAt = now,
+                updatedAt = now
+            )
+        }
+
+        db.withTransaction {
+            db.orderPaymentDao().upsertPayment(updatedPayment)
+            val confirmedSum = kotlin.math.min(
+                order.grandTotal,
+                db.orderPaymentDao().getConfirmedTotalForOrder(order.id)
+            )
+            val newRemaining = kotlin.math.max(0.0, order.grandTotal - confirmedSum)
+            val meetsRequiredAdvance = confirmedSum > 0.0 &&
+                (order.advanceAmountRequested <= 0.0 || confirmedSum + 0.01 >= order.advanceAmountRequested)
+            val nextStatus = when {
+                approved && meetsRequiredAdvance && order.status in setOf(
+                    OrderStatus.PAYMENT_PENDING.name,
+                    OrderStatus.PENDING.name,
+                    OrderStatus.ACCEPTED.name
+                ) -> OrderStatus.CONFIRMED.name
+                else -> order.status
+            }
+            val nextPayStatus = when {
+                newRemaining <= 0.01 && confirmedSum > 0.0 -> "PAID"
+                confirmedSum > 0.0 -> "PARTIAL_ADVANCE_VERIFIED"
+                approved -> order.paymentStatus
+                else -> "REJECTED"
+            }
+            db.orderDao().updateOrderAdvanceAndStatus(
+                orderId = order.id,
+                verifiedAdvanceTotal = confirmedSum,
+                remainingDue = newRemaining,
+                farmerConfirmed = confirmedSum > 0.0,
+                farmerConfirmedAt = if (confirmedSum > 0.0) now else order.farmerPaymentConfirmedAt,
+                paymentStatus = nextPayStatus,
+                status = nextStatus,
+                now = now
+            )
+        }
+
+        val updatedOrder = db.orderDao().getOrderById(order.id)!!
+        val items = db.orderDao().getOrderItemsOnce(order.id)
+        rtdbSync.pushOrderPayment(updatedPayment)
+        rtdbSync.pushOrder(updatedOrder, items)
+
+        val buyerNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = order.buyerId,
+            targetRole = UserRole.BUYER.name,
+            senderRole = UserRole.FARMER.name,
+            orderId = order.id,
+            type = if (approved) "ORDER_PAYMENT_VERIFIED" else "ORDER_PAYMENT_REJECTED",
+            titleBn = if (approved) "অগ্রিম পেমেন্ট নিশ্চিত হয়েছে (${order.orderCode})" else "অগ্রিম পেমেন্ট প্রত্যাখ্যাত হয়েছে (${order.orderCode})",
+            messageBn = if (approved) {
+                "কৃষক ${farmer.fullName} ${payment.amount.formatBdt()} (TxID: ${payment.transactionId}) নিশ্চিত করেছেন। মোট যাচাইকৃত অগ্রিম: ${updatedOrder.verifiedAdvanceTotal.formatBdt()}, অবশিষ্ট বকেয়া: ${updatedOrder.remainingDue.formatBdt()}।"
+            } else {
+                "কারণ: ${updatedPayment.rejectionReason}"
+            },
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(buyerNotif)
+        rtdbSync.pushNotification(buyerNotif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = farmer.id,
+            actorRole = farmer.role,
+            actionBn = if (approved) "কৃষক অগ্রিম পেমেন্ট নিশ্চিতকরণ" else "কৃষক অগ্রিম পেমেন্ট প্রত্যাখ্যান",
+            targetEntity = "OrderPayment",
+            targetId = payment.id,
+            detailsBn = "${order.orderCode} | ${payment.amount.formatBdt()} | VerifiedTotal=${updatedOrder.verifiedAdvanceTotal.formatBdt()} | Due=${updatedOrder.remainingDue.formatBdt()}"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)
         return Result.success(updatedOrder)
+    }
+
+    suspend fun approveZeroAdvanceOrder(
+        orderId: String,
+        farmer: UserEntity
+    ): Result<OrderEntity> {
+        val gate = requireActiveMarketplaceUser(farmer, "অর্ডার অনুমোদন করার")
+        if (gate.isFailure) return Result.failure(gate.exceptionOrNull()!!)
+
+        val order = db.orderDao().getOrderById(orderId)
+            ?: return Result.failure(IllegalArgumentException("অর্ডার পাওয়া যায়নি।"))
+        if (order.farmerId != farmer.id) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সংশ্লিষ্ট কৃষক এই অর্ডার অনুমোদন করতে পারেন।"))
+        }
+        if (order.status != OrderStatus.PAYMENT_PENDING.name && order.status != OrderStatus.PENDING.name) {
+            return Result.failure(IllegalStateException("এই অর্ডারটি ইতোমধ্যে অনুমোদিত বা সম্পন্ন হয়েছে।"))
+        }
+        val now = System.currentTimeMillis()
+        db.orderDao().updateOrderAdvanceAndStatus(
+            orderId = order.id,
+            verifiedAdvanceTotal = order.verifiedAdvanceTotal,
+            remainingDue = kotlin.math.max(0.0, order.grandTotal - order.verifiedAdvanceTotal),
+            farmerConfirmed = order.verifiedAdvanceTotal > 0.0,
+            farmerConfirmedAt = order.farmerPaymentConfirmedAt,
+            paymentStatus = "ZERO_ADVANCE_APPROVED",
+            status = OrderStatus.CONFIRMED.name,
+            now = now
+        )
+        val updatedOrder = db.orderDao().getOrderById(order.id)!!
+        rtdbSync.pushOrder(updatedOrder, db.orderDao().getOrderItemsOnce(order.id))
+
+        val buyerNotif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = order.buyerId,
+            targetRole = UserRole.BUYER.name,
+            senderRole = UserRole.FARMER.name,
+            orderId = order.id,
+            type = "ZERO_ADVANCE_APPROVED",
+            titleBn = "কৃষক অর্ডারটি অনুমোদন করেছেন (${order.orderCode})",
+            messageBn = "কৃষক ${farmer.fullName} শূন্য-অগ্রিম অর্ডারটি Confirmed করেছেন। অবশিষ্ট বকেয়া: ${updatedOrder.remainingDue.formatBdt()}।",
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(buyerNotif)
+        rtdbSync.pushNotification(buyerNotif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = farmer.id,
+            actorRole = farmer.role,
+            actionBn = "শূন্য-অগ্রিম অর্ডার অনুমোদন",
+            targetEntity = "Order",
+            targetId = order.id,
+            detailsBn = "${order.orderCode} — অবশিষ্ট বকেয়া ${updatedOrder.remainingDue.formatBdt()}"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updatedOrder)
+    }
+
+    suspend fun submitOrderPayment(
+        orderId: String,
+        buyer: UserEntity,
+        paymentMethod: PaymentMethod,
+        senderNumber: String,
+        transactionReference: String,
+        receiptUri: String
+    ): Result<OrderEntity> {
+        val order = db.orderDao().getOrderById(orderId)
+            ?: return Result.failure(IllegalArgumentException("অর্ডার পাওয়া যায়নি।"))
+        val amountToSubmit = kotlin.math.max(0.0, order.grandTotal - order.verifiedAdvanceTotal)
+            .takeIf { it > 0.0 } ?: order.grandTotal
+        val res = submitOrderAdvancePayment(
+            orderId = orderId,
+            buyer = buyer,
+            amount = amountToSubmit,
+            paymentMethod = paymentMethod,
+            senderNumber = senderNumber,
+            transactionId = transactionReference,
+            referenceNote = ""
+        )
+        return if (res.isSuccess) {
+            Result.success(db.orderDao().getOrderById(orderId)!!)
+        } else {
+            Result.failure(res.exceptionOrNull()!!)
+        }
     }
 
     suspend fun farmerConfirmPaymentReceived(
@@ -1288,65 +1700,38 @@ class MarketplaceRepository(
 
         val order = db.orderDao().getOrderById(orderId)
             ?: return Result.failure(IllegalArgumentException("অর্ডার পাওয়া যায়নি।"))
-        if (order.farmerId != farmer.id && farmer.role != UserRole.ADMIN.name) {
+        if (order.farmerId != farmer.id) {
             return Result.failure(IllegalAccessException("শুধুমাত্র সংশ্লিষ্ট কৃষক টাকা বুঝে পাওয়ার নিশ্চিতকরণ দিতে পারেন।"))
         }
-        if (order.status == OrderStatus.PENDING.name || order.status == OrderStatus.REJECTED.name || order.status == OrderStatus.CANCELLED.name) {
+        if (order.status == OrderStatus.REJECTED.name || order.status == OrderStatus.CANCELLED.name) {
             return Result.failure(IllegalStateException("এই অবস্থায় টাকা প্রাপ্তি নিশ্চিত করা যাবে না।"))
         }
 
-        val now = System.currentTimeMillis()
-        db.withTransaction {
-            db.orderDao().updateFarmerPaymentConfirmed(
-                orderId = orderId,
-                confirmed = true,
-                confirmedAt = now,
-                now = now
-            )
-            // Security Rule: Farmer confirming money received & approving payment directly confirms the order (no admin approval needed)
-            if (order.status in setOf(
-                    OrderStatus.ACCEPTED.name,
-                    OrderStatus.PROCESSING.name,
-                    OrderStatus.READY_FOR_PICKUP.name,
-                    OrderStatus.SHIPPED.name,
-                    OrderStatus.DELIVERED.name
-                )
-            ) {
-                db.orderDao().updateOrderStatus(orderId, OrderStatus.CONFIRMED.name, now)
-                db.orderDao().updatePaymentDetails(orderId, "PAID", order.transactionReference, now)
+        // If there are pending orderPayments, confirm them cleanly; otherwise confirm remaining balance (e.g. direct cash pickup)
+        val pending = db.orderPaymentDao().getPaymentsForOrderOnce(orderId)
+            .filter { it.status == OrderPaymentStatus.PENDING_VERIFICATION.name }
+        if (pending.isNotEmpty()) {
+            var latest = order
+            for (p in pending) {
+                val r = farmerVerifyOrderPayment(p.id, farmer, true)
+                if (r.isSuccess) latest = r.getOrThrow()
             }
+            return Result.success(latest)
         }
 
-        val updatedOrder = db.orderDao().getOrderById(orderId)!!
-        val items = db.orderDao().getOrderItemsOnce(orderId)
-        rtdbSync.pushOrder(updatedOrder, items)
-
-        val buyerNotif = NotificationEntity(
-            id = "not_${UUID.randomUUID().toString().take(8)}",
-            userId = order.buyerId,
-            targetRole = UserRole.BUYER.name,
-            senderRole = UserRole.FARMER.name,
+        val now = System.currentTimeMillis()
+        db.orderDao().updateOrderAdvanceAndStatus(
             orderId = orderId,
-            type = "FARMER_PAYMENT_CONFIRMED",
-            titleBn = "কৃষক টাকা বুঝে পেয়েছেন (${order.orderCode})",
-            messageBn = "কৃষক ${farmer.fullName} টাকা প্রাপ্তি নিশ্চিত ও পেমেন্ট অনুমোদন করায় অর্ডারটি চূড়ান্তভাবে নিশ্চিত (Confirmed) হয়েছে।",
-            isRead = false,
-            createdAt = now
+            verifiedAdvanceTotal = order.grandTotal,
+            remainingDue = 0.0,
+            farmerConfirmed = true,
+            farmerConfirmedAt = now,
+            paymentStatus = "PAID",
+            status = OrderStatus.CONFIRMED.name,
+            now = now
         )
-        db.notificationAuditDao().insertNotification(buyerNotif)
-        rtdbSync.pushNotification(buyerNotif)
-
-        val audit = AuditLogEntity(
-            id = "aud_${UUID.randomUUID().toString().take(8)}",
-            actorId = farmer.id,
-            actorRole = farmer.role,
-            actionBn = "কৃষক কর্তৃক টাকা প্রাপ্তি নিশ্চিতকরণ",
-            targetEntity = "Order",
-            targetId = orderId,
-            detailsBn = "${order.orderCode} — কৃষক ${farmer.fullName} টাকা বুঝে পাওয়ার নিশ্চিতকরণ দিয়েছেন"
-        )
-        db.notificationAuditDao().insertAuditLog(audit)
-        rtdbSync.pushAuditLog(audit)
+        val updatedOrder = db.orderDao().getOrderById(orderId)!!
+        rtdbSync.pushOrder(updatedOrder, db.orderDao().getOrderItemsOnce(orderId))
         return Result.success(updatedOrder)
     }
 
@@ -1446,14 +1831,18 @@ class MarketplaceRepository(
         if (isBuyer && !isAdmin && newStatus !in setOf(OrderStatus.COMPLETED, OrderStatus.CANCELLED)) {
             return Result.failure(IllegalAccessException("ক্রেতা শুধুমাত্র অর্ডার বাতিল বা সম্পন্ন করতে পারেন।"))
         }
-        if (isBuyer && newStatus == OrderStatus.CANCELLED && order.status != OrderStatus.PENDING.name) {
+        if (isBuyer && newStatus == OrderStatus.CANCELLED &&
+            order.status !in setOf(OrderStatus.PENDING.name, OrderStatus.PAYMENT_PENDING.name)
+        ) {
             return Result.failure(IllegalStateException("অর্ডার প্রক্রিয়াধীন হলে বাতিল করা যাবে না।"))
         }
 
         // Strict Security Rule: Order CANNOT be Confirmed or Completed using buyer screenshot alone!
         // Only Farmer's payment received confirmation is required (admin approval is NOT required).
         if (newStatus == OrderStatus.CONFIRMED || newStatus == OrderStatus.COMPLETED) {
-            if (!order.farmerPaymentConfirmed) {
+            val isFarmerApproved = order.farmerPaymentConfirmed ||
+                (newStatus == OrderStatus.COMPLETED && order.paymentStatus == "ZERO_ADVANCE_APPROVED")
+            if (!isFarmerApproved) {
                 return Result.failure(
                     IllegalStateException("শুধু ক্রেতার পেমেন্ট রসিদ বা স্ক্রিনশট দিয়ে অর্ডার কনফার্ম হবে না — কৃষক 'টাকা বুঝে পেয়েছি' অনুমোদন দিলে অর্ডার কনফার্ম বা সম্পন্ন হবে।")
                 )

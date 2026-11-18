@@ -15,6 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -24,6 +26,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.data.model.BangladeshLocations
 import com.example.data.model.UserRole
@@ -39,10 +42,13 @@ import kotlinx.coroutines.launch
 fun LoginScreen(
     onBack: () -> Unit,
     onLogin: (identifier: String, password: String) -> Unit,
+    onResetPassword: (phone: String, newPassword: String, onDone: () -> Unit) -> Unit = { _, _, onDone -> onDone() },
     onGoToRegister: () -> Unit
 ) {
     var loginId by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
+    var showForgotDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -83,9 +89,32 @@ fun LoginScreen(
                 onValueChange = { password = it },
                 label = { Text("পাসওয়ার্ড *") },
                 singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
+                visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(
+                        onClick = { showPassword = !showPassword },
+                        modifier = Modifier.testTag("login_password_toggle")
+                    ) {
+                        Icon(
+                            imageVector = if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (showPassword) "পাসওয়ার্ড লুকান" else "পাসওয়ার্ড দেখুন"
+                        )
+                    }
+                },
                 modifier = Modifier.fillMaxWidth().testTag("login_password_input")
             )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(
+                    onClick = { showForgotDialog = true },
+                    modifier = Modifier.testTag("forgot_password_button")
+                ) {
+                    Text("পাসওয়ার্ড ভুলে গেছেন?")
+                }
+            }
 
             Button(
                 onClick = { onLogin(loginId, password) },
@@ -99,6 +128,78 @@ fun LoginScreen(
                 Text("অ্যাকাউন্ট নেই? নতুন নিবন্ধন করুন")
             }
         }
+    }
+
+    if (showForgotDialog) {
+        var resetPhone by remember { mutableStateOf(loginId) }
+        var newPass by remember { mutableStateOf("") }
+        var confirmNewPass by remember { mutableStateOf("") }
+        var showNewPass by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { showForgotDialog = false },
+            title = { Text("পাসওয়ার্ড রিসেট করুন") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "আপনার নিবন্ধিত মোবাইল নম্বর ও নতুন পাসওয়ার্ড দিন (কোনো OTP প্রয়োজন নেই)।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = resetPhone,
+                        onValueChange = { resetPhone = it },
+                        label = { Text("নিবন্ধিত মোবাইল নম্বর *") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        modifier = Modifier.fillMaxWidth().testTag("forgot_phone_input")
+                    )
+                    OutlinedTextField(
+                        value = newPass,
+                        onValueChange = { newPass = it },
+                        label = { Text("নতুন পাসওয়ার্ড (সর্বনিম্ন ৬ অক্ষর) *") },
+                        singleLine = true,
+                        visualTransformation = if (showNewPass) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { showNewPass = !showNewPass }) {
+                                Icon(
+                                    imageVector = if (showNewPass) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (showNewPass) "লুকান" else "দেখুন"
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("forgot_new_password_input")
+                    )
+                    OutlinedTextField(
+                        value = confirmNewPass,
+                        onValueChange = { confirmNewPass = it },
+                        label = { Text("নতুন পাসওয়ার্ড নিশ্চিত করুন *") },
+                        singleLine = true,
+                        isError = confirmNewPass.isNotEmpty() && newPass != confirmNewPass,
+                        visualTransformation = if (showNewPass) VisualTransformation.None else PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth().testTag("forgot_confirm_password_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onResetPassword(resetPhone.trim(), newPass) {
+                            loginId = resetPhone.trim()
+                            password = ""
+                            showForgotDialog = false
+                        }
+                    },
+                    enabled = resetPhone.trim().length >= 10 && newPass.length >= 6 && newPass == confirmNewPass,
+                    modifier = Modifier.testTag("forgot_submit_button")
+                ) {
+                    Text("পাসওয়ার্ড পরিবর্তন করুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showForgotDialog = false }) { Text("বাতিল") }
+            }
+        )
     }
 }
 
@@ -131,6 +232,11 @@ fun RegisterScreen(
     var phone by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var confirmPassword by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
+    var showConfirmPassword by remember { mutableStateOf(false) }
+    var divDropdownExpanded by remember { mutableStateOf(false) }
+    var distDropdownExpanded by remember { mutableStateOf(false) }
+    var upzDropdownExpanded by remember { mutableStateOf(false) }
 
     var selectedDivision by remember { mutableStateOf(BangladeshLocations.divisions.first()) }
     var selectedDistrict by remember {
@@ -322,57 +428,102 @@ fun RegisterScreen(
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("বিভাগ নির্বাচন করুন (সারা বাংলাদেশ) *", style = MaterialTheme.typography.labelLarge)
-                Spacer(modifier = Modifier.height(4.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(BangladeshLocations.divisions) { div ->
-                        FilterChip(
-                            selected = selectedDivision == div,
-                            onClick = {
-                                selectedDivision = div
-                                val firstDist = BangladeshLocations.districtsForDivision(div).firstOrNull()?.districtBn ?: "ঢাকা"
-                                selectedDistrict = firstDist
-                                selectedUpazila = BangladeshLocations.upazilasForDistrict(firstDist).firstOrNull() ?: firstDist
-                            },
-                            label = { Text(div) }
-                        )
+                ExposedDropdownMenuBox(
+                    expanded = divDropdownExpanded,
+                    onExpandedChange = { divDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = selectedDivision,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("বিভাগ নির্বাচন করুন *") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = divDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .testTag("register_division_dropdown")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = divDropdownExpanded,
+                        onDismissRequest = { divDropdownExpanded = false }
+                    ) {
+                        BangladeshLocations.divisions.forEach { div ->
+                            DropdownMenuItem(
+                                text = { Text(div) },
+                                onClick = {
+                                    selectedDivision = div
+                                    val firstDist = BangladeshLocations.districtsForDivision(div).firstOrNull()?.districtBn ?: "ঢাকা"
+                                    selectedDistrict = firstDist
+                                    selectedUpazila = BangladeshLocations.upazilasForDistrict(firstDist).firstOrNull() ?: firstDist
+                                    divDropdownExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("জেলা নির্বাচন করুন (${districtsForDivision.size}টি) *", style = MaterialTheme.typography.labelLarge)
-                Spacer(modifier = Modifier.height(4.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(districtsForDivision) { dist ->
-                        FilterChip(
-                            selected = selectedDistrict == dist,
-                            onClick = {
-                                selectedDistrict = dist
-                                selectedUpazila = BangladeshLocations.upazilasForDistrict(dist).firstOrNull() ?: dist
-                            },
-                            label = { Text(dist) }
-                        )
+                ExposedDropdownMenuBox(
+                    expanded = distDropdownExpanded,
+                    onExpandedChange = { distDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = selectedDistrict,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("জেলা নির্বাচন করুন (${districtsForDivision.size}টি) *") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = distDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .testTag("register_district_dropdown")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = distDropdownExpanded,
+                        onDismissRequest = { distDropdownExpanded = false }
+                    ) {
+                        districtsForDivision.forEach { dist ->
+                            DropdownMenuItem(
+                                text = { Text(dist) },
+                                onClick = {
+                                    selectedDistrict = dist
+                                    selectedUpazila = BangladeshLocations.upazilasForDistrict(dist).firstOrNull() ?: dist
+                                    distDropdownExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("উপজেলা নির্বাচন করুন *", style = MaterialTheme.typography.labelLarge)
-                Spacer(modifier = Modifier.height(4.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(upazilasForDistrict) { u ->
-                        FilterChip(
-                            selected = selectedUpazila == u,
-                            onClick = { selectedUpazila = u },
-                            label = { Text(u) }
-                        )
+                ExposedDropdownMenuBox(
+                    expanded = upzDropdownExpanded,
+                    onExpandedChange = { upzDropdownExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = selectedUpazila,
+                        onValueChange = { selectedUpazila = it },
+                        readOnly = true,
+                        label = { Text("উপজেলা / থানা নির্বাচন করুন *") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = upzDropdownExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                            .testTag("register_upazila_dropdown")
+                    )
+                    ExposedDropdownMenu(
+                        expanded = upzDropdownExpanded,
+                        onDismissRequest = { upzDropdownExpanded = false }
+                    ) {
+                        upazilasForDistrict.forEach { u ->
+                            DropdownMenuItem(
+                                text = { Text(u) },
+                                onClick = {
+                                    selectedUpazila = u
+                                    upzDropdownExpanded = false
+                                }
+                            )
+                        }
                     }
                 }
-                Spacer(modifier = Modifier.height(6.dp))
-                OutlinedTextField(
-                    value = selectedUpazila,
-                    onValueChange = { selectedUpazila = it },
-                    label = { Text("উপজেলা / থানা *") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
             }
 
             item {
@@ -421,7 +572,18 @@ fun RegisterScreen(
                     onValueChange = { password = it },
                     label = { Text("পাসওয়ার্ড (সর্বনিম্ন ৬ অক্ষর) *") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(
+                            onClick = { showPassword = !showPassword },
+                            modifier = Modifier.testTag("register_password_toggle")
+                        ) {
+                            Icon(
+                                imageVector = if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showPassword) "পাসওয়ার্ড লুকান" else "পাসওয়ার্ড দেখুন"
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth().testTag("register_password_input")
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -434,7 +596,18 @@ fun RegisterScreen(
                     supportingText = if (passwordMismatch) {
                         { Text("দুটি পাসওয়ার্ড মেলেনি", color = MaterialTheme.colorScheme.error) }
                     } else null,
-                    visualTransformation = PasswordVisualTransformation(),
+                    visualTransformation = if (showConfirmPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(
+                            onClick = { showConfirmPassword = !showConfirmPassword },
+                            modifier = Modifier.testTag("register_confirm_password_toggle")
+                        ) {
+                            Icon(
+                                imageVector = if (showConfirmPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showConfirmPassword) "পাসওয়ার্ড লুকান" else "পাসওয়ার্ড দেখুন"
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth().testTag("register_confirm_password_input")
                 )
             }

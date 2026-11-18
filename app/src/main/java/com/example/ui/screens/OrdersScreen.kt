@@ -260,16 +260,25 @@ fun OrdersScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             HorizontalDivider()
+                            val due = kotlin.math.max(0.0, order.grandTotal - order.verifiedAdvanceTotal)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = "পেমেন্ট: ${order.paymentMethod} (${order.paymentStatus})",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Column {
+                                    Text(
+                                        text = "নিশ্চিত অগ্রিম: ${order.verifiedAdvanceTotal.formatBdt()}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = DarkGreen,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "বকেয়া: ${due.formatBdt()}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                                 Text(
                                     text = order.grandTotal.formatBdt(),
                                     style = MaterialTheme.typography.titleMedium,
@@ -286,7 +295,7 @@ fun OrdersScreen(
                                     shape = RoundedCornerShape(6.dp)
                                 ) {
                                     Text(
-                                        text = if (order.farmerPaymentConfirmed) "✓ কৃষক টাকা নিশ্চিত" else "কৃষক টাকা নিশ্চিত বাকি",
+                                        text = if (order.farmerPaymentConfirmed) "✓ কৃষক কর্তৃক অনুমোদিত" else "যাচাই / অনুমোদন অপেক্ষমাণ",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (order.farmerPaymentConfirmed) DarkGreen else androidx.compose.ui.graphics.Color(0xFF92400E),
                                         fontWeight = FontWeight.SemiBold,
@@ -294,13 +303,13 @@ fun OrdersScreen(
                                     )
                                 }
                                 Surface(
-                                    color = if (order.farmerPaymentConfirmed) LightGreen else MaterialTheme.colorScheme.surfaceVariant,
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
                                     shape = RoundedCornerShape(6.dp)
                                 ) {
                                     Text(
-                                        text = if (order.farmerPaymentConfirmed) "✓ পেমেন্ট অনুমোদিত ও Confirmed" else "অ্যাডমিন অনুমোদন প্রয়োজন নেই",
+                                        text = "সরাসরি পেমেন্ট (${order.paymentMethod})",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (order.farmerPaymentConfirmed) DarkGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )

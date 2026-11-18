@@ -44,6 +44,7 @@ fun KrishiTopBar(
     activeRole: UserRole? = null,
     verificationStatus: String = "",
     accountStatus: String = "",
+    profileImageUri: String = "",
     onCartClick: () -> Unit,
     onNotificationsClick: () -> Unit,
     onLanguageToggle: () -> Unit
@@ -68,15 +69,29 @@ fun KrishiTopBar(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.krishi_bondhu_logo),
-                        contentDescription = "কৃষি বন্ধু লোগো",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(Color.White)
-                    )
+                    val userImageModel = MediaCaptureHelper.imageModelFromUri(profileImageUri)
+                    if (userImageModel != null) {
+                        AsyncImage(
+                            model = userImageModel,
+                            contentDescription = "ব্যবহারকারীর প্রোফাইল ছবি",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                                .testTag("topbar_user_avatar")
+                        )
+                    } else {
+                        Image(
+                            painter = painterResource(id = R.drawable.krishi_bondhu_logo),
+                            contentDescription = "কৃষি বন্ধু লোগো",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(Color.White)
+                        )
+                    }
                     Spacer(modifier = Modifier.width(10.dp))
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -303,11 +318,11 @@ fun ProductVisualArtwork(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Surface(
-                color = if (product.isWholesale) DarkGreen else PrimaryGreen,
+                color = DarkGreen,
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text(
-                    text = if (product.isWholesale) "পাইকারি" else "খুচরা",
+                    text = "পাইকারি",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.White,
                     modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
@@ -494,14 +509,14 @@ fun ProductBrowseRowCard(
                     Text(text = categoryEmoji, fontSize = 38.sp)
                 }
                 Surface(
-                    color = if (product.isWholesale) DarkGreen else PrimaryGreen,
+                    color = DarkGreen,
                     shape = RoundedCornerShape(6.dp),
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .padding(6.dp)
                 ) {
                     Text(
-                        text = if (product.isWholesale) "পাইকারি" else "খুচরা",
+                        text = "পাইকারি",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color.White,
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -820,7 +835,7 @@ fun OrderStatusChip(statusName: String, language: AppLanguage) {
             InfoBlueLight to InfoBlue
         OrderStatus.REJECTED, OrderStatus.CANCELLED, OrderStatus.DISPUTED ->
             AlertRedLight to AlertRed
-        OrderStatus.PENDING -> HarvestGoldLight to Color(0xFF92400E)
+        OrderStatus.PENDING, OrderStatus.PAYMENT_PENDING -> HarvestGoldLight to Color(0xFF92400E)
     }
     Surface(
         color = bg,
