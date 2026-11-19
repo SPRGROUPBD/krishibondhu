@@ -2069,15 +2069,17 @@ class ExampleRobolectricTest {
         assertTrue(appOpenMetric!!.enabled)
         assertEquals(com.example.data.model.AdConfig.DEFAULT_UNITY_INTERSTITIAL_ID, appOpenMetric.unitOrPlacementId)
 
-        // Check blocked vs allowed currentRoute tracking
+        // Check blocked vs allowed currentRoute tracking & observable StateFlow updates
         listOf("splash", "cart", "sell", "sell?productId=p1", "order/ord_1", "activation", "login", "register", "register?role=FARMER")
             .forEach { route ->
                 com.example.ads.AdMonetizationManager.setCurrentRoute(route)
+                assertEquals(route, com.example.ads.AdMonetizationManager.currentRouteFlow.value)
                 assertTrue("Route $route should be ad-blocked", com.example.ads.AdMonetizationManager.isCurrentRouteAdBlocked())
             }
         listOf("home", "browse", "farmers", "orders", "profile", "farmer/f1", "product/p1", "admin")
             .forEach { route ->
                 com.example.ads.AdMonetizationManager.setCurrentRoute(route)
+                assertEquals(route, com.example.ads.AdMonetizationManager.currentRouteFlow.value)
                 assertFalse("Route $route should allow ads", com.example.ads.AdMonetizationManager.isCurrentRouteAdBlocked())
             }
     }

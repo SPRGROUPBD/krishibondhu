@@ -8,6 +8,7 @@ import android.content.Intent
 import android.graphics.Color as AndroidColor
 import android.net.http.SslError
 import android.os.Build
+import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.RenderProcessGoneDetail
@@ -77,13 +78,39 @@ private fun Context.findActivity(): Activity? =
         .filterIsInstance<Activity>()
         .firstOrNull()
 
+private fun scheduleBannerLoadOnLayout(
+    container: FrameLayout,
+    isFailed: () -> Boolean,
+    onLoad: () -> Unit
+) {
+    var dispatched = false
+    fun tryDispatch() {
+        if (dispatched || isFailed() || !container.isAttachedToWindow) return
+        if (container.width > 0 && container.height > 0) {
+            dispatched = true
+            runCatching(onLoad)
+        }
+    }
+    container.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        tryDispatch()
+    }
+    container.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+        override fun onViewAttachedToWindow(v: View) {
+            v.post { tryDispatch() }
+        }
+
+        override fun onViewDetachedFromWindow(v: View) = Unit
+    })
+}
+
 @Composable
 fun AdBannerSection(
     adConfig: AdConfig,
     modifier: Modifier = Modifier,
     placementTag: String = "banner"
 ) {
-    if (!adConfig.adsEnabled || AdMonetizationManager.isCurrentRouteAdBlocked()) return
+    val observedRoute by AdMonetizationManager.currentRouteFlow.collectAsState()
+    if (!adConfig.adsEnabled || AdMonetizationManager.isAdBlockedRoute(observedRoute)) return
 
     val context = LocalContext.current
     val telemetry by AdMonetizationManager.telemetry.collectAsState()
@@ -396,72 +423,108 @@ fun AdBannerSection(
                                 var bannerViewHolder by remember { mutableStateOf<LevelPlayBannerAdView?>(null) }
                                 DisposableEffect(bannerUnitId, placementTag, retryCount) {
                                     onDispose {
-                                        bannerViewHolder?.destroy()
+                                        runCatching { bannerViewHolder?.destroy() }
                                         bannerViewHolder = null
                                     }
                                 }
                                 AndroidView(
                                     factory = { ctx ->
-                                        val adSize = LevelPlayAdSize.createAdaptiveAdSize(ctx)
-                                        val configBuilder = LevelPlayBannerAdView.Config.Builder()
-                                        if (adSize != null) {
-                                            configBuilder.setAdSize(adSize)
+                                        val host = ctx.findActivity() ?: ctx
+                                        val adSize = LevelPlayAdSize.createAdaptiveAdSize(host) ?: LevelPlayAdSize.BANNER
+                                        val heightDp = adSize.height.coerceAtLeast(50)
+                                        val heightPx = TypedValue.applyDimension(
+                                            TypedValue.COMPLEX_UNIT_DIP,
+                                            heightDp.toFloat(),
+                                            host.resources.displayMetrics
+                                        ).toInt()
+                                        val container = FrameLayout(host).apply {
+                                            layoutParams = ViewGroup.LayoutParams(
+                                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                                heightPx
+                                            )
                                         }
-                                        configBuilder.setPlacementName(placementTag)
-                                        LevelPlayBannerAdView(ctx, bannerUnitId, configBuilder.build()).apply {
-                                            setBannerListener(object : LevelPlayBannerAdViewListener {
-                                                override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
-                                                    bannerFailed = false
-                                                    primaryBannerFailed = false
-                                                    retryCount = 0
-                                                    AdMonetizationManager.trackFormatLoaded(
-                                                        AdFormatType.BANNER,
-                                                        adInfo.adNetwork
-                                                    )
-                                                }
+                                        runCatching {
+                                            val configBuilder = LevelPlayBannerAdView.Config.Builder()
+                                                .setAdSize(adSize)
+                                                .setPlacementName(placementTag)
+                                            val bannerView = LevelPlayBannerAdView(host, bannerUnitId, configBuilder.build()).apply {
+                                                setBannerListener(object : LevelPlayBannerAdViewListener {
+                                                    override fun onAdLoaded(adInfo: LevelPlayAdInfo) {
+                                                        bannerFailed = false
+                                                        primaryBannerFailed = false
+                                                        retryCount = 0
+                                                        AdMonetizationManager.trackFormatLoaded(
+                                                            AdFormatType.BANNER,
+                                                            adInfo.adNetwork
+                                                        )
+                                                    }
 
-                                                override fun onAdLoadFailed(error: LevelPlayAdError) {
-                                                    bannerFailed = true
-                                                    primaryBannerFailed = true
-                                                    AdMonetizationManager.trackFormatFailed(
-                                                        AdFormatType.BANNER,
-                                                        error.errorCode,
-                                                        error.errorMessage
-                                                    )
-                                                }
+                                                    override fun onAdLoadFailed(error: LevelPlayAdError) {
+                                                        bannerFailed = true
+                                                        primaryBannerFailed = true
+                                                        AdMonetizationManager.trackFormatFailed(
+                                                            AdFormatType.BANNER,
+                                                            error.errorCode,
+                                                            error.errorMessage
+                                                        )
+                                                    }
 
-                                                override fun onAdDisplayed(adInfo: LevelPlayAdInfo) {
-                                                    AdMonetizationManager.trackFormatDisplayed(
-                                                        AdFormatType.BANNER,
-                                                        adInfo.adNetwork
-                                                    )
-                                                }
+                                                    override fun onAdDisplayed(adInfo: LevelPlayAdInfo) {
+                                                        AdMonetizationManager.trackFormatDisplayed(
+                                                            AdFormatType.BANNER,
+                                                            adInfo.adNetwork
+                                                        )
+                                                    }
 
-                                                override fun onAdDisplayFailed(adInfo: LevelPlayAdInfo, error: LevelPlayAdError) {
-                                                    AdMonetizationManager.trackFormatFailed(
-                                                        AdFormatType.BANNER,
-                                                        error.errorCode,
-                                                        error.errorMessage
-                                                    )
-                                                }
+                                                    override fun onAdDisplayFailed(adInfo: LevelPlayAdInfo, error: LevelPlayAdError) {
+                                                        AdMonetizationManager.trackFormatFailed(
+                                                            AdFormatType.BANNER,
+                                                            error.errorCode,
+                                                            error.errorMessage
+                                                        )
+                                                    }
 
-                                                override fun onAdClicked(adInfo: LevelPlayAdInfo) {
-                                                    AdMonetizationManager.trackFormatClicked(
-                                                        AdFormatType.BANNER,
-                                                        adInfo.adNetwork
-                                                    )
-                                                }
-                                                override fun onAdLeftApplication(adInfo: LevelPlayAdInfo) = Unit
-                                                override fun onAdExpanded(adInfo: LevelPlayAdInfo) = Unit
-                                                override fun onAdCollapsed(adInfo: LevelPlayAdInfo) = Unit
-                                            })
-                                            AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, bannerUnitId)
-                                            loadAd()
-                                        }.also { bannerViewHolder = it }
+                                                    override fun onAdClicked(adInfo: LevelPlayAdInfo) {
+                                                        AdMonetizationManager.trackFormatClicked(
+                                                            AdFormatType.BANNER,
+                                                            adInfo.adNetwork
+                                                        )
+                                                    }
+                                                    override fun onAdLeftApplication(adInfo: LevelPlayAdInfo) = Unit
+                                                    override fun onAdExpanded(adInfo: LevelPlayAdInfo) = Unit
+                                                    override fun onAdCollapsed(adInfo: LevelPlayAdInfo) = Unit
+                                                })
+                                            }
+                                            bannerViewHolder = bannerView
+                                            container.addView(
+                                                bannerView,
+                                                FrameLayout.LayoutParams(
+                                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                                    heightPx,
+                                                    Gravity.CENTER
+                                                )
+                                            )
+                                            scheduleBannerLoadOnLayout(
+                                                container = container,
+                                                isFailed = { bannerFailed }
+                                            ) {
+                                                AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, bannerUnitId)
+                                                bannerView.loadAd()
+                                            }
+                                        }.onFailure { err ->
+                                            bannerFailed = true
+                                            primaryBannerFailed = true
+                                            AdMonetizationManager.trackFormatFailed(
+                                                AdFormatType.BANNER,
+                                                -1,
+                                                err.message ?: "LevelPlay banner error"
+                                            )
+                                        }
+                                        container
                                     },
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .defaultMinSize(minHeight = 50.dp)
+                                        .heightIn(min = 50.dp)
                                         .testTag("ad_banner_$placementTag")
                                 )
                             }
@@ -558,9 +621,22 @@ private fun DirectUnityBannerAdCard(
                     AndroidView(
                         factory = { ctx ->
                             val host = ctx.findActivity() ?: ctx
+                            val size = UnityBannerSize.getDynamicSize(host)
+                            val heightDp = size.height.coerceAtLeast(50)
+                            val dm = host.resources.displayMetrics
+                            val heightPx = TypedValue.applyDimension(
+                                TypedValue.COMPLEX_UNIT_DIP,
+                                heightDp.toFloat(),
+                                dm
+                            ).toInt()
+                            val container = FrameLayout(host).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    heightPx
+                                )
+                            }
                             runCatching {
-                                val size = UnityBannerSize.getDynamicSize(host)
-                                BannerView(host, placementId, size).apply {
+                                val bannerView = BannerView(host, placementId, size).apply {
                                     listener = object : BannerView.IListener {
                                         override fun onBannerLoaded(bannerAdView: BannerView?) {
                                             bannerFailed = false
@@ -592,9 +668,24 @@ private fun DirectUnityBannerAdCard(
 
                                         override fun onBannerLeftApplication(bannerAdView: BannerView?) = Unit
                                     }
+                                }
+                                bannerViewHolder = bannerView
+                                container.addView(
+                                    bannerView,
+                                    FrameLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        heightPx,
+                                        Gravity.CENTER
+                                    )
+                                )
+                                scheduleBannerLoadOnLayout(
+                                    container = container,
+                                    isFailed = { bannerFailed }
+                                ) {
                                     AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, placementId)
-                                    load()
-                                }.also { bannerViewHolder = it }
+                                    bannerView.load()
+                                }
+                                container
                             }.getOrElse { err ->
                                 bannerFailed = true
                                 onFailureStateChanged(true)
@@ -603,12 +694,12 @@ private fun DirectUnityBannerAdCard(
                                     -1,
                                     err.message ?: "Unity BannerView creation error"
                                 )
-                                FrameLayout(ctx)
+                                container
                             }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .defaultMinSize(minHeight = 50.dp)
+                            .height(50.dp)
                             .testTag("unity_banner_$placementTag")
                     )
                 }
@@ -677,14 +768,19 @@ private fun StartIoBannerAdCard(
                     AndroidView(
                         factory = { ctx ->
                             val host = ctx.findActivity() ?: ctx
+                            val dm = host.resources.displayMetrics
+                            val heightPx = TypedValue.applyDimension(
+                                TypedValue.COMPLEX_UNIT_DIP,
+                                50f,
+                                dm
+                            ).toInt()
                             val container = FrameLayout(host).apply {
                                 layoutParams = ViewGroup.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.WRAP_CONTENT
+                                    heightPx
                                 )
                             }
                             runCatching {
-                                val dm = host.resources.displayMetrics
                                 val widthDp = ((dm.widthPixels / dm.density).toInt() - 32).coerceIn(300, 360)
                                 val bannerView = StartIoBanner(host, object : StartIoBannerListener {
                                     override fun onReceiveAd(banner: View?) {
@@ -717,15 +813,16 @@ private fun StartIoBannerAdCard(
                                     bannerView,
                                     FrameLayout.LayoutParams(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                                        heightPx,
                                         Gravity.CENTER
                                     )
                                 )
-                                container.post {
-                                    if (container.isAttachedToWindow && !bannerFailed) {
-                                        AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, "startio_$placementTag")
-                                        runCatching { bannerView.loadAd(widthDp, 50) }
-                                    }
+                                scheduleBannerLoadOnLayout(
+                                    container = container,
+                                    isFailed = { bannerFailed }
+                                ) {
+                                    AdMonetizationManager.trackFormatRequested(AdFormatType.BANNER, "startio_$placementTag")
+                                    bannerView.loadAd(widthDp, 50)
                                 }
                                 container
                             }.getOrElse { err ->
@@ -741,7 +838,7 @@ private fun StartIoBannerAdCard(
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .defaultMinSize(minHeight = 50.dp)
+                            .height(50.dp)
                             .testTag("startio_banner_$placementTag")
                     )
                 }
@@ -756,8 +853,9 @@ fun RewardedMarketTipCard(
     dailyTips: List<DailyTip> = DefaultDailyTips.initialTips,
     modifier: Modifier = Modifier
 ) {
+    val observedRoute by AdMonetizationManager.currentRouteFlow.collectAsState()
     if (!adConfig.adsEnabled || !adConfig.androidAdsEnabled || !adConfig.rewardedEnabled) return
-    if (AdMonetizationManager.isCurrentRouteAdBlocked()) return
+    if (AdMonetizationManager.isAdBlockedRoute(observedRoute)) return
     val rewardedId = adConfig.resolvedRewardedUnitId()
     val startIoReady = AdMonetizationManager.isStartIoEnabledEffective(adConfig)
     if (rewardedId.isBlank() && !startIoReady) return

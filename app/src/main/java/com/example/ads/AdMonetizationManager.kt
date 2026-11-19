@@ -366,6 +366,8 @@ object AdMonetizationManager {
     private var impressionListenerRegistered = false
     @Volatile
     private var currentRoute: String = "splash"
+    private val _currentRouteFlow = MutableStateFlow("splash")
+    val currentRouteFlow: StateFlow<String> = _currentRouteFlow.asStateFlow()
     @Volatile
     private var currentActivityRef: WeakReference<Activity>? = null
     @Volatile
@@ -442,8 +444,11 @@ object AdMonetizationManager {
             Build.PRODUCT.contains("sdk_gphone", ignoreCase = true) ||
             Build.PRODUCT.contains("emulator", ignoreCase = true)
 
-    internal fun effectiveStartIoTestAdsEnabled(config: AdConfig = latestConfig): Boolean =
+    internal fun effectiveAdTestMode(config: AdConfig = latestConfig): Boolean =
         config.adTestMode || BuildConfig.DEBUG || isEmulatorDevice()
+
+    internal fun effectiveStartIoTestAdsEnabled(config: AdConfig = latestConfig): Boolean =
+        effectiveAdTestMode(config)
 
     internal fun readLevelPlaySecret(): String {
         val secretKey = runCatching { BuildConfig.LEVELPLAY_APP_KEY.trim() }.getOrDefault("")
@@ -603,6 +608,7 @@ object AdMonetizationManager {
     fun setCurrentRoute(route: String) {
         val previousRoute = currentRoute
         currentRoute = route
+        _currentRouteFlow.value = route
         if (isAdBlockedRoute(route) && route != "splash") {
             pendingAppOpenOnLaunch = false
             return
@@ -746,9 +752,10 @@ object AdMonetizationManager {
                 lastInitError = ""
             )
         }
+        val runtimeTestMode = effectiveAdTestMode(config)
         appendLog(
             code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
-            message = "Starting Unity LevelPlay initialization (appKey=$masked, testMode=${config.adTestMode}, consent=${config.consentGranted})"
+            message = "Starting Unity LevelPlay initialization (appKey=$masked, testMode=$runtimeTestMode, consent=${config.consentGranted})"
         )
 
         runCatching {
@@ -757,7 +764,7 @@ object AdMonetizationManager {
                 impressionListenerRegistered = true
             }
             LevelPlay.setConsent(config.consentGranted)
-            if (config.adTestMode) {
+            if (runtimeTestMode) {
                 LevelPlay.setMetaData("is_test_suite", "enable")
             } else {
                 LevelPlay.setMetaData("is_test_suite", "disable")
@@ -882,14 +889,15 @@ object AdMonetizationManager {
                 lastInitError = ""
             )
         }
+        val runtimeTestMode = effectiveAdTestMode(config)
         appendLog(
             code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
             network = "Unity Ads",
-            message = "Initializing Unity Ads SDK (Game ID=$gameId, testMode=${config.adTestMode}, consent=${config.consentGranted})"
+            message = "Initializing Unity Ads SDK (Game ID=$gameId, testMode=$runtimeTestMode, consent=${config.consentGranted})"
         )
 
         runCatching {
-            UnityAds.initialize(appContext, gameId, config.adTestMode, object : IUnityAdsInitializationListener {
+            UnityAds.initialize(appContext, gameId, runtimeTestMode, object : IUnityAdsInitializationListener {
                 override fun onInitializationComplete() {
                     sdkInitializing = false
                     sdkInitialized = true
@@ -2337,6 +2345,7 @@ object AdMonetizationManager {
         startIoInitializing = false
         isShowingFullscreenAd = false
         currentRoute = "splash"
+        _currentRouteFlow.value = "splash"
         interstitialAd = null
         loadedInterstitialUnitId = ""
         loadedDirectInterstitialId = ""

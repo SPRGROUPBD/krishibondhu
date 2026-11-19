@@ -86,8 +86,16 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route ?: Routes.SPLASH
 
-    LaunchedEffect(currentRoute) {
+    SideEffect {
         AdMonetizationManager.setCurrentRoute(currentRoute)
+    }
+
+    DisposableEffect(navController) {
+        val listener = androidx.navigation.NavController.OnDestinationChangedListener { _, destination, _ ->
+            destination.route?.let { AdMonetizationManager.setCurrentRoute(it) }
+        }
+        navController.addOnDestinationChangedListener(listener)
+        onDispose { navController.removeOnDestinationChangedListener(listener) }
     }
 
     val topLevelRoutes = setOf(Routes.HOME, Routes.BROWSE, Routes.FARMERS, Routes.SELL, Routes.ORDERS, Routes.PROFILE)
