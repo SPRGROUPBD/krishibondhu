@@ -35,6 +35,10 @@
 # Unity Ads, AppLovin, Meta, Mintegral, Pangle, InMobi, Liftoff Vungle, DT Exchange, Chartboost, Start.io
 -keep class com.unity3d.ads.** { *; }
 -keep class com.unity3d.services.** { *; }
+-keep class com.unity3d.scar.** { *; }
+-keep class com.unity3d.coherence.** { *; }
+-dontwarn com.unity3d.scar.**
+-dontwarn com.unity3d.coherence.**
 -keep class com.applovin.** { *; }
 -keep class com.facebook.ads.** { *; }
 -keep class com.mbridge.msdk.** { *; }

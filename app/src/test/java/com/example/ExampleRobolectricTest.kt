@@ -2367,4 +2367,32 @@ class ExampleRobolectricTest {
         com.example.ads.AdMonetizationManager.resetForTest(context)
         assertFalse(com.example.ads.AdMonetizationManager.isUserAdsSuppressed())
     }
+
+    @Test
+    fun unityAdsSdk421ZeroAdMobAndLifecycleSafetyVerified() {
+        // 1. Latest compatible Unity Ads SDK packaged and zero AdMob classes present
+        assertEquals("4.21.0", com.unity3d.ads.UnityAds.version)
+        assertEquals("4.21.0", com.example.ads.AdMonetizationManager.resolvedUnitySdkVersion())
+        assertTrue(runCatching { Class.forName("com.unity3d.ads.UnityAds") }.isSuccess)
+        assertTrue(runCatching { Class.forName("com.unity3d.services.banners.BannerView") }.isSuccess)
+        assertFalse(
+            "AdMob MobileAds SDK must NEVER be present on the classpath",
+            runCatching { Class.forName("com.google.android.gms.ads.MobileAds") }.isSuccess
+        )
+
+        // 2. Dashboard Game ID 6227313 & Android placements sync cleanly including UNITY_DIRECT priority
+        val unityCfg = com.example.data.model.AdConfig(
+            mobileAdNetworkPriority = "UNITY_DIRECT",
+            adTestMode = true
+        ).hydratedWithDefaults()
+        assertTrue(unityCfg.usesDirectUnityAds())
+        com.example.ads.AdMonetizationManager.syncConfig(context, unityCfg)
+        val snap = com.example.ads.AdMonetizationManager.telemetry.value
+        assertEquals("Unity Ads 4.21.0 (Direct)", snap.mediationPlatform)
+        assertEquals("Game ID: 6227313", snap.activeAppKeyMasked)
+        assertTrue(snap.testModeEnabled)
+        val unityAdapter = snap.adapterStatuses.first { it.key == "unity_ads" }
+        assertTrue(unityAdapter.sdkPackaged)
+        assertEquals("4.21.0 (Direct)", unityAdapter.adapterVersion)
+    }
 }

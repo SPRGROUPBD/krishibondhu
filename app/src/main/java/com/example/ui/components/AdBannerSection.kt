@@ -86,6 +86,7 @@ private fun scheduleBannerLoadOnLayout(
     var dispatched = false
     fun tryDispatch() {
         if (dispatched || isFailed() || !container.isAttachedToWindow) return
+        if (AdMonetizationManager.isUserAdsSuppressed() || AdMonetizationManager.isCurrentRouteAdBlocked()) return
         if (container.width > 0 && container.height > 0) {
             dispatched = true
             runCatching(onLoad)
@@ -142,7 +143,7 @@ fun AdBannerSection(
     val showDirectUnityBanner = usesDirectUnity &&
         adConfig.bannerEnabled &&
         bannerUnitId.isNotBlank() &&
-        (allows("UNITY") || allows("LEVELPLAY") || allows("UNITY_LEVELPLAY")) &&
+        (allows("UNITY") || allows("UNITY_DIRECT") || allows("LEVELPLAY") || allows("UNITY_LEVELPLAY")) &&
         (AdMonetizationManager.isTestEnvironment() || (isOnline && sdkReadyOrTest))
 
     val showMediatedBanner = adConfig.androidAdsEnabled &&
@@ -612,6 +613,12 @@ private fun DirectUnityBannerAdCard(
                 }
             } else {
                 key(placementId, placementTag, retryCount) {
+                    val hostContext = LocalContext.current.findActivity() ?: LocalContext.current
+                    val dynamicSize = remember(placementId, hostContext) {
+                        runCatching { UnityBannerSize.getDynamicSize(hostContext) }
+                            .getOrElse { UnityBannerSize(320, 50) }
+                    }
+                    val heightDp = dynamicSize.height.coerceAtLeast(50)
                     var bannerViewHolder by remember { mutableStateOf<BannerView?>(null) }
                     DisposableEffect(placementId, placementTag, retryCount) {
                         onDispose {
@@ -622,8 +629,7 @@ private fun DirectUnityBannerAdCard(
                     AndroidView(
                         factory = { ctx ->
                             val host = ctx.findActivity() ?: ctx
-                            val size = UnityBannerSize.getDynamicSize(host)
-                            val heightDp = size.height.coerceAtLeast(50)
+                            val size = dynamicSize
                             val dm = host.resources.displayMetrics
                             val heightPx = TypedValue.applyDimension(
                                 TypedValue.COMPLEX_UNIT_DIP,
@@ -700,7 +706,7 @@ private fun DirectUnityBannerAdCard(
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp)
+                            .height(heightDp.dp)
                             .testTag("unity_banner_$placementTag")
                     )
                 }

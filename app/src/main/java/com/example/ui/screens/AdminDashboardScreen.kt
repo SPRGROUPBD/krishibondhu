@@ -2108,7 +2108,7 @@ private fun AdminAdMonetizationTab(
                         val draft = buildDraftConfig()
                         Text(
                             text = if (AdMonetizationManager.usesDirectUnityAds(draft)) {
-                                "Active Mode: Direct Unity Ads SDK 4.16.6 (Game ID: ${draft.unityGameId})"
+                                "Active Mode: Direct Unity Ads SDK ${AdMonetizationManager.resolvedUnitySdkVersion()} (Game ID: ${draft.unityGameId})"
                             } else {
                                 "Active Mode: Unity LevelPlay Mediation (App Key: ${telemetry.activeAppKeyMasked.ifBlank { "(not set)" }})"
                             },

@@ -175,7 +175,7 @@ private val SUPPORTED_NETWORK_DESCRIPTORS = listOf(
         key = "unity_ads",
         displayName = "Unity Ads",
         adapterClass = "com.ironsource.adapters.unityads.UnityAdsAdapter",
-        adapterVersion = "5.13.0",
+        adapterVersion = "5.14.0",
         requiresSeparateApproval = false,
         enabledSelector = { it.unityAdsEnabled },
         appIdSelector = { it.unityGameId }
@@ -303,7 +303,7 @@ private fun defaultAdapterStatuses(
             key = desc.key,
             displayName = desc.displayName,
             adapterClass = desc.adapterClass,
-            adapterVersion = if (directUnityMode) "4.16.6 (Direct)" else desc.adapterVersion,
+            adapterVersion = if (directUnityMode) "${AdMonetizationManager.resolvedUnitySdkVersion()} (Direct)" else desc.adapterVersion,
             requiresSeparateApproval = desc.requiresSeparateApproval,
             sdkPackaged = packaged,
             enabledInConfig = enabled,
@@ -314,8 +314,10 @@ private fun defaultAdapterStatuses(
     }
 
 object AdMonetizationManager {
+    const val DIRECT_UNITY_SDK_VERSION = "4.21.0"
     private const val INTERSTITIAL_COOLDOWN_MS = 180_000L
     private const val APP_OPEN_COOLDOWN_MS = 240_000L
+    private const val FULLSCREEN_MIN_GAP_MS = 60_000L
     private const val MAX_LOG_ENTRIES = 100
     private const val TELEMETRY_PREFS_NAME = "kb_ad_telemetry_v1"
     private const val KEY_DAY_KEY = "day_key"
@@ -327,6 +329,9 @@ object AdMonetizationManager {
     private const val KEY_NET_REV_JSON = "network_rev_json"
     const val MAX_RETRY_ATTEMPTS = 3
     private val RETRY_DELAYS_MS = longArrayOf(5_000L, 15_000L, 30_000L)
+
+    fun resolvedUnitySdkVersion(): String =
+        runCatching { UnityAds.version.takeIf { it.isNotBlank() } }.getOrNull() ?: DIRECT_UNITY_SDK_VERSION
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -605,6 +610,10 @@ object AdMonetizationManager {
         if (currentActivityRef?.get() === activity) {
             currentActivityRef = null
         }
+        if (pendingDirectRewardShowActivity?.get() === activity) {
+            pendingDirectRewardShowActivity = null
+            pendingRewardCallback = null
+        }
     }
 
     fun setCurrentRoute(route: String) {
@@ -869,6 +878,8 @@ object AdMonetizationManager {
         }
 
         applyPrivacyConsent(appContext, config)
+        val runtimeTestMode = effectiveAdTestMode(config)
+        runCatching { UnityAds.debugMode = runtimeTestMode }
 
         if ((sdkInitialized && isDirectUnityMode && initializedUnityGameId == gameId) ||
             (UnityAds.isInitialized && initializedUnityGameId == gameId)
@@ -878,7 +889,7 @@ object AdMonetizationManager {
             _telemetry.update {
                 it.copy(
                     sdkInitStatus = SdkInitStatus.SUCCESS,
-                    mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
+                    mediationPlatform = "Unity Ads ${resolvedUnitySdkVersion()} (Direct)",
                     activeAppKeyMasked = "Game ID: $gameId",
                     testModeEnabled = config.adTestMode,
                     consentGranted = config.consentGranted,
@@ -896,18 +907,17 @@ object AdMonetizationManager {
         _telemetry.update {
             it.copy(
                 sdkInitStatus = SdkInitStatus.INITIALIZING,
-                mediationPlatform = "Unity Ads ${UnityAds.version} (Direct)",
+                mediationPlatform = "Unity Ads ${resolvedUnitySdkVersion()} (Direct)",
                 activeAppKeyMasked = "Game ID: $gameId",
                 testModeEnabled = config.adTestMode,
                 consentGranted = config.consentGranted,
                 lastInitError = ""
             )
         }
-        val runtimeTestMode = effectiveAdTestMode(config)
         appendLog(
             code = AdDebugEventCode.SDK_INITIALIZATION_STARTED,
             network = "Unity Ads",
-            message = "Initializing Unity Ads SDK (Game ID=$gameId, testMode=$runtimeTestMode, consent=${config.consentGranted})"
+            message = "Initializing Unity Ads SDK ${resolvedUnitySdkVersion()} (Game ID=$gameId, testMode=$runtimeTestMode, consent=${config.consentGranted})"
         )
 
         runCatching {
@@ -1190,7 +1200,9 @@ object AdMonetizationManager {
             return
         }
         if (usesDirectUnityAds()) {
-            if ((loadedDirectInterstitialId == cleanId) || isLoadingInterstitial) return
+            val sharesAppOpenLoad = cleanId == resolveEffectiveAppOpenUnitId(latestConfig) &&
+                (loadedDirectAppOpenId == cleanId || isLoadingAppOpen)
+            if (loadedDirectInterstitialId == cleanId || isLoadingInterstitial || sharesAppOpenLoad) return
             isLoadingInterstitial = true
             updateFormatMetric(AdFormatType.INTERSTITIAL) {
                 it.copy(
@@ -1368,8 +1380,9 @@ object AdMonetizationManager {
         val cleanId = overrideUnitId.trim()
         if (cleanId.isEmpty()) return
 
-        val now = System.currentTimeMillis()
+        val now = clockMillisProvider()
         if (now - lastInterstitialShownAt < INTERSTITIAL_COOLDOWN_MS) return
+        if (lastAppOpenShownAt > 0L && now - lastAppOpenShownAt < FULLSCREEN_MIN_GAP_MS) return
 
         if (usesDirectUnityAds()) {
             if (sdkInitialized && loadedDirectInterstitialId == cleanId) {
@@ -1524,6 +1537,7 @@ object AdMonetizationManager {
                         val waitingCb = pendingRewardCallback
                         if (waitingAct != null && !waitingAct.isFinishing && !waitingAct.isDestroyed && waitingCb != null && !isShowingFullscreenAd) {
                             pendingDirectRewardShowActivity = null
+                            pendingRewardCallback = null
                             scope.launch {
                                 showDirectUnityRewarded(waitingAct, placementId, waitingCb)
                             }
@@ -1564,8 +1578,8 @@ object AdMonetizationManager {
                             showStartIoRewarded(waitingAct, waitingCb)
                         } else {
                             pendingDirectRewardShowActivity = null
-                            pendingRewardCallback?.invoke(false, "বিজ্ঞাপন লোড হয়নি (${error.name})")
                             pendingRewardCallback = null
+                            waitingCb?.let { cb -> invokeRewardCallback(cb, false, "বিজ্ঞাপন লোড হয়নি (${error.name})") }
                         }
                         scheduleRetry(context.applicationContext, AdFormatType.REWARDED) {
                             preloadRewarded(context.applicationContext, cleanId, latestConfig.rewardedEnabled)
@@ -1576,8 +1590,9 @@ object AdMonetizationManager {
                 isLoadingRewarded = false
                 loadedDirectRewardedId = ""
                 pendingDirectRewardShowActivity = null
-                pendingRewardCallback?.invoke(false, err.message ?: "Unity Rewarded load error")
+                val waitingCb = pendingRewardCallback
                 pendingRewardCallback = null
+                waitingCb?.let { cb -> invokeRewardCallback(cb, false, err.message ?: "Unity Rewarded load error") }
                 appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.REWARDED, "Unity Ads", err.message ?: "Unity Rewarded load error")
             }
             return
@@ -1664,13 +1679,27 @@ object AdMonetizationManager {
         }
     }
 
+    private fun invokeRewardCallback(
+        callback: (Boolean, String) -> Unit,
+        rewarded: Boolean,
+        detail: String
+    ) {
+        if (isTestEnvironment() || android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            callback(rewarded, detail)
+        } else {
+            scope.launch {
+                callback(rewarded, detail)
+            }
+        }
+    }
+
     private fun showDirectUnityRewarded(
         activity: Activity,
         placementId: String,
         onResult: (Boolean, String) -> Unit
     ) {
         if (isShowingFullscreenAd) {
-            onResult(false, "অন্য একটি বিজ্ঞাপন প্রদর্শিত হচ্ছে")
+            invokeRewardCallback(onResult, false, "অন্য একটি বিজ্ঞাপন প্রদর্শিত হচ্ছে")
             return
         }
         loadedDirectRewardedId = ""
@@ -1688,8 +1717,9 @@ object AdMonetizationManager {
                         it.copy(failedCount = it.failedCount + 1, lastError = "${error.name}: $message")
                     }
                     appendLog(AdDebugEventCode.AD_DISPLAY_FAILED, AdFormatType.REWARDED, "Unity Ads", "${error.name}: $message")
-                    pendingRewardCallback?.invoke(false, "${error.name}: $message")
+                    val cb = pendingRewardCallback
                     pendingRewardCallback = null
+                    cb?.let { invokeRewardCallback(it, false, "${error.name}: $message") }
                     preloadRewarded(activity.applicationContext, placementId, latestConfig.rewardedEnabled)
                 }
 
@@ -1708,18 +1738,22 @@ object AdMonetizationManager {
                     isShowingFullscreenAd = false
                     val completed = state == UnityAds.UnityAdsShowCompletionState.COMPLETED
                     appendLog(AdDebugEventCode.AD_CLOSED, AdFormatType.REWARDED, "Unity Ads", "Unity Rewarded ${state.name}")
-                    pendingRewardCallback?.invoke(
-                        completed,
-                        if (completed) "Unity Rewarded Video সম্পন্ন ✓" else "ভিডিও সম্পূর্ণ দেখা হয়নি"
-                    )
+                    val cb = pendingRewardCallback
                     pendingRewardCallback = null
+                    cb?.let {
+                        invokeRewardCallback(
+                            it,
+                            completed,
+                            if (completed) "Unity Rewarded Video সম্পন্ন ✓" else "ভিডিও সম্পূর্ণ দেখা হয়নি"
+                        )
+                    }
                     preloadRewarded(activity.applicationContext, placementId, latestConfig.rewardedEnabled)
                 }
             })
         }.onFailure { err ->
             isShowingFullscreenAd = false
             pendingRewardCallback = null
-            onResult(false, err.message ?: "Failed to show Unity Rewarded ad")
+            invokeRewardCallback(onResult, false, err.message ?: "Failed to show Unity Rewarded ad")
         }
     }
 
@@ -1812,6 +1846,8 @@ object AdMonetizationManager {
             } else if (startIoInitialized && startIoRewardedReady && startIoRewarded != null) {
                 showStartIoRewarded(activity, onResult)
                 if (cleanId.isNotEmpty()) preloadRewarded(activity, cleanId, true)
+            } else if (isLoadingRewarded && pendingRewardCallback != null) {
+                onResult(false, "রিওয়ার্ডেড ভিডিও ইতোমধ্যে লোড হচ্ছে — অনুগ্রহ করে অপেক্ষা করুন")
             } else {
                 pendingRewardCallback = onResult
                 pendingDirectRewardShowActivity = WeakReference(activity)
@@ -1865,7 +1901,9 @@ object AdMonetizationManager {
         }
 
         if (usesDirectUnityAds()) {
-            if (loadedDirectAppOpenId == cleanId || isLoadingAppOpen) return
+            val sharesInterstitialPlacement = cleanId == latestConfig.resolvedInterstitialUnitId() &&
+                (loadedDirectInterstitialId == cleanId || isLoadingInterstitial)
+            if (loadedDirectAppOpenId == cleanId || isLoadingAppOpen || sharesInterstitialPlacement) return
             isLoadingAppOpen = true
             updateFormatMetric(AdFormatType.APP_OPEN) {
                 it.copy(
@@ -2071,7 +2109,9 @@ object AdMonetizationManager {
         if (activity == null || activity.isFinishing || activity.isDestroyed) return
 
         val now = clockMillisProvider()
-        if (now - lastAppOpenShownAt < APP_OPEN_COOLDOWN_MS) {
+        if (now - lastAppOpenShownAt < APP_OPEN_COOLDOWN_MS ||
+            (lastInterstitialShownAt > 0L && now - lastInterstitialShownAt < FULLSCREEN_MIN_GAP_MS)
+        ) {
             pendingAppOpenOnLaunch = false
             return
         }
@@ -2402,7 +2442,7 @@ object AdMonetizationManager {
     }
 
     private fun scheduleRetry(context: Context, format: AdFormatType, block: () -> Unit) {
-        if (isTestEnvironment()) return
+        if (isTestEnvironment() || _userAdsSuppressed.value) return
         if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
         if (!NetworkMonitor.isCurrentlyOnline(context)) return
         val attempt = retryAttempts[format] ?: 0
@@ -2418,7 +2458,7 @@ object AdMonetizationManager {
         retryJobs[format] = scope.launch {
             delay(delayMs)
             retryJobs.remove(format)
-            if (NetworkMonitor.isCurrentlyOnline(context) && latestConfig.adsEnabled && latestConfig.androidAdsEnabled) {
+            if (!_userAdsSuppressed.value && NetworkMonitor.isCurrentlyOnline(context) && latestConfig.adsEnabled && latestConfig.androidAdsEnabled) {
                 block()
             }
         }
@@ -2466,7 +2506,7 @@ object AdMonetizationManager {
             val directMode = usesDirectUnityAds(config)
             val resolvedAppKey = resolveMediationAppKey(config)
             state.copy(
-                mediationPlatform = if (directMode) "Unity Ads 4.16.6 (Direct)" else "Unity LevelPlay 9.2.0",
+                mediationPlatform = if (directMode) "Unity Ads ${resolvedUnitySdkVersion()} (Direct)" else "Unity LevelPlay 9.2.0",
                 activeAppKeyMasked = if (directMode) "Game ID: ${config.unityGameId.trim()}" else maskKey(resolvedAppKey),
                 testModeEnabled = config.adTestMode,
                 consentGranted = config.consentGranted,
