@@ -71,6 +71,9 @@ interface UserDao {
 
     @Query("UPDATE users SET rating = :rating, reviewCount = :reviewCount WHERE id = :userId")
     suspend fun updateRatingAndReviewCount(userId: String, rating: Double, reviewCount: Int)
+
+    @Query("UPDATE users SET adsDisabled = :adsDisabled WHERE id = :userId")
+    suspend fun updateAdsDisabled(userId: String, adsDisabled: Boolean)
 }
 
 @Dao
@@ -469,5 +472,32 @@ interface OrderPaymentDao {
 
     @Query("DELETE FROM order_payments")
     suspend fun clearAll()
+}
+
+@Dao
+interface HeroSliderDao {
+    @Query("SELECT * FROM hero_sliders ORDER BY sortOrder ASC, updatedAt DESC")
+    fun observeAllSliders(): Flow<List<HeroSliderEntity>>
+
+    @Query("SELECT * FROM hero_sliders ORDER BY sortOrder ASC, updatedAt DESC")
+    suspend fun getAllSlidersOnce(): List<HeroSliderEntity>
+
+    @Query("SELECT * FROM hero_sliders WHERE id = :id LIMIT 1")
+    suspend fun getSliderById(id: String): HeroSliderEntity?
+
+    @Upsert
+    suspend fun upsertSlider(slider: HeroSliderEntity)
+
+    @Upsert
+    suspend fun insertAll(sliders: List<HeroSliderEntity>)
+
+    @Query("DELETE FROM hero_sliders WHERE id = :id")
+    suspend fun deleteSliderById(id: String)
+
+    @Query("DELETE FROM hero_sliders WHERE id NOT IN (:ids)")
+    suspend fun deleteSlidersNotIn(ids: List<String>)
+
+    @Query("DELETE FROM hero_sliders")
+    suspend fun clearAllSliders()
 }
 

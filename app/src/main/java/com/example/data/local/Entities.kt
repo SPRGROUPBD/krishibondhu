@@ -33,7 +33,8 @@ data class UserEntity(
     val activationDate: Long = 0L,
     val expiryDate: Long = 0L,
     val validityYears: Int = 2,
-    val lastPaymentId: String = ""
+    val lastPaymentId: String = "",
+    val adsDisabled: Boolean = false
 ) {
     fun isMarketplaceActive(now: Long = System.currentTimeMillis()): Boolean {
         if (role == "ADMIN") return true
@@ -291,6 +292,7 @@ data class PaymentSettingsEntity(
     val farmerFee: Double = 300.0,
     val buyerFee: Double = 300.0,
     val renewalFee: Double = 300.0,
+    val adRemovalFee: Double = 200.0,
     val validityYears: Int = 2,
     val paymentInstructions: String = "বিকাশ বা নগদ নম্বরে ৩০০ টাকা পরিশোধ করে প্রেরকের মোবাইল নম্বর, ট্রানজেকশন আইডি (TxID) ও রসিদের ছবি জমা দিন। অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।",
     val notify30Days: Boolean = true,
@@ -341,6 +343,23 @@ data class OrderPaymentEntity(
     val verifiedBy: String = "",
     val verifiedAt: Long = 0L,
     val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "hero_sliders")
+data class HeroSliderEntity(
+    @PrimaryKey val id: String,
+    val badgeBn: String = "১০০% দালালমুক্ত বাজার",
+    val titleBn: String,
+    val subtitleBn: String = "",
+    val bullet1Bn: String = "কৃষকের ন্যায্য দাম",
+    val bullet2Bn: String = "ক্রেতার ন্যায্য দামে ক্রয়",
+    val bullet3Bn: String = "সরাসরি যোগাযোগ",
+    val ctaTextBn: String = "এখনই অর্ডার করুন",
+    val targetRoute: String = "browse",
+    val imageUri: String = "",
+    val sortOrder: Int = 1,
+    val isActive: Boolean = true,
     val updatedAt: Long = System.currentTimeMillis()
 )
 

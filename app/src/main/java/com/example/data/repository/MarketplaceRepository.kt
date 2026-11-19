@@ -48,6 +48,7 @@ class MarketplaceRepository(
     }
     val farmerPaymentSettings: Flow<List<FarmerPaymentSettingsEntity>> = db.farmerPaymentSettingsDao().observeAll()
     val orderPayments: Flow<List<OrderPaymentEntity>> = db.orderPaymentDao().observeAllPayments()
+    val heroSliders: Flow<List<HeroSliderEntity>> = db.heroSliderDao().observeAllSliders()
 
     private val _adConfig = MutableStateFlow(AdConfig())
     val adConfig: StateFlow<AdConfig> = _adConfig.asStateFlow()
@@ -433,13 +434,17 @@ class MarketplaceRepository(
         transactionId: String,
         amount: Double,
         receiptUri: String,
-        isRenewal: Boolean = false
+        isRenewal: Boolean = false,
+        isAdRemoval: Boolean = false
     ): Result<ActivationPaymentEntity> {
         if (user.role == UserRole.ADMIN.name) {
-            return Result.failure(IllegalArgumentException("অ্যাডমিন অ্যাকাউন্টের জন্য অ্যাক্টিভেশন ফি প্রযোজ্য নয়।"))
+            return Result.failure(IllegalArgumentException("অ্যাডমিন অ্যাকাউন্টের জন্য পেমেন্ট প্রযোজ্য নয়।"))
+        }
+        if (isAdRemoval && user.adsDisabled) {
+            return Result.failure(IllegalStateException("আপনার অ্যাকাউন্টে ইতোমধ্যে সব বিজ্ঞাপন স্থায়ীভাবে বন্ধ রয়েছে ✓"))
         }
         if (paymentMethod != PaymentMethod.BKASH && paymentMethod != PaymentMethod.NAGAD) {
-            return Result.failure(IllegalArgumentException("অ্যাক্টিভেশনের জন্য শুধুমাত্র বিকাশ (bKash) বা নগদ (Nagad) নির্বাচন করুন।"))
+            return Result.failure(IllegalArgumentException("পেমেন্টের জন্য শুধুমাত্র বিকাশ (bKash) বা নগদ (Nagad) নির্বাচন করুন।"))
         }
         val cleanSender = SecurityHashUtil.normalizePhone(senderMobile)
         if (cleanSender.length < 10) {
@@ -452,13 +457,17 @@ class MarketplaceRepository(
 
         val settings = getEffectivePaymentSettings()
         val expectedFee = when {
+            isAdRemoval -> settings.adRemovalFee.takeIf { it > 0.0 } ?: 200.0
             isRenewal -> settings.renewalFee
             user.role == UserRole.FARMER.name -> settings.farmerFee
             else -> settings.buyerFee
         }
         if (kotlin.math.abs(amount - expectedFee) > 0.01) {
             return Result.failure(
-                IllegalArgumentException("নির্ধারিত ফি ${expectedFee.formatBdt()} (২ বছরের মেয়াদ) — পরিমাণ পরিবর্তন করা যাবে না।")
+                IllegalArgumentException(
+                    if (isAdRemoval) "বিজ্ঞাপন মুক্ত (Ad-Free) ফি নির্ধারিত ${expectedFee.formatBdt()} — পরিমাণ পরিবর্তন করা যাবে না।"
+                    else "নির্ধারিত ফি ${expectedFee.formatBdt()} (২ বছরের মেয়াদ) — পরিমাণ পরিবর্তন করা যাবে না।"
+                )
             )
         }
 
@@ -466,10 +475,18 @@ class MarketplaceRepository(
         rtdbSync.fetchAllActivationPayments(db)
         val allPayments = db.activationPaymentDao().getAllPaymentsOnce()
 
-        // Block duplicate pending submission for the same user
-        if (allPayments.any { it.userId == user.id && it.status == ActivationPaymentStatus.PENDING.name }) {
+        // Block duplicate pending submission within the same payment bucket (account vs AD_FREE)
+        val hasPendingSameBucket = allPayments.any { p ->
+            p.userId == user.id &&
+                p.status == ActivationPaymentStatus.PENDING.name &&
+                (if (isAdRemoval) p.paymentType == "AD_FREE" else p.paymentType != "AD_FREE")
+        }
+        if (hasPendingSameBucket) {
             return Result.failure(
-                IllegalStateException("আপনার একটি পেমেন্ট আবেদন ইতোমধ্যে যাচাইাধীন (Pending) রয়েছে। অ্যাডমিন অনুমোদন পর্যন্ত অপেক্ষা করুন।")
+                IllegalStateException(
+                    if (isAdRemoval) "আপনার বিজ্ঞাপন মুক্ত (Ad-Free) পেমেন্ট আবেদন ইতোমধ্যে যাচাইাধীন (Pending) রয়েছে।"
+                    else "আপনার একটি পেমেন্ট আবেদন ইতোমধ্যে যাচাইাধীন (Pending) রয়েছে। অ্যাডমিন অনুমোদন পর্যন্ত অপেক্ষা করুন।"
+                )
             )
         }
 
@@ -486,7 +503,11 @@ class MarketplaceRepository(
         val receiverNumber = if (paymentMethod == PaymentMethod.BKASH) settings.bKashNumber else settings.nagadNumber
         val receiverType = if (paymentMethod == PaymentMethod.BKASH) settings.bKashAccountType else settings.nagadAccountType
         val now = System.currentTimeMillis()
-        val paymentType = if (isRenewal || user.activationDate > 0L) "RENEWAL" else "ACTIVATION"
+        val paymentType = when {
+            isAdRemoval -> "AD_FREE"
+            isRenewal || user.activationDate > 0L -> "RENEWAL"
+            else -> "ACTIVATION"
+        }
         val payment = ActivationPaymentEntity(
             id = "act_${UUID.randomUUID().toString().take(8)}",
             userId = user.id,
@@ -509,29 +530,41 @@ class MarketplaceRepository(
             updatedAt = now
         )
 
-        val updatedUser = user.copy(
-            accountStatus = if (user.accountStatus == AccountStatus.ACTIVE.name && isRenewal) {
-                AccountStatus.ACTIVE.name // early renewal keeps current active window until approved
-            } else {
-                AccountStatus.PAYMENT_UNDER_REVIEW.name
-            },
-            lastPaymentId = payment.id
-        )
+        val updatedUser = if (isAdRemoval) {
+            user // Ad-free payment never alters account status or 2-year expiry window
+        } else {
+            user.copy(
+                accountStatus = if (user.accountStatus == AccountStatus.ACTIVE.name && isRenewal) {
+                    AccountStatus.ACTIVE.name // early renewal keeps current active window until approved
+                } else {
+                    AccountStatus.PAYMENT_UNDER_REVIEW.name
+                },
+                lastPaymentId = payment.id
+            )
+        }
 
         db.withTransaction {
             db.activationPaymentDao().upsertPayment(payment)
-            db.userDao().upsertUser(updatedUser)
+            if (!isAdRemoval) {
+                db.userDao().upsertUser(updatedUser)
+            }
         }
         rtdbSync.pushActivationPayment(payment)
-        rtdbSync.pushUser(updatedUser)
+        if (!isAdRemoval) {
+            rtdbSync.pushUser(updatedUser)
+        }
 
         val adminNotif = NotificationEntity(
             id = "not_${UUID.randomUUID().toString().take(8)}",
             userId = "ALL",
             targetRole = UserRole.ADMIN.name,
             senderRole = user.role,
-            type = "ACTIVATION_PAYMENT_NEW",
-            titleBn = "নতুন অ্যাকাউন্ট ${if (paymentType == "RENEWAL") "রিনিউ" else "অ্যাক্টিভেশন"} পেমেন্ট (${expectedFee.formatBdt()})",
+            type = if (isAdRemoval) "AD_FREE_PAYMENT_NEW" else "ACTIVATION_PAYMENT_NEW",
+            titleBn = when (paymentType) {
+                "AD_FREE" -> "নতুন বিজ্ঞাপন মুক্ত (Ad-Free) পেমেন্ট (${expectedFee.formatBdt()})"
+                "RENEWAL" -> "নতুন অ্যাকাউন্ট রিনিউ পেমেন্ট (${expectedFee.formatBdt()})"
+                else -> "নতুন অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট (${expectedFee.formatBdt()})"
+            },
             messageBn = "${user.fullName} (${if (user.role == "FARMER") "কৃষক" else "ক্রেতা"}) — ${paymentMethod.labelEn} TxID: $cleanTxId, প্রেরক: $cleanSender।",
             isRead = false,
             createdAt = now
@@ -543,7 +576,7 @@ class MarketplaceRepository(
             id = "aud_${UUID.randomUUID().toString().take(8)}",
             actorId = user.id,
             actorRole = user.role,
-            actionBn = "অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট জমা",
+            actionBn = if (isAdRemoval) "বিজ্ঞাপন বন্ধ (Ad-Free) পেমেন্ট জমা" else "অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট জমা",
             targetEntity = "ActivationPayment",
             targetId = payment.id,
             detailsBn = "${user.fullName} — ${paymentMethod.labelEn} ${expectedFee.formatBdt()} | TxID: $cleanTxId"
@@ -570,6 +603,51 @@ class MarketplaceRepository(
         val targetUser = db.userDao().getUserById(payment.userId)
             ?: return Result.failure(IllegalArgumentException("সংশ্লিষ্ট ব্যবহারকারীকে পাওয়া যায়নি।"))
 
+        val approvedPayment = payment.copy(
+            status = ActivationPaymentStatus.APPROVED.name,
+            adminNotes = notes.trim(),
+            reviewedBy = admin.id,
+            reviewedAt = now,
+            updatedAt = now
+        )
+
+        if (payment.paymentType == "AD_FREE") {
+            val adFreeUser = targetUser.copy(adsDisabled = true)
+            db.withTransaction {
+                db.activationPaymentDao().upsertPayment(approvedPayment)
+                db.userDao().upsertUser(adFreeUser)
+            }
+            rtdbSync.pushActivationPayment(approvedPayment)
+            rtdbSync.pushUser(adFreeUser)
+
+            val notif = NotificationEntity(
+                id = "not_${UUID.randomUUID().toString().take(8)}",
+                userId = targetUser.id,
+                targetRole = targetUser.role,
+                senderRole = UserRole.ADMIN.name,
+                type = "AD_FREE_APPROVED",
+                titleBn = "আপনার সব বিজ্ঞাপন বন্ধ হয়েছে (Ad-Free) ✓",
+                messageBn = "অভিনন্দন! আপনার ${payment.amount.formatBdt()} (${payment.transactionId}) পেমেন্ট অনুমোদিত হয়েছে। এখন থেকে অ্যাপ ও ওয়েবসাইটে কোনো বিজ্ঞাপন দেখাবে না।",
+                isRead = false,
+                createdAt = now
+            )
+            db.notificationAuditDao().insertNotification(notif)
+            rtdbSync.pushNotification(notif)
+
+            val audit = AuditLogEntity(
+                id = "aud_${UUID.randomUUID().toString().take(8)}",
+                actorId = admin.id,
+                actorRole = admin.role,
+                actionBn = "বিজ্ঞাপন মুক্ত (Ad-Free) পেমেন্ট অনুমোদন",
+                targetEntity = "ActivationPayment",
+                targetId = payment.id,
+                detailsBn = "${targetUser.fullName} (${targetUser.phone}) — Ad-Free সক্রিয়"
+            )
+            db.notificationAuditDao().insertAuditLog(audit)
+            rtdbSync.pushAuditLog(audit)
+            return Result.success(adFreeUser)
+        }
+
         val settings = getEffectivePaymentSettings()
         val years = settings.validityYears.coerceAtLeast(FIXED_VALIDITY_YEARS)
         val hasExistingUnexpiredWindow = targetUser.accountStatus == AccountStatus.ACTIVE.name &&
@@ -585,13 +663,6 @@ class MarketplaceRepository(
             addCalendarYears(now, years)
         }
 
-        val approvedPayment = payment.copy(
-            status = ActivationPaymentStatus.APPROVED.name,
-            adminNotes = notes.trim(),
-            reviewedBy = admin.id,
-            reviewedAt = now,
-            updatedAt = now
-        )
         val activatedUser = targetUser.copy(
             accountStatus = AccountStatus.ACTIVE.name,
             verificationStatus = "VERIFIED",
@@ -674,9 +745,12 @@ class MarketplaceRepository(
             reviewedAt = now,
             updatedAt = now
         )
-        // Only change accountStatus to PAYMENT_REJECTED if user is not currently on an active unexpired renewal
-        val keepCurrentlyActive = targetUser.accountStatus == AccountStatus.ACTIVE.name &&
-            (targetUser.expiryDate <= 0L || targetUser.expiryDate > now)
+        val isAdRemoval = payment.paymentType == "AD_FREE"
+        // Never alter accountStatus on AD_FREE rejection or unexpired active renewal
+        val keepCurrentlyActive = isAdRemoval || (
+            targetUser.accountStatus == AccountStatus.ACTIVE.name &&
+                (targetUser.expiryDate <= 0L || targetUser.expiryDate > now)
+            )
         val updatedUser = if (keepCurrentlyActive) {
             targetUser
         } else {
@@ -688,18 +762,26 @@ class MarketplaceRepository(
 
         db.withTransaction {
             db.activationPaymentDao().upsertPayment(updatedPayment)
-            db.userDao().upsertUser(updatedUser)
+            if (!keepCurrentlyActive) {
+                db.userDao().upsertUser(updatedUser)
+            }
         }
         rtdbSync.pushActivationPayment(updatedPayment)
-        rtdbSync.pushUser(updatedUser)
+        if (!keepCurrentlyActive) {
+            rtdbSync.pushUser(updatedUser)
+        }
 
         val notif = NotificationEntity(
             id = "not_${UUID.randomUUID().toString().take(8)}",
             userId = targetUser.id,
             targetRole = targetUser.role,
             senderRole = UserRole.ADMIN.name,
-            type = "ACTIVATION_REJECTED",
-            titleBn = if (requestResubmission) "অ্যাক্টিভেশন পেমেন্ট পুনরায় জমা দিন" else "অ্যাক্টিভেশন পেমেন্ট প্রত্যাখ্যাত হয়েছে",
+            type = if (isAdRemoval) "AD_FREE_REJECTED" else "ACTIVATION_REJECTED",
+            titleBn = if (isAdRemoval) {
+                if (requestResubmission) "বিজ্ঞাপন মুক্ত পেমেন্ট পুনরায় জমা দিন" else "বিজ্ঞাপন মুক্ত পেমেন্ট প্রত্যাখ্যাত হয়েছে"
+            } else {
+                if (requestResubmission) "অ্যাক্টিভেশন পেমেন্ট পুনরায় জমা দিন" else "অ্যাক্টিভেশন পেমেন্ট প্রত্যাখ্যাত হয়েছে"
+            },
             messageBn = "কারণ: $cleanReason অনুগ্রহ করে সঠিক TxID ও রসিদসহ পুনরায় জমা দিন।",
             isRead = false,
             createdAt = now
@@ -810,6 +892,7 @@ class MarketplaceRepository(
             farmerFee = settings.farmerFee.takeIf { it > 0 } ?: FIXED_ACTIVATION_FEE_BDT,
             buyerFee = settings.buyerFee.takeIf { it > 0 } ?: FIXED_ACTIVATION_FEE_BDT,
             renewalFee = settings.renewalFee.takeIf { it > 0 } ?: FIXED_ACTIVATION_FEE_BDT,
+            adRemovalFee = settings.adRemovalFee.takeIf { it > 0 } ?: 200.0,
             validityYears = FIXED_VALIDITY_YEARS,
             updatedAt = System.currentTimeMillis()
         )
@@ -823,11 +906,62 @@ class MarketplaceRepository(
             actionBn = "পেমেন্ট ও অ্যাক্টিভেশন সেটিংস আপডেট",
             targetEntity = "PaymentSettings",
             targetId = "default",
-            detailsBn = "bKash: ${stamped.bKashNumber} (${stamped.bKashAccountType}), Nagad: ${stamped.nagadNumber} (${stamped.nagadAccountType}), ফি: ৳${stamped.farmerFee.toInt()}/${stamped.validityYears} বছর"
+            detailsBn = "bKash: ${stamped.bKashNumber} (${stamped.bKashAccountType}), Nagad: ${stamped.nagadNumber} (${stamped.nagadAccountType}), ফি: ৳${stamped.farmerFee.toInt()}, Ad-Free: ৳${stamped.adRemovalFee.toInt()}"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)
         return Result.success(stamped)
+    }
+
+    suspend fun adminSetUserAdsDisabled(
+        admin: UserEntity,
+        userId: String,
+        adsDisabled: Boolean,
+        reason: String = "",
+        now: Long = System.currentTimeMillis()
+    ): Result<UserEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন ব্যবহারকারীর বিজ্ঞাপন নিয়ন্ত্রণ করতে পারেন।"))
+        }
+        val target = db.userDao().getUserById(userId)
+            ?: return Result.failure(IllegalArgumentException("ব্যবহারকারী পাওয়া যায়নি।"))
+        if (target.role == UserRole.ADMIN.name) {
+            return Result.failure(IllegalArgumentException("সুপার অ্যাডমিন অ্যাকাউন্ট পরিবর্তন করা যাবে না।"))
+        }
+        val updated = target.copy(adsDisabled = adsDisabled)
+        db.userDao().upsertUser(updated)
+        rtdbSync.pushUser(updated)
+
+        val statusLabel = if (adsDisabled) "বন্ধ (Ad-Free)" else "চালু (Ads Active)"
+        val notif = NotificationEntity(
+            id = "not_${UUID.randomUUID().toString().take(8)}",
+            userId = updated.id,
+            targetRole = updated.role,
+            senderRole = UserRole.ADMIN.name,
+            type = "USER_ADS_TOGGLED",
+            titleBn = if (adsDisabled) "আপনার সব বিজ্ঞাপন বন্ধ করা হয়েছে ✓" else "আপনার অ্যাকাউন্টে বিজ্ঞাপন পুনরায় চালু হয়েছে",
+            messageBn = reason.ifBlank {
+                if (adsDisabled) "অ্যাডমিন আপনার অ্যাকাউন্টের জন্য সব বিজ্ঞাপন বন্ধ করেছেন।"
+                else "অ্যাডমিন আপনার অ্যাকাউন্টের জন্য বিজ্ঞাপন পুনরায় চালু করেছেন।"
+            },
+            isRead = false,
+            createdAt = now
+        )
+        db.notificationAuditDao().insertNotification(notif)
+        rtdbSync.pushNotification(notif)
+
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "ব্যবহারকারীর বিজ্ঞাপন $statusLabel",
+            targetEntity = "User",
+            targetId = updated.id,
+            detailsBn = "${updated.fullName} (${updated.phone}) — Ads: $statusLabel"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(updated)
     }
 
     suspend fun resetPasswordByPhone(
@@ -2467,6 +2601,68 @@ class MarketplaceRepository(
             targetEntity = "DailyTip",
             targetId = tipId,
             detailsBn = "${target.emoji} ${target.titleBn} মুছে ফেলা হয়েছে"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(Unit)
+    }
+
+    suspend fun adminSaveHeroSlider(admin: UserEntity, slider: HeroSliderEntity): Result<HeroSliderEntity> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন হিরো স্লাইডার যুক্ত বা সম্পাদনা করতে পারেন।"))
+        }
+        val cleanTitle = slider.titleBn.trim()
+        if (cleanTitle.isEmpty()) {
+            return Result.failure(IllegalArgumentException("স্লাইডারের শিরোনাম লিখুন।"))
+        }
+        val now = System.currentTimeMillis()
+        val isNew = slider.id.isBlank()
+        val saved = slider.copy(
+            id = slider.id.ifBlank { "slide_${UUID.randomUUID().toString().take(8)}" },
+            badgeBn = slider.badgeBn.trim().ifBlank { "১০০% দালালমুক্ত বাজার" },
+            titleBn = cleanTitle,
+            subtitleBn = slider.subtitleBn.trim(),
+            bullet1Bn = slider.bullet1Bn.trim(),
+            bullet2Bn = slider.bullet2Bn.trim(),
+            bullet3Bn = slider.bullet3Bn.trim(),
+            ctaTextBn = slider.ctaTextBn.trim().ifBlank { "এখনই অর্ডার করুন" },
+            targetRoute = slider.targetRoute.trim().ifBlank { "browse" },
+            imageUri = slider.imageUri.trim(),
+            sortOrder = slider.sortOrder.coerceAtLeast(1),
+            updatedAt = now
+        )
+        db.heroSliderDao().upsertSlider(saved)
+        rtdbSync.pushHeroSlider(saved)
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = if (isNew) "হিরো স্লাইডার যুক্ত" else "হিরো স্লাইডার সম্পাদনা",
+            targetEntity = "HeroSlider",
+            targetId = saved.id,
+            detailsBn = "${saved.titleBn} (${if (saved.isActive) "সক্রিয়" else "নিষ্ক্রিয়"})"
+        )
+        db.notificationAuditDao().insertAuditLog(audit)
+        rtdbSync.pushAuditLog(audit)
+        return Result.success(saved)
+    }
+
+    suspend fun adminDeleteHeroSlider(admin: UserEntity, sliderId: String): Result<Unit> {
+        if (admin.role != UserRole.ADMIN.name) {
+            return Result.failure(IllegalAccessException("শুধুমাত্র সুপার অ্যাডমিন হিরো স্লাইডার মুছতে পারেন।"))
+        }
+        val target = db.heroSliderDao().getSliderById(sliderId)
+            ?: return Result.failure(IllegalArgumentException("স্লাইডারটি খুঁজে পাওয়া যায়নি।"))
+        db.heroSliderDao().deleteSliderById(sliderId)
+        rtdbSync.deleteHeroSlider(sliderId)
+        val audit = AuditLogEntity(
+            id = "aud_${UUID.randomUUID().toString().take(8)}",
+            actorId = admin.id,
+            actorRole = admin.role,
+            actionBn = "হিরো স্লাইডার মুছে ফেলা",
+            targetEntity = "HeroSlider",
+            targetId = sliderId,
+            detailsBn = "${target.titleBn} মুছে ফেলা হয়েছে"
         )
         db.notificationAuditDao().insertAuditLog(audit)
         rtdbSync.pushAuditLog(audit)

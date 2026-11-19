@@ -2115,4 +2115,256 @@ class ExampleRobolectricTest {
         com.example.ads.AdMonetizationManager.recordStartIoBannerLoaded()
         assertTrue(com.example.ads.AdMonetizationManager.canRequestStartIoBanner())
     }
+
+    @Test
+    fun heroSliderAdminCrudAddEditToggleAndDeletePersistInRoom() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val farmer = repo.registerUser(
+            fullName = "স্লাইডার পরীক্ষক কৃষক",
+            phone = "01733112233",
+            rawPassword = "password123",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "ভেড়ামারা",
+            unionName = "ধরমপুর",
+            village = "পাড়া",
+            nidLastFour = "4321",
+            farmBio = ""
+        ).getOrThrow()
+
+        // Non-admin cannot add/edit/delete sliders
+        assertTrue(
+            repo.adminSaveHeroSlider(
+                farmer,
+                com.example.data.local.HeroSliderEntity(id = "", titleBn = "অবৈধ স্লাইড")
+            ).isFailure
+        )
+        assertTrue(
+            repo.adminSaveHeroSlider(
+                admin,
+                com.example.data.local.HeroSliderEntity(id = "", titleBn = "   ")
+            ).isFailure
+        )
+
+        // Admin adds two slides
+        val slide1 = repo.adminSaveHeroSlider(
+            admin,
+            com.example.data.local.HeroSliderEntity(
+                id = "",
+                badgeBn = "১০০% দালালমুক্ত বাজার",
+                titleBn = "সরাসরি কৃষকের কাছ থেকে তাজা ফসল কিনুন",
+                subtitleBn = "কুষ্টিয়া থেকে সারাদেশে পাইকারি সরবরাহ",
+                ctaTextBn = "এখনই অর্ডার করুন",
+                targetRoute = "browse",
+                sortOrder = 2,
+                isActive = true
+            )
+        ).getOrThrow()
+        val slide2 = repo.adminSaveHeroSlider(
+            admin,
+            com.example.data.local.HeroSliderEntity(
+                id = "",
+                badgeBn = "নতুন মৌসুম",
+                titleBn = "ভেড়ামারার আম ও লিচু সরাসরি বাগান থেকে",
+                ctaTextBn = "কৃষক দেখুন",
+                targetRoute = "farmers",
+                sortOrder = 1,
+                isActive = true
+            )
+        ).getOrThrow()
+
+        val listed = repo.heroSliders.first()
+        assertEquals(2, listed.size)
+        // Ordered by sortOrder ascending (slide2 has sortOrder=1, slide1 has sortOrder=2)
+        assertEquals(slide2.id, listed[0].id)
+        assertEquals(slide1.id, listed[1].id)
+
+        // Admin edits and disables slide2
+        val editedSlide2 = repo.adminSaveHeroSlider(
+            admin,
+            slide2.copy(titleBn = "সম্পাদিত স্লাইড শিরোনাম", isActive = false, sortOrder = 5)
+        ).getOrThrow()
+        assertFalse(editedSlide2.isActive)
+        assertEquals("সম্পাদিত স্লাইড শিরোনাম", repo.heroSliders.first().first { it.id == slide2.id }.titleBn)
+
+        // Admin deletes slide2 (and non-admin cannot delete)
+        assertTrue(repo.adminDeleteHeroSlider(farmer, slide1.id).isFailure)
+        assertTrue(repo.adminDeleteHeroSlider(admin, slide2.id).isSuccess)
+        val remaining = repo.heroSliders.first()
+        assertEquals(1, remaining.size)
+        assertEquals(slide1.id, remaining.first().id)
+    }
+
+    @Test
+    fun payToRemoveAllAdsFlowApprovesWithoutMutatingAccountStatusAndRejectsCleanly() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val customSettings = repo.adminSavePaymentSettings(
+            admin,
+            PaymentSettingsEntity(
+                bKashNumber = "01756144900",
+                nagadNumber = "01756144900",
+                adRemovalFee = 250.0
+            )
+        ).getOrThrow()
+        assertEquals(250.0, customSettings.adRemovalFee, 0.01)
+
+        val registeredBuyer = repo.registerUser(
+            fullName = "বিজ্ঞাপনমুক্ত ক্রেতা",
+            phone = "01822334455",
+            rawPassword = "password123",
+            role = UserRole.BUYER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "কুমারখালী",
+            unionName = "যদুবয়রা",
+            village = "বাজার",
+            nidLastFour = "",
+            farmBio = ""
+        ).getOrThrow()
+        val activeBuyer = activateAsAdmin(admin, registeredBuyer)
+        val originalExpiry = activeBuyer.expiryDate
+
+        // Wrong fee amount must fail
+        assertTrue(
+            repo.submitActivationPayment(
+                user = activeBuyer,
+                paymentMethod = PaymentMethod.BKASH,
+                senderMobile = "01822334455",
+                transactionId = "ADWRONG01",
+                amount = 200.0,
+                receiptUri = "",
+                isAdRemoval = true
+            ).isFailure
+        )
+
+        // Submit valid AD_FREE payment
+        val adFreeReq1 = repo.submitActivationPayment(
+            user = activeBuyer,
+            paymentMethod = PaymentMethod.BKASH,
+            senderMobile = "01822334455",
+            transactionId = "ADFREE001",
+            amount = 250.0,
+            receiptUri = "",
+            isAdRemoval = true
+        ).getOrThrow()
+        assertEquals("AD_FREE", adFreeReq1.paymentType)
+
+        // User's account status remains ACTIVE and expiryDate untouched while AD_FREE is pending
+        val buyerDuringPending = db.userDao().getUserById(activeBuyer.id)!!
+        assertEquals(AccountStatus.ACTIVE.name, buyerDuringPending.accountStatus)
+        assertEquals(originalExpiry, buyerDuringPending.expiryDate)
+        assertFalse(buyerDuringPending.adsDisabled)
+
+        // Duplicate pending AD_FREE blocked
+        assertTrue(
+            repo.submitActivationPayment(
+                user = activeBuyer,
+                paymentMethod = PaymentMethod.NAGAD,
+                senderMobile = "01822334455",
+                transactionId = "ADFREE002",
+                amount = 250.0,
+                receiptUri = "",
+                isAdRemoval = true
+            ).isFailure
+        )
+
+        // Reject AD_FREE payment -> buyer stays ACTIVE with adsDisabled = false
+        assertTrue(repo.adminRejectActivationPayment(admin, adFreeReq1.id, "অস্পষ্ট TxID").isSuccess)
+        val buyerAfterReject = db.userDao().getUserById(activeBuyer.id)!!
+        assertEquals(AccountStatus.ACTIVE.name, buyerAfterReject.accountStatus)
+        assertEquals(originalExpiry, buyerAfterReject.expiryDate)
+        assertFalse(buyerAfterReject.adsDisabled)
+
+        // Resubmit and approve AD_FREE payment
+        val adFreeReq2 = repo.submitActivationPayment(
+            user = buyerAfterReject,
+            paymentMethod = PaymentMethod.NAGAD,
+            senderMobile = "01822334455",
+            transactionId = "ADFREE003",
+            amount = 250.0,
+            receiptUri = "",
+            isAdRemoval = true
+        ).getOrThrow()
+        val approvedBuyer = repo.adminApproveActivationPayment(admin, adFreeReq2.id).getOrThrow()
+        assertTrue(approvedBuyer.adsDisabled)
+        assertEquals(AccountStatus.ACTIVE.name, approvedBuyer.accountStatus)
+        assertEquals("VERIFIED", approvedBuyer.verificationStatus)
+        assertEquals(originalExpiry, approvedBuyer.expiryDate)
+
+        // Subsequent AD_FREE submission fails once already adsDisabled
+        assertTrue(
+            repo.submitActivationPayment(
+                user = approvedBuyer,
+                paymentMethod = PaymentMethod.BKASH,
+                senderMobile = "01822334455",
+                transactionId = "ADFREE004",
+                amount = 250.0,
+                receiptUri = "",
+                isAdRemoval = true
+            ).isFailure
+        )
+    }
+
+    @Test
+    fun adminPerUserAdsToggleAndSdkSuppressionWorkTogether() = runBlocking {
+        MasterCatalogSeeder.initialize(db)
+        val admin = repo.loginUser("admin", "bondhu").getOrThrow()
+        val farmer = repo.registerUser(
+            fullName = "বিজ্ঞাপন নিয়ন্ত্রণ কৃষক",
+            phone = "01911223344",
+            rawPassword = "password123",
+            role = UserRole.FARMER,
+            division = "খুলনা",
+            district = "কুষ্টিয়া",
+            upazila = "মিরপুর",
+            unionName = "আমলা",
+            village = "গ্রাম",
+            nidLastFour = "9876",
+            farmBio = ""
+        ).getOrThrow()
+
+        // Non-admin cannot toggle ads
+        assertTrue(repo.adminSetUserAdsDisabled(farmer, farmer.id, true).isFailure)
+        // Admin itself cannot be toggled
+        assertTrue(repo.adminSetUserAdsDisabled(admin, admin.id, true).isFailure)
+
+        // Admin disables ads for farmer
+        val disabledFarmer = repo.adminSetUserAdsDisabled(admin, farmer.id, true).getOrThrow()
+        assertTrue(disabledFarmer.adsDisabled)
+        assertTrue(db.userDao().getUserById(farmer.id)!!.adsDisabled)
+
+        // Admin re-enables ads for farmer
+        val enabledFarmer = repo.adminSetUserAdsDisabled(admin, farmer.id, false).getOrThrow()
+        assertFalse(enabledFarmer.adsDisabled)
+        assertFalse(db.userDao().getUserById(farmer.id)!!.adsDisabled)
+
+        // AdMonetizationManager suppresses SDK ad requests & activates flow when userAdsSuppressed = true
+        val adCfg = com.example.data.model.AdConfig(adsEnabled = true, androidAdsEnabled = true).hydratedWithDefaults()
+        assertTrue(
+            com.example.ads.AdMonetizationManager.canRequestSdkAd(
+                context = context,
+                config = adCfg,
+                unitOrPlacementId = adCfg.resolvedBannerUnitId(),
+                format = com.example.ads.AdFormatType.BANNER
+            )
+        )
+        com.example.ads.AdMonetizationManager.setUserAdsSuppressed(true)
+        assertTrue(com.example.ads.AdMonetizationManager.isUserAdsSuppressed())
+        assertTrue(com.example.ads.AdMonetizationManager.userAdsSuppressedFlow.value)
+        assertFalse(
+            com.example.ads.AdMonetizationManager.canRequestSdkAd(
+                context = context,
+                config = adCfg,
+                unitOrPlacementId = adCfg.resolvedBannerUnitId(),
+                format = com.example.ads.AdFormatType.BANNER
+            )
+        )
+        assertTrue(com.example.ads.AdMonetizationManager.isAdBlockedRoute("activation?mode=ad_free"))
+
+        com.example.ads.AdMonetizationManager.resetForTest(context)
+        assertFalse(com.example.ads.AdMonetizationManager.isUserAdsSuppressed())
+    }
 }

@@ -82,7 +82,10 @@ const state = {
   dailyTips: [...DEFAULT_DAILY_TIPS],
   dailyTipsManaged: false,
   dailyTipIndex: 0,
-  revealedDailyTipId: ""
+  revealedDailyTipId: "",
+  heroSliders: [],
+  heroSlideIdx: 0,
+  activationMode: "account"
 };
 
 let rtdbRef = null;
@@ -172,6 +175,28 @@ function normalizeDailyTipsList(rawMap, managedFlag) {
     .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 }
 
+function normalizeHeroSlidersList(rawMap) {
+  if (!rawMap || typeof rawMap !== "object") return [];
+  return Object.entries(rawMap)
+    .map(([k, v]) => ({
+      id: v?.id || k,
+      badgeBn: String(v?.badgeBn || "").trim(),
+      titleBn: String(v?.titleBn || "").trim(),
+      subtitleBn: String(v?.subtitleBn || "").trim(),
+      bullet1Bn: String(v?.bullet1Bn || "").trim(),
+      bullet2Bn: String(v?.bullet2Bn || "").trim(),
+      bullet3Bn: String(v?.bullet3Bn || "").trim(),
+      ctaTextBn: String(v?.ctaTextBn || "এখনই অর্ডার করুন").trim() || "এখনই অর্ডার করুন",
+      targetRoute: String(v?.targetRoute || "browse").trim() || "browse",
+      imageUri: String(v?.imageUri || "").trim(),
+      sortOrder: Number(v?.sortOrder || 1),
+      isActive: v?.isActive !== false,
+      updatedAt: Number(v?.updatedAt || 0)
+    }))
+    .filter((s) => s.titleBn)
+    .sort((a, b) => (a.sortOrder || 99) - (b.sortOrder || 99) || (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
 async function initFirebaseRealtime() {
   try {
     const [{ initializeApp, getApps }, dbMod] = await Promise.all([
@@ -233,6 +258,7 @@ async function initFirebaseRealtime() {
       state.paymentSettings = root.paymentSettings && typeof root.paymentSettings === "object"
         ? { ...DEFAULT_PAYMENT_SETTINGS, ...root.paymentSettings }
         : { ...DEFAULT_PAYMENT_SETTINGS };
+      state.heroSliders = normalizeHeroSlidersList(root.heroSliders);
       evaluateAccountExpiries(Date.now(), false);
       updateHeaderChrome();
       renderCurrentView();
@@ -402,6 +428,12 @@ async function initFirebaseRealtime() {
       state.dailyTips = normalizeDailyTipsList(latestRemoteDailyTipsMap, state.dailyTipsManaged);
       renderCurrentView();
     });
+
+    onValue(child(rtdbRef, "heroSliders"), (snap) => {
+      const val = snap.val();
+      state.heroSliders = normalizeHeroSlidersList(val);
+      renderCurrentView();
+    });
   } catch (err) {
     console.warn("Firebase RTDB connection failed:", err);
     state.rtdbConnected = false;
@@ -533,6 +565,11 @@ function getActiveUser() {
     );
   }
   return state.users.find((u) => u.id === state.activeUserId) || null;
+}
+
+function isCurrentUserAdsSuppressed() {
+  const user = getActiveUser();
+  return Boolean(user && user.adsDisabled === true);
 }
 
 function requireActiveMarketplaceUser(actionLabel = "এই কার্যক্রম") {
@@ -894,6 +931,7 @@ function navigate(page, params = {}) {
   if (params.tab && page === "info") state.infoTab = params.tab;
   if (params.tab && page === "farmer-dashboard") state.farmerTab = params.tab;
   if (params.tab && page === "admin") state.adminTab = params.tab;
+  if (params.mode && page === "activation") state.activationMode = params.mode;
   window.scrollTo({ top: 0, behavior: "smooth" });
   renderCurrentView();
 }
@@ -1187,17 +1225,23 @@ async function updateUserProfile(form) {
   return true;
 }
 
-async function submitActivationPayment({ paymentMethod, senderMobile, transactionId, amount, receiptUri, isRenewal = false }) {
+async function submitActivationPayment({ paymentMethod, senderMobile, transactionId, amount, receiptUri, isRenewal = false, isAdRemoval = false }) {
   const user = getActiveUser();
   if (!user || user.role === "ADMIN") {
-    showToast("অ্যাক্টিভেশন ফি জমা দিতে কৃষক বা ক্রেতা হিসেবে লগইন করুন।", "error");
+    showToast("পেমেন্ট জমা দিতে কৃষক বা ক্রেতা হিসেবে লগইন করুন।", "error");
     return false;
   }
-  if (user.accountStatus === "SUSPENDED") {
+  if (!isAdRemoval && user.accountStatus === "SUSPENDED") {
     showToast("আপনার অ্যাকাউন্ট স্থগিত (Suspended) রয়েছে।", "error");
     return false;
   }
-  const hasPending = state.activationPayments.some((p) => p.userId === user.id && p.status === "PENDING");
+  if (isAdRemoval && user.adsDisabled === true) {
+    showToast("আপনার অ্যাকাউন্টে ইতোমধ্যেই সব বিজ্ঞাপন বন্ধ (Ad-Free) রয়েছে।", "info");
+    return false;
+  }
+  const hasPending = state.activationPayments.some(
+    (p) => p.userId === user.id && p.status === "PENDING" && ((p.paymentType === "AD_FREE") === Boolean(isAdRemoval))
+  );
   if (hasPending) {
     showToast("আপনার একটি পেমেন্ট ইতোমধ্যে অ্যাডমিন যাচাইয়ের জন্য অপেক্ষমাণ রয়েছে।", "error");
     return false;
@@ -1206,7 +1250,9 @@ async function submitActivationPayment({ paymentMethod, senderMobile, transactio
   const cleanSender = normalizePhone(senderMobile);
   const cleanTxId = normalizeTxId(transactionId);
   const cleanReceipt = String(receiptUri || "").trim();
-  const feeAmount = Number(amount || FIXED_ACTIVATION_FEE_BDT);
+  const adRemovalFee = Number(state.paymentSettings?.adRemovalFee || DEFAULT_PAYMENT_SETTINGS.adRemovalFee || 200);
+  const expectedAmount = isAdRemoval ? adRemovalFee : FIXED_ACTIVATION_FEE_BDT;
+  const feeAmount = Number(amount || expectedAmount);
 
   if (cleanSender.length < 10) {
     showToast("সঠিক প্রেরক মোবাইল নম্বর (যেমন: 017XXXXXXXX) দিন।", "error");
@@ -1216,8 +1262,8 @@ async function submitActivationPayment({ paymentMethod, senderMobile, transactio
     showToast("সঠিক ট্রানজেকশন আইডি (Transaction ID) দিন।", "error");
     return false;
   }
-  if (feeAmount !== FIXED_ACTIVATION_FEE_BDT) {
-    showToast(`অ্যাক্টিভেশন ও নবায়ন ফি নির্ধারিত ৳${FIXED_ACTIVATION_FEE_BDT}।`, "error");
+  if (isAdRemoval ? feeAmount < adRemovalFee : feeAmount !== FIXED_ACTIVATION_FEE_BDT) {
+    showToast(isAdRemoval ? `বিজ্ঞাপন মুক্ত করার ফি নির্ধারিত ৳${adRemovalFee}।` : `অ্যাক্টিভেশন ও নবায়ন ফি নির্ধারিত ৳${FIXED_ACTIVATION_FEE_BDT}।`, "error");
     return false;
   }
 
@@ -1231,33 +1277,44 @@ async function submitActivationPayment({ paymentMethod, senderMobile, transactio
   }
 
   const now = Date.now();
+  const settings = state.paymentSettings || DEFAULT_PAYMENT_SETTINGS;
+  const chosenMethod = paymentMethod === "NAGAD" ? "NAGAD" : "BKASH";
+  const paymentType = isAdRemoval ? "AD_FREE" : (isRenewal || user.activationDate > 0 ? "RENEWAL" : "ACTIVATION");
   const payment = {
     id: shortId("actpay"),
     userId: user.id,
     userName: user.fullName,
     userPhone: user.phone,
     userRole: user.role,
+    accountRole: user.role,
     accountType: user.role,
-    paymentMethod: paymentMethod === "NAGAD" ? "NAGAD" : "BKASH",
+    paymentType,
+    paymentMethod: chosenMethod,
+    receiverNumber: chosenMethod === "NAGAD" ? settings.nagadNumber : settings.bKashNumber,
+    receiverAccountType: chosenMethod === "NAGAD" ? settings.nagadAccountType : settings.bKashAccountType,
     senderMobile: cleanSender,
     transactionId: cleanTxId,
-    amount: FIXED_ACTIVATION_FEE_BDT,
+    amount: expectedAmount,
     validityYears: FIXED_VALIDITY_YEARS,
     receiptUri: cleanReceipt,
     status: "PENDING",
-    isRenewal: Boolean(isRenewal || user.activationDate > 0),
+    isRenewal: !isAdRemoval && Boolean(isRenewal || user.activationDate > 0),
     adminNotes: "",
     submittedAt: now,
+    createdAt: now,
+    updatedAt: now,
     reviewedAt: 0,
     reviewedBy: ""
   };
 
   state.activationPayments.unshift(payment);
-  if (user.accountStatus !== "ACTIVE") {
-    user.accountStatus = "PAYMENT_UNDER_REVIEW";
+  if (!isAdRemoval) {
+    if (user.accountStatus !== "ACTIVE") {
+      user.accountStatus = "PAYMENT_UNDER_REVIEW";
+    }
+    user.lastPaymentId = payment.id;
+    user.updatedAt = now;
   }
-  user.lastPaymentId = payment.id;
-  user.updatedAt = now;
 
   const adminNotif = {
     id: shortId("not"),
@@ -1265,8 +1322,10 @@ async function submitActivationPayment({ paymentMethod, senderMobile, transactio
     targetRole: "ADMIN",
     senderRole: user.role,
     orderId: payment.id,
-    type: "ACTIVATION_PAYMENT_SUBMITTED",
-    titleBn: `নতুন অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট (৳${FIXED_ACTIVATION_FEE_BDT})`,
+    type: isAdRemoval ? "AD_FREE_PAYMENT_SUBMITTED" : "ACTIVATION_PAYMENT_SUBMITTED",
+    titleBn: isAdRemoval
+      ? `বিজ্ঞাপন বন্ধ (Ad-Free) পেমেন্ট (৳${expectedAmount})`
+      : `নতুন অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট (৳${FIXED_ACTIVATION_FEE_BDT})`,
     messageBn: `${user.fullName} (${user.role === "FARMER" ? "কৃষক" : "ক্রেতা"}) • ${payment.paymentMethod} TxID: ${cleanTxId}`,
     isRead: false,
     createdAt: now
@@ -1275,10 +1334,12 @@ async function submitActivationPayment({ paymentMethod, senderMobile, transactio
     id: shortId("aud"),
     actorId: user.id,
     actorRole: user.role,
-    actionBn: payment.isRenewal ? "অ্যাকাউন্ট নবায়ন পেমেন্ট জমা (ওয়েব)" : "অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট জমা (ওয়েব)",
+    actionBn: isAdRemoval
+      ? "বিজ্ঞাপন মুক্ত (Ad-Free) পেমেন্ট জমা (ওয়েব)"
+      : payment.isRenewal ? "অ্যাকাউন্ট নবায়ন পেমেন্ট জমা (ওয়েব)" : "অ্যাকাউন্ট অ্যাক্টিভেশন পেমেন্ট জমা (ওয়েব)",
     targetEntity: "ActivationPayment",
     targetId: payment.id,
-    detailsBn: `${user.fullName} — ৳${FIXED_ACTIVATION_FEE_BDT} | TxID: ${cleanTxId}`,
+    detailsBn: `${user.fullName} — ৳${expectedAmount} | TxID: ${cleanTxId}`,
     createdAt: now
   };
   state.notifications.unshift(adminNotif);
@@ -1286,11 +1347,16 @@ async function submitActivationPayment({ paymentMethod, senderMobile, transactio
   saveLocalSnapshot();
 
   await rtdbPush(`activationPayments/${payment.id}`, payment);
-  await rtdbPush(`users/${user.id}`, user);
+  if (!isAdRemoval) await rtdbPush(`users/${user.id}`, user);
   await rtdbPush(`notifications/${adminNotif.id}`, adminNotif);
   await rtdbPush(`auditLogs/${audit.id}`, audit);
 
-  showToast("পেমেন্ট তথ্য জমা হয়েছে! অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।", "success");
+  showToast(
+    isAdRemoval
+      ? "বিজ্ঞাপন মুক্ত করার পেমেন্ট জমা হয়েছে! অ্যাডমিন অনুমোদনের পর আপনার সব বিজ্ঞাপন বন্ধ হবে।"
+      : "পেমেন্ট তথ্য জমা হয়েছে! অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।",
+    "success"
+  );
   renderCurrentView();
   return true;
 }
@@ -1309,13 +1375,57 @@ async function adminApproveActivationPayment(paymentId, notes = "") {
     return false;
   }
   const now = Date.now();
-  const baseDate = user.accountStatus === "ACTIVE" && Number(user.expiryDate || 0) > now ? Number(user.expiryDate) : now;
-  const nextExpiry = addCalendarYears(baseDate, FIXED_VALIDITY_YEARS);
+  const isAdRemoval = payment.paymentType === "AD_FREE";
 
   payment.status = "APPROVED";
   payment.reviewedAt = now;
   payment.reviewedBy = admin.id;
+  payment.updatedAt = now;
   payment.adminNotes = String(notes || "").trim();
+
+  if (isAdRemoval) {
+    user.adsDisabled = true;
+    user.updatedAt = now;
+
+    const notif = {
+      id: shortId("not"),
+      userId: user.id,
+      targetRole: user.role,
+      senderRole: "ADMIN",
+      orderId: payment.id,
+      type: "AD_FREE_APPROVED",
+      titleBn: "সব বিজ্ঞাপন বন্ধ (Ad-Free) হয়েছে",
+      messageBn: `অভিনন্দন! আপনার ৳${payment.amount || 200} পেমেন্ট (TxID: ${payment.transactionId}) অনুমোদিত হয়েছে। এখন থেকে অ্যাপ ও ওয়েবসাইটে কোনো বিজ্ঞাপন দেখাবে না।`,
+      isRead: false,
+      createdAt: now
+    };
+    const audit = {
+      id: shortId("aud"),
+      actorId: admin.id,
+      actorRole: "ADMIN",
+      actionBn: "বিজ্ঞাপন বন্ধ (Ad-Free) অনুমোদন",
+      targetEntity: "ActivationPayment",
+      targetId: payment.id,
+      detailsBn: `${user.fullName} — TxID: ${payment.transactionId} -> adsDisabled=true`,
+      createdAt: now
+    };
+    state.notifications.unshift(notif);
+    state.auditLogs.unshift(audit);
+    saveLocalSnapshot();
+
+    await rtdbPush(`activationPayments/${payment.id}`, payment);
+    await rtdbPush(`users/${user.id}`, user);
+    await rtdbPush(`notifications/${notif.id}`, notif);
+    await rtdbPush(`auditLogs/${audit.id}`, audit);
+
+    showToast(`${user.fullName}-এর জন্য সব বিজ্ঞাপন বন্ধ (Ad-Free) করা হয়েছে!`, "success");
+    closeModal();
+    renderCurrentView();
+    return true;
+  }
+
+  const baseDate = user.accountStatus === "ACTIVE" && Number(user.expiryDate || 0) > now ? Number(user.expiryDate) : now;
+  const nextExpiry = addCalendarYears(baseDate, FIXED_VALIDITY_YEARS);
 
   user.accountStatus = "ACTIVE";
   user.verificationStatus = "VERIFIED";
@@ -1378,20 +1488,24 @@ async function adminRejectActivationPayment(paymentId, reason, requestResubmissi
   if (!payment) return false;
   const user = state.users.find((u) => u.id === payment.userId);
   const now = Date.now();
+  const isAdRemoval = payment.paymentType === "AD_FREE";
   const cleanReason = String(reason || "").trim() || (requestResubmission ? "সঠিক TxID ও স্পষ্ট রসিদ পুনরায় জমা দিন।" : "পেমেন্ট তথ্য যাচাইয়ে অমিল পাওয়া গেছে।");
 
   payment.status = requestResubmission ? "RESUBMISSION_REQUESTED" : "REJECTED";
   payment.reviewedAt = now;
   payment.reviewedBy = admin.id;
+  payment.updatedAt = now;
   payment.adminNotes = cleanReason;
 
   if (user) {
-    const stillValidActive = user.accountStatus === "ACTIVE" && Number(user.expiryDate || 0) > now;
-    if (!stillValidActive) {
-      user.accountStatus = requestResubmission ? "PAYMENT_PENDING" : "PAYMENT_REJECTED";
+    if (!isAdRemoval) {
+      const stillValidActive = user.accountStatus === "ACTIVE" && Number(user.expiryDate || 0) > now;
+      if (!stillValidActive) {
+        user.accountStatus = requestResubmission ? "PAYMENT_PENDING" : "PAYMENT_REJECTED";
+      }
+      user.updatedAt = now;
+      await rtdbPush(`users/${user.id}`, user);
     }
-    user.updatedAt = now;
-    await rtdbPush(`users/${user.id}`, user);
 
     const notif = {
       id: shortId("not"),
@@ -1399,8 +1513,10 @@ async function adminRejectActivationPayment(paymentId, reason, requestResubmissi
       targetRole: user.role,
       senderRole: "ADMIN",
       orderId: payment.id,
-      type: "ACTIVATION_REJECTED",
-      titleBn: requestResubmission ? "পেমেন্ট পুনঃজমা প্রয়োজন" : "অ্যাক্টিভেশন পেমেন্ট প্রত্যাখ্যাত",
+      type: isAdRemoval ? "AD_FREE_REJECTED" : "ACTIVATION_REJECTED",
+      titleBn: isAdRemoval
+        ? (requestResubmission ? "Ad-Free পেমেন্ট পুনঃজমা প্রয়োজন" : "Ad-Free পেমেন্ট প্রত্যাখ্যাত")
+        : (requestResubmission ? "পেমেন্ট পুনঃজমা প্রয়োজন" : "অ্যাক্টিভেশন পেমেন্ট প্রত্যাখ্যাত"),
       messageBn: `কারণ: ${cleanReason} (TxID: ${payment.transactionId})`,
       isRead: false,
       createdAt: now
@@ -1492,6 +1608,131 @@ async function adminSetAccountStatus(userId, newStatus, reason = "") {
   return true;
 }
 
+async function adminSetUserAdsDisabled(userId, disabled) {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") return false;
+  const user = state.users.find((u) => u.id === userId);
+  if (!user || user.role === "ADMIN") return false;
+  const now = Date.now();
+  const nextVal = Boolean(disabled);
+  user.adsDisabled = nextVal;
+  user.updatedAt = now;
+
+  const notif = {
+    id: shortId("not"),
+    userId: user.id,
+    targetRole: user.role,
+    senderRole: "ADMIN",
+    orderId: "",
+    type: nextVal ? "ADS_DISABLED_BY_ADMIN" : "ADS_ENABLED_BY_ADMIN",
+    titleBn: nextVal ? "আপনার বিজ্ঞাপন বন্ধ করা হয়েছে" : "আপনার বিজ্ঞাপন পুনরায় চালু হয়েছে",
+    messageBn: nextVal
+      ? "অ্যাডমিন আপনার অ্যাকাউন্টের জন্য সব বিজ্ঞাপন বন্ধ করেছেন। এখন আপনি বিজ্ঞাপনমুক্ত অভিজ্ঞতা পাবেন।"
+      : "অ্যাডমিন আপনার অ্যাকাউন্টের বিজ্ঞাপন প্রদর্শন পুনরায় চালু করেছেন।",
+    isRead: false,
+    createdAt: now
+  };
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: nextVal ? "ব্যবহারকারীর বিজ্ঞাপন বন্ধ (ওয়েব)" : "ব্যবহারকারীর বিজ্ঞাপন চালু (ওয়েব)",
+    targetEntity: "User",
+    targetId: user.id,
+    detailsBn: `${user.fullName} -> adsDisabled=${nextVal}`,
+    createdAt: now
+  };
+  state.notifications.unshift(notif);
+  state.auditLogs.unshift(audit);
+  saveLocalSnapshot();
+
+  await rtdbPush(`users/${user.id}`, user);
+  await rtdbPush(`notifications/${notif.id}`, notif);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+  showToast(nextVal ? `${user.fullName}-এর বিজ্ঞাপন বন্ধ করা হয়েছে` : `${user.fullName}-এর বিজ্ঞাপন চালু করা হয়েছে`, "success");
+  renderCurrentView();
+  return true;
+}
+
+async function adminSaveHeroSlider(sliderDraft) {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") {
+    showToast("শুধুমাত্র সুপার অ্যাডমিন হিরো স্লাইডার পরিচালনা করতে পারেন।", "error");
+    return false;
+  }
+  const titleBn = String(sliderDraft?.titleBn || "").trim();
+  if (!titleBn) {
+    showToast("স্লাইডারের মূল শিরোনাম আবশ্যক।", "error");
+    return false;
+  }
+  const now = Date.now();
+  const id = String(sliderDraft.id || "").trim() || shortId("sld");
+  const existing = state.heroSliders.find((s) => s.id === id);
+  const item = {
+    id,
+    badgeBn: String(sliderDraft.badgeBn || "১০০% দালালমুক্ত বাজার").trim(),
+    titleBn,
+    subtitleBn: String(sliderDraft.subtitleBn || "").trim(),
+    bullet1Bn: String(sliderDraft.bullet1Bn || "কৃষকের ন্যায্য দাম").trim(),
+    bullet2Bn: String(sliderDraft.bullet2Bn || "ক্রেতার ন্যায্য দামে ক্রয়").trim(),
+    bullet3Bn: String(sliderDraft.bullet3Bn || "সরাসরি যোগাযোগ").trim(),
+    ctaTextBn: String(sliderDraft.ctaTextBn || "এখনই অর্ডার করুন").trim() || "এখনই অর্ডার করুন",
+    targetRoute: String(sliderDraft.targetRoute || "browse").trim() || "browse",
+    imageUri: String(sliderDraft.imageUri || "").trim(),
+    sortOrder: Math.max(1, Number(sliderDraft.sortOrder || existing?.sortOrder || state.heroSliders.length + 1)),
+    isActive: sliderDraft.isActive !== false,
+    updatedAt: now
+  };
+  state.heroSliders = [item, ...state.heroSliders.filter((s) => s.id !== id)]
+    .sort((a, b) => (a.sortOrder || 99) - (b.sortOrder || 99) || (b.updatedAt || 0) - (a.updatedAt || 0));
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: existing ? "হিরো স্লাইডার সম্পাদনা (ওয়েব)" : "নতুন হিরো স্লাইডার যোগ (ওয়েব)",
+    targetEntity: "HeroSlider",
+    targetId: id,
+    detailsBn: `${item.titleBn} (ক্রম: ${item.sortOrder}, ${item.isActive ? "সক্রিয়" : "বন্ধ"})`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+
+  await rtdbPush(`heroSliders/${id}`, item);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+  showToast("হিরো স্লাইডার সংরক্ষণ ও লাইভ হয়েছে!", "success");
+  renderCurrentView();
+  return true;
+}
+
+async function adminDeleteHeroSlider(sliderId) {
+  const admin = getActiveUser();
+  if (!admin || admin.role !== "ADMIN") return false;
+  const target = state.heroSliders.find((s) => s.id === sliderId);
+  if (!target) return false;
+  const now = Date.now();
+  state.heroSliders = state.heroSliders.filter((s) => s.id !== sliderId);
+  state.heroSlideIdx = 0;
+
+  const audit = {
+    id: shortId("aud"),
+    actorId: admin.id,
+    actorRole: "ADMIN",
+    actionBn: "হিরো স্লাইডার মুছে ফেলা (ওয়েব)",
+    targetEntity: "HeroSlider",
+    targetId: sliderId,
+    detailsBn: `${target.titleBn} মুছে ফেলা হয়েছে`,
+    createdAt: now
+  };
+  state.auditLogs.unshift(audit);
+
+  await rtdbDelete(`heroSliders/${sliderId}`);
+  await rtdbPush(`auditLogs/${audit.id}`, audit);
+  showToast("হিরো স্লাইডার মুছে ফেলা হয়েছে।", "info");
+  renderCurrentView();
+  return true;
+}
+
 async function adminSavePaymentSettings(nextSettings) {
   const admin = getActiveUser();
   if (!admin || admin.role !== "ADMIN") {
@@ -1499,12 +1740,14 @@ async function adminSavePaymentSettings(nextSettings) {
     return false;
   }
   const now = Date.now();
+  const adRemovalFee = Number(nextSettings.adRemovalFee || DEFAULT_PAYMENT_SETTINGS.adRemovalFee || 200);
   const merged = {
     ...DEFAULT_PAYMENT_SETTINGS,
     ...nextSettings,
     farmerFee: FIXED_ACTIVATION_FEE_BDT,
     buyerFee: FIXED_ACTIVATION_FEE_BDT,
     renewalFee: FIXED_ACTIVATION_FEE_BDT,
+    adRemovalFee: adRemovalFee > 0 ? adRemovalFee : 200,
     validityYears: FIXED_VALIDITY_YEARS,
     updatedAt: now
   };
@@ -1516,7 +1759,7 @@ async function adminSavePaymentSettings(nextSettings) {
     actionBn: "পেমেন্ট সেটিংস হালনাগাদ (ওয়েব)",
     targetEntity: "PaymentSettings",
     targetId: "default",
-    detailsBn: `bKash: ${merged.bKashNumber} (${merged.bKashAccountType}) | Nagad: ${merged.nagadNumber} (${merged.nagadAccountType})`,
+    detailsBn: `bKash: ${merged.bKashNumber} (${merged.bKashAccountType}) | Nagad: ${merged.nagadNumber} | Ad-Free Fee: ৳${merged.adRemovalFee}`,
     createdAt: now
   };
   state.auditLogs.unshift(audit);
@@ -3034,8 +3277,9 @@ function renderDailyTipsCard() {
 
 function syncExternalAdNetworkScripts() {
   const cfg = state.adConfig || DEFAULT_AD_CONFIG;
+  const suppressed = isCurrentUserAdsSuppressed();
   const sig = JSON.stringify({
-    e: cfg.adsEnabled,
+    e: cfg.adsEnabled && !suppressed,
     ac: cfg.adsenseEnabled ? cfg.adsenseClient : "",
     asb: cfg.adsterraEnabled ? cfg.adsterraSocialBarUrl : "",
     m: cfg.monetagEnabled ? `${cfg.monetagZoneId}|${cfg.monetagScriptUrl}` : ""
@@ -3046,7 +3290,7 @@ function syncExternalAdNetworkScripts() {
   const scriptsRoot = document.getElementById("ad-scripts-root");
   if (!scriptsRoot) return;
   scriptsRoot.innerHTML = "";
-  if (!cfg.adsEnabled) return;
+  if (!cfg.adsEnabled || suppressed) return;
 
   if (cfg.adsenseEnabled && cfg.adsenseClient) {
     const existing = document.querySelector(`script[data-kb-ad-net="adsense"]`);
@@ -3079,7 +3323,7 @@ function syncExternalAdNetworkScripts() {
 
 function renderAdPlacement(slotName) {
   const cfg = state.adConfig || DEFAULT_AD_CONFIG;
-  if (!cfg.adsEnabled) return "";
+  if (!cfg.adsEnabled || isCurrentUserAdsSuppressed()) return "";
 
   const parts = [];
   const labelBadge = cfg.showAdsLabel
@@ -3180,11 +3424,13 @@ function renderAdPlacement(slotName) {
 function mountPageAdPlacements() {
   syncExternalAdNetworkScripts();
   const cfg = state.adConfig || DEFAULT_AD_CONFIG;
+  const suppressed = isCurrentUserAdsSuppressed();
   const topEl = document.getElementById("ad-slot-top");
   const footerEl = document.getElementById("ad-slot-footer");
 
-  if (topEl) topEl.innerHTML = cfg.adsEnabled ? renderAdPlacement("top") : "";
-  if (footerEl) footerEl.innerHTML = cfg.adsEnabled ? renderAdPlacement("footer") : "";
+  if (topEl) topEl.innerHTML = cfg.adsEnabled && !suppressed ? renderAdPlacement("top") : "";
+  if (footerEl) footerEl.innerHTML = cfg.adsEnabled && !suppressed ? renderAdPlacement("footer") : "";
+  if (suppressed) return;
 
   if (cfg.adsEnabled && cfg.adsenseEnabled && cfg.adsenseClient && typeof window !== "undefined") {
     try {
@@ -3502,6 +3748,15 @@ function renderFarmerHomeWorkspace(user) {
   `;
 }
 
+function dispatchHeroRoute(route) {
+  const r = String(route || "browse").trim().toLowerCase();
+  if (r === "farmers") navigate("farmers");
+  else if (r === "sell") window.kbApp.goSell();
+  else if (r === "activation") navigate("activation");
+  else if (r === "register_farmer") navigate("auth-register-farmer");
+  else navigate("browse");
+}
+
 function renderHomePage() {
   const user = getActiveUser();
   if (user && user.role === "FARMER") {
@@ -3512,17 +3767,69 @@ function renderHomePage() {
   const isAdmin = user && user.role === "ADMIN";
   const activeProducts = state.products.filter((p) => p.status === "ACTIVE");
   const farmers = state.users.filter((u) => u.role === "FARMER");
-  const topCats = state.categories.slice(0, 12);
+  const verifiedFarmers = farmers.filter((u) => u.verificationStatus === "VERIFIED");
+  const buyers = state.users.filter((u) => u.role === "BUYER");
+  const completedOrders = state.orders.filter((o) => o.status === "COMPLETED");
+  const avgReviewPct = state.reviews.length
+    ? Math.min(100, Math.max(0, Math.round((state.reviews.reduce((s, r) => s + Number(r.rating || 5), 0) / state.reviews.length / 5) * 100)))
+    : null;
+  const topCats = state.categories.filter((c) => c.isActive !== false).slice(0, 12);
   const myBuyerOrders = isBuyer ? state.orders.filter((o) => o.buyerId === user.id) : [];
 
+  const activeSlides = state.heroSliders.filter((s) => s.isActive !== false);
+  const slides = activeSlides.length
+    ? activeSlides
+    : [
+        {
+          id: "default_flagship",
+          badgeBn: "১০০% দালালমুক্ত বাজার",
+          titleBn: "সরাসরি কৃষকের কাছ থেকে",
+          subtitleBn: "তাজা ফসল কিনুন",
+          bullet1Bn: "কৃষকের ন্যায্য দাম",
+          bullet2Bn: "ক্রেতার ন্যায্য দামে ক্রয়",
+          bullet3Bn: "সরাসরি যোগাযোগ",
+          ctaTextBn: "এখনই অর্ডার করুন",
+          targetRoute: "browse",
+          imageUri: ""
+        }
+      ];
+  const slideIdx = Math.max(0, Math.min(slides.length - 1, state.heroSlideIdx || 0));
+  const slide = slides[slideIdx];
+  const slideImg = slide.imageUri || `${ASSET_BASE}showcase.png`;
+  const bullets = [slide.bullet1Bn, slide.bullet2Bn, slide.bullet3Bn].filter(Boolean);
+
+  const trustMetrics = [];
+  if (verifiedFarmers.length > 0) trustMetrics.push({ icon: "👨‍🌾", label: "যাচাইকৃত কৃষক", value: String(verifiedFarmers.length) });
+  if (buyers.length > 0) trustMetrics.push({ icon: "🛒", label: "নিবন্ধিত ক্রেতা", value: String(buyers.length) });
+  if (completedOrders.length > 0) trustMetrics.push({ icon: "✓", label: "সম্পন্ন অর্ডার", value: String(completedOrders.length) });
+  if (avgReviewPct !== null) trustMetrics.push({ icon: "👍", label: "সন্তুষ্টির হার", value: `${avgReviewPct}%` });
+
+  const farmerPhoneById = new Map(farmers.map((f) => [f.id, f.phone || ""]));
+
   return `
-    <div class="space-y-8">
+    <div class="space-y-7">
+      <!-- Green Search Header Strip -->
+      <section class="rounded-3xl bg-gradient-to-r from-[#075B32] to-[#168447] p-4 sm:p-5 shadow-md">
+        <div class="bg-white rounded-full p-1.5 pl-4 flex items-center gap-2 shadow-sm">
+          <span class="text-[#168447] text-lg">🔍</span>
+          <input id="home-search-input" type="text" value="${escapeHtml(state.filters.query)}"
+            placeholder="কোন ফসল খুঁজছেন? (যেমন: মিনিকেট চাল, কুষ্টিয়া)..."
+            onkeydown="if(event.key==='Enter') window.kbApp.applyHomeSearch()"
+            class="flex-1 bg-transparent text-sm text-[#202820] focus:outline-none min-w-0" />
+          <button onclick="window.kbApp.applyHomeSearch()"
+            class="px-4 sm:px-5 py-2 rounded-full bg-[#168447] hover:bg-[#075B32] text-white text-xs sm:text-sm font-bold flex items-center gap-1.5 shrink-0 transition">
+            <span>⚙️</span>
+            <span>ফিল্টার</span>
+          </button>
+        </div>
+      </section>
+
       ${
         isAdmin
           ? `<div class="bg-amber-50 border border-amber-200 rounded-3xl p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 class="font-bold text-amber-900">🛡️ সুপার অ্যাডমিন নিয়ন্ত্রণ প্যানেল</h2>
-                <p class="text-xs text-amber-800">কৃষক ও ক্রেতা যাচাই, বিজ্ঞাপন নেটওয়ার্ক, অর্ডার ও অডিট লগ পরিচালনা করুন।</p>
+                <p class="text-xs text-amber-800">হিরো স্লাইডার, কৃষক ও ক্রেতা যাচাই, বিজ্ঞাপন ও অর্ডার পরিচালনা করুন।</p>
               </div>
               <button onclick="window.kbApp.navigate('admin')" class="px-4 py-2 rounded-xl bg-amber-600 text-white text-xs font-bold hover:bg-amber-700">অ্যাডমিন প্যানেল খুলুন →</button>
             </div>`
@@ -3549,78 +3856,69 @@ function renderHomePage() {
           : ""
       }
 
-      <!-- Hero Banner -->
-      <section class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-[#105B34] via-[#168447] to-emerald-600 text-white shadow-lg">
-        <div class="grid md:grid-cols-2 gap-6 items-center p-6 sm:p-10">
-          <div class="space-y-4">
-            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur text-xs font-semibold">
-              <span>🇧🇩 কুষ্টিয়া থেকে সারা বাংলাদেশ (৬৪ জেলা)</span>
-              <span class="px-2 py-0.5 rounded-full bg-amber-400 text-[#105B34] font-bold">০% দালাল</span>
-            </div>
-            <h1 class="text-2xl sm:text-4xl font-extrabold leading-tight">
-              ${
-                isBuyer
-                  ? "সরাসরি খামার থেকে তাজা কৃষিপণ্য কিনুন ন্যায্য দামে।"
-                  : "কৃষকের ফসল, কৃষকের ন্যায্য দাম — সরাসরি ক্রেতার হাতে।"
-              }
-            </h1>
-            <p class="text-sm sm:text-base text-emerald-50/90 leading-relaxed">
-              কোনো মধ্যস্বত্বভোগী বা কমিশন ছাড়াই সরাসরি বাংলাদেশের কৃষকদের কাছ থেকে টাটকা ধান, চাল, আলু, পেঁয়াজ, ফল ও শাকসবজি কিনুন। অর্ডার করলে তাৎক্ষণিক রিয়েল-টাইম নোটিফিকেশন যায় কৃষকের কাছে।
-            </p>
-            <div class="flex flex-wrap gap-3 pt-1">
-              <button onclick="window.kbApp.navigate('browse')" class="px-5 py-3 rounded-2xl bg-white text-[#105B34] font-bold text-sm shadow hover:bg-emerald-50">
-                🌾 ফসল খুঁজুন
-              </button>
-              ${
-                !isBuyer && !isAdmin
-                  ? `<button onclick="window.kbApp.goSell()" class="px-5 py-3 rounded-2xl bg-amber-400 text-[#105B34] font-bold text-sm shadow hover:bg-amber-300">
-                      👨‍🌾 কৃষক হিসেবে বিক্রি করুন
-                    </button>`
-                  : ""
-              }
-              <button onclick="window.kbApp.navigate('farmers')" class="px-4 py-3 rounded-2xl border border-white/40 text-white font-semibold text-sm hover:bg-white/10">
-                কৃষকদের দেখুন
-              </button>
-            </div>
+      <!-- Dynamic Hero Carousel (Admin Managed) -->
+      <section class="relative overflow-hidden rounded-3xl shadow-lg min-h-[250px] bg-[#075B32] text-white">
+        <img src="${escapeHtml(slideImg)}" alt="${escapeHtml(slide.titleBn)}" class="absolute inset-0 w-full h-full object-cover" onerror="this.src='${ASSET_BASE}showcase.png'" />
+        <div class="absolute inset-0 bg-gradient-to-r from-[#053A1E]/95 via-[#075B32]/85 to-[#075B32]/40"></div>
+        <div class="relative z-10 p-6 sm:p-9 max-w-xl space-y-3">
+          ${
+            slide.badgeBn
+              ? `<span class="inline-block px-3 py-1 rounded-full bg-[#168447] border border-white/25 text-amber-200 text-xs font-bold">${escapeHtml(slide.badgeBn)}</span>`
+              : ""
+          }
+          <div>
+            <h1 class="text-2xl sm:text-3xl font-extrabold leading-snug text-white">${escapeHtml(slide.titleBn)}</h1>
+            ${slide.subtitleBn ? `<div class="text-xl sm:text-2xl font-extrabold text-amber-300 mt-0.5">${escapeHtml(slide.subtitleBn)}</div>` : ""}
           </div>
-          <div class="flex justify-center">
-            <img src="${ASSET_BASE}showcase.png" alt="কৃষি বন্ধু প্ল্যাটফর্ম" class="rounded-2xl shadow-2xl border-2 border-white/25 max-h-72 object-cover w-full" />
+          ${
+            bullets.length
+              ? `<ul class="space-y-1 text-xs sm:text-sm text-emerald-50">
+                  ${bullets.map((b) => `<li class="flex items-center gap-2"><span class="text-emerald-300 font-bold">✓</span><span>${escapeHtml(b)}</span></li>`).join("")}
+                </ul>`
+              : ""
+          }
+          <div class="flex flex-wrap gap-2.5 pt-2">
+            <button onclick="window.kbApp.dispatchHeroRoute('${escapeHtml(slide.targetRoute || "browse")}')"
+              class="px-5 py-2.5 rounded-full bg-[#168447] hover:bg-[#105B34] border border-white text-white font-bold text-sm shadow transition">
+              ${escapeHtml(slide.ctaTextBn || "এখনই অর্ডার করুন")} →
+            </button>
+            <button onclick="window.kbApp.navigate('farmers')"
+              class="px-4 py-2.5 rounded-full bg-black/30 hover:bg-black/45 border border-white/70 text-white font-semibold text-sm">
+              কৃষকদের দেখুন
+            </button>
           </div>
         </div>
-
-        <!-- Quick Stats Strip -->
-        <div class="bg-black/15 border-t border-white/15 px-6 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-center text-xs sm:text-sm">
-          <div><span class="font-bold block text-base">${farmers.length}</span>নিবন্ধিত কৃষক</div>
-          <div><span class="font-bold block text-base">${activeProducts.length}</span>সক্রিয় ফসল</div>
-          <div><span class="font-bold block text-base">৬৪ জেলা</span>সারা বাংলাদেশ</div>
-          <div><span class="font-bold block text-base">০%</span>কমিশন ফি</div>
-        </div>
+        ${
+          slides.length > 1
+            ? `<div class="relative z-10 flex items-center justify-between px-5 pb-4">
+                <button type="button" onclick="window.kbApp.prevHeroSlide(${slides.length})" class="w-8 h-8 rounded-full bg-black/40 text-white text-sm font-bold hover:bg-black/60">‹</button>
+                <div class="flex gap-1.5">
+                  ${slides
+                    .map((_, i) => `<button type="button" onclick="window.kbApp.setHeroSlide(${i})" class="h-2 rounded-full transition-all ${i === slideIdx ? "w-6 bg-amber-300" : "w-2 bg-white/50"}"></button>`)
+                    .join("")}
+                </div>
+                <button type="button" onclick="window.kbApp.nextHeroSlide(${slides.length})" class="w-8 h-8 rounded-full bg-black/40 text-white text-sm font-bold hover:bg-black/60">›</button>
+              </div>`
+            : ""
+        }
       </section>
 
-      <!-- Search Box -->
-      <section class="bg-white rounded-3xl p-4 sm:p-5 border border-emerald-100 shadow-sm flex flex-col sm:flex-row gap-3">
-        <input id="home-search-input" type="text" value="${escapeHtml(state.filters.query)}"
-          placeholder="ফসল, জেলা, উপজেলা বা কৃষকের নাম লিখে খুঁজুন (যেমন: মিনিকেট চাল, কুষ্টিয়া, বগুড়া)..."
-          class="flex-1 px-4 py-3 rounded-2xl border border-emerald-200 focus:outline-none focus:ring-2 focus:ring-[#168447] text-sm" />
-        <button onclick="window.kbApp.applyHomeSearch()" class="px-6 py-3 rounded-2xl bg-[#168447] text-white font-bold text-sm hover:bg-[#105B34]">
-          🔍 অনুসন্ধান করুন
-        </button>
-      </section>
-
-      <!-- Categories Grid -->
+      <!-- Circular Categories Strip -->
       <section class="space-y-3">
         <div class="flex items-center justify-between">
-          <h2 class="text-lg sm:text-xl font-bold text-[#105B34]">জনপ্রিয় কৃষিপণ্য ক্যাটাগরি (২৪টি)</h2>
+          <h2 class="text-lg sm:text-xl font-bold text-[#075B32]">ফসলের ক্যাটাগরি</h2>
           <button onclick="window.kbApp.navigate('browse')" class="text-sm font-semibold text-[#168447] hover:underline">সব দেখুন →</button>
         </div>
-        <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+        <div class="flex gap-3 overflow-x-auto pb-2">
           ${topCats
             .map(
               (c) => `
             <button onclick="window.kbApp.filterByCategory('${escapeHtml(c.id)}')"
-              class="bg-white hover:bg-[#EAF7EF] border border-emerald-100 rounded-2xl p-3 text-center transition shadow-sm">
-              <div class="text-2xl mb-1">${escapeHtml(c.emoji || "🌱")}</div>
-              <div class="text-xs font-bold text-[#202820] truncate">${escapeHtml(c.nameBn)}</div>
+              class="shrink-0 w-20 flex flex-col items-center gap-1.5 group">
+              <div class="w-16 h-16 rounded-full bg-[#EAF7EF] border-2 border-[#168447]/30 group-hover:border-[#168447] flex items-center justify-center text-3xl shadow-sm transition">
+                ${escapeHtml(c.emoji || "🌱")}
+              </div>
+              <div class="text-xs font-bold text-[#202820] text-center truncate w-full">${escapeHtml(c.nameBn)}</div>
             </button>
           `
             )
@@ -3628,14 +3926,14 @@ function renderHomePage() {
         </div>
       </section>
 
-      <!-- Live Products Grid -->
+      <!-- Today's Fresh Crops -->
       <section class="space-y-4">
         <div class="flex items-center justify-between">
-          <div>
-            <h2 class="text-lg sm:text-xl font-bold text-[#105B34]">সাম্প্রতিক তাজা ফসল (সরাসরি কৃষকের খামার থেকে)</h2>
-            <p class="text-xs text-gray-500">অ্যান্ড্রয়েড অ্যাপ ও ওয়েবসাইটে একসাথে লাইভ</p>
+          <div class="flex items-center gap-2">
+            <span class="text-xl">🌱</span>
+            <h2 class="text-lg sm:text-xl font-extrabold text-[#075B32]">আজকের নতুন ফসল</h2>
           </div>
-          <button onclick="window.kbApp.navigate('browse')" class="text-sm font-semibold text-[#168447] hover:underline">আরও দেখুন →</button>
+          <button onclick="window.kbApp.navigate('browse')" class="px-3.5 py-1.5 rounded-full bg-[#EAF7EF] border border-emerald-200 text-xs font-bold text-[#075B32] hover:bg-emerald-100">সব দেখুন →</button>
         </div>
 
         ${
@@ -3651,8 +3949,76 @@ function renderHomePage() {
                        <button onclick="window.kbApp.goSell()" class="px-5 py-2.5 rounded-xl bg-[#168447] text-white text-sm font-bold">ফসল যোগ করুন</button>`
                 }
               </div>`
-            : renderChunkedGridWithFeedAds(activeProducts.slice(0, 8), renderProductCard, 4, "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4")
+            : `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                ${activeProducts.slice(0, 8).map((p) => {
+                  const cat = state.categories.find((c) => c.id === p.categoryId);
+                  const emoji = cat?.emoji || "🌾";
+                  const phone = String(farmerPhoneById.get(p.farmerId) || "").replace(/[^\d+]/g, "");
+                  return `
+                    <div class="bg-white rounded-2xl border border-emerald-100 shadow-sm hover:shadow-md transition overflow-hidden flex flex-col">
+                      <button onclick="window.kbApp.navigate('product-detail', { id: '${escapeHtml(p.id)}' })" class="relative block w-full text-left">
+                        ${
+                          p.imageUri
+                            ? `<img src="${escapeHtml(p.imageUri)}" alt="${escapeHtml(p.nameBn)}" class="w-full h-36 object-cover" onerror="this.style.display='none'" />`
+                            : `<div class="w-full h-36 bg-[#EAF7EF] flex items-center justify-center text-4xl">${emoji}</div>`
+                        }
+                        <span class="absolute top-2.5 right-2.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#168447] text-white shadow">তাজা</span>
+                        ${p.farmerVerified ? `<span class="absolute top-2.5 left-2.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-white/95 text-[#075B32] shadow">✓ যাচাইকৃত</span>` : ""}
+                      </button>
+                      <div class="p-3.5 flex-1 flex flex-col justify-between gap-2.5">
+                        <div class="space-y-1">
+                          <h3 class="font-bold text-sm text-[#202820] line-clamp-1">${escapeHtml(p.nameBn)}</h3>
+                          <div class="text-base font-extrabold text-[#168447]">${formatBdt(p.pricePerUnit)}<span class="text-xs font-medium text-gray-500"> / মণ</span></div>
+                          <div class="text-[11px] text-gray-600 truncate">📍 ${escapeHtml(p.upazila || "")}, ${escapeHtml(p.district || "")}</div>
+                          <div class="text-[11px] text-[#075B32] font-medium">মজুত: ${formatQty(p.availableQuantity)} মণ</div>
+                        </div>
+                        <div class="flex gap-2">
+                          ${
+                            phone
+                              ? `<a href="tel:${escapeHtml(phone)}" class="flex-1 py-2 rounded-xl bg-[#168447] hover:bg-[#075B32] text-white text-xs font-bold text-center">📞 কল করুন</a>`
+                              : `<button onclick="window.kbApp.navigate('product-detail', { id: '${escapeHtml(p.id)}' })" class="flex-1 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">বিস্তারিত</button>`
+                          }
+                          <button onclick="window.kbApp.addToCart('${escapeHtml(p.id)}', 1)" class="px-3 py-2 rounded-xl bg-[#EAF7EF] text-[#075B32] border border-emerald-200 text-xs font-bold" title="কার্টে যোগ করুন">🛒</button>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                }).join("")}
+              </div>`
         }
+      </section>
+
+      ${
+        trustMetrics.length
+          ? `<section class="bg-[#EAF7EF] rounded-3xl p-4 sm:p-5 border border-emerald-200 grid grid-cols-2 sm:grid-cols-${Math.min(4, trustMetrics.length)} gap-3 text-center">
+              ${trustMetrics
+                .map(
+                  (m) => `<div class="bg-white/70 rounded-2xl p-3 flex items-center justify-center gap-2.5">
+                    <span class="text-xl">${m.icon}</span>
+                    <div class="text-left">
+                      <div class="text-[11px] text-gray-600 font-semibold">${escapeHtml(m.label)}</div>
+                      <div class="text-base font-extrabold text-[#075B32]">${escapeHtml(m.value)}</div>
+                    </div>
+                  </div>`
+                )
+                .join("")}
+            </section>`
+          : ""
+      }
+
+      <!-- Promotional Dark-Green Farmer Registration Banner -->
+      <section class="rounded-3xl bg-gradient-to-r from-[#075B32] to-[#168447] text-white p-5 sm:p-6 shadow-md flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div class="flex items-center gap-4">
+          <img src="${ASSET_BASE}showcase.png" alt="কৃষি বন্ধু" class="w-24 h-16 rounded-2xl object-cover border border-white/25 shrink-0" />
+          <div>
+            <div class="text-xs font-semibold text-emerald-100">কৃষি বন্ধুর সাথে থাকুন</div>
+            <h3 class="text-lg sm:text-xl font-extrabold text-amber-300">কৃষি হোক আরও সমৃদ্ধ</h3>
+          </div>
+        </div>
+        <button onclick="${user ? "window.kbApp.goSell()" : "window.kbApp.navigate('auth-register-farmer')"}"
+          class="px-5 py-2.5 rounded-full bg-amber-400 hover:bg-amber-300 text-[#075B32] font-extrabold text-sm shadow shrink-0 transition">
+          এখনই যোগ দিন →
+        </button>
       </section>
 
       ${renderAdPlacement("feed")}
@@ -3662,13 +4028,13 @@ function renderHomePage() {
           ? `<section class="space-y-4">
               <div class="flex items-center justify-between">
                 <div>
-                  <h2 class="text-lg sm:text-xl font-bold text-[#105B34]">👨‍🌾 যাচাইকৃত কৃষক (${farmers.length})</h2>
+                  <h2 class="text-lg sm:text-xl font-bold text-[#105B34]">👨‍🌾 যাচাইকৃত কৃষক (${verifiedFarmers.length})</h2>
                   <p class="text-xs text-gray-500">সরাসরি খামার থেকে পাইকারি ফসল সংগ্রহ করুন</p>
                 </div>
                 <button onclick="window.kbApp.navigate('farmers')" class="text-sm font-semibold text-[#168447] hover:underline">সব কৃষক দেখুন →</button>
               </div>
               ${renderChunkedGridWithFeedAds(
-                farmers.slice(0, 6),
+                (verifiedFarmers.length ? verifiedFarmers : farmers).slice(0, 6),
                 (u) => {
                   const cnt = state.products.filter((p) => p.farmerId === u.id && p.status === "ACTIVE").length;
                   return `<div class="bg-white rounded-3xl p-4 border border-emerald-100 shadow-sm space-y-2.5">
@@ -3696,25 +4062,6 @@ function renderHomePage() {
       ${renderDailyTipsCard()}
 
       ${renderAdPlacement("feed")}
-
-      <!-- Zero Middleman Promise -->
-      <section class="bg-[#EAF7EF] rounded-3xl p-6 sm:p-8 border border-emerald-200 grid sm:grid-cols-3 gap-6">
-        <div>
-          <div class="text-2xl mb-2">🤝</div>
-          <h3 class="font-bold text-[#105B34] mb-1">১০০% দালালমুক্ত</h3>
-          <p class="text-xs text-gray-700">কৃষক নিজেই দাম নির্ধারণ করেন এবং ক্রেতার সাথে সরাসরি কথা বলে লেনদেন করেন।</p>
-        </div>
-        <div>
-          <div class="text-2xl mb-2">🔔</div>
-          <h3 class="font-bold text-[#105B34] mb-1">তাৎক্ষণিক অর্ডার নোটিফিকেশন</h3>
-          <p class="text-xs text-gray-700">ওয়েব বা অ্যাপ থেকে অর্ডার করলেই সাথে সাথে কৃষকের কাছে রিয়েল-টাইম নোটিফিকেশন পৌঁছায়।</p>
-        </div>
-        <div>
-          <div class="text-2xl mb-2">🗺️</div>
-          <h3 class="font-bold text-[#105B34] mb-1">৮ বিভাগ ও ৬৪ জেলা</h3>
-          <p class="text-xs text-gray-700">কুষ্টিয়া থেকে যাত্রা শুরু করে এখন বাংলাদেশের প্রতিটি জেলার কৃষক ও ক্রেতা সংযুক্ত।</p>
-        </div>
-      </section>
     </div>
   `;
 }
@@ -4292,12 +4639,33 @@ function renderProfilePage() {
         </div>
         ${
           user.role !== "ADMIN"
-            ? `<button onclick="window.kbApp.navigate('activation')" class="px-4 py-2.5 rounded-xl bg-[#168447] text-white text-xs font-bold hover:bg-[#105B34]">
-                ${isMarketplaceActive(user) ? "🔄 মেয়াদ ও পেমেন্ট ইতিহাস" : "⚡ এখনই অ্যাকাউন্ট সক্রিয় করুন"}
-              </button>`
+            ? `<div class="flex flex-wrap gap-2">
+                <button onclick="window.kbApp.navigate('activation', { mode: 'account' })" class="px-4 py-2.5 rounded-xl bg-[#168447] text-white text-xs font-bold hover:bg-[#105B34]">
+                  ${isMarketplaceActive(user) ? "🔄 মেয়াদ ও পেমেন্ট ইতিহাস" : "⚡ এখনই অ্যাকাউন্ট সক্রিয় করুন"}
+                </button>
+                <button onclick="window.kbApp.navigate('activation', { mode: 'ad_free' })" class="px-4 py-2.5 rounded-xl ${user.adsDisabled ? "bg-emerald-100 text-emerald-900 border border-emerald-300" : "bg-amber-50 text-amber-900 border border-amber-300"} text-xs font-bold">
+                  ${user.adsDisabled ? "🚫 Ad-Free সক্রিয়" : `🚫 বিজ্ঞাপন বন্ধ (৳${Number(state.paymentSettings?.adRemovalFee || 200)})`}
+                </button>
+              </div>`
             : ""
         }
       </div>
+
+      ${
+        user.role !== "ADMIN"
+          ? `<div class="rounded-3xl p-4 sm:p-5 border ${user.adsDisabled ? "bg-[#EAF7EF] border-emerald-200" : "bg-amber-50/70 border-amber-200"} flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div class="font-bold text-sm text-[#105B34]">${user.adsDisabled ? "🚫 বিজ্ঞাপন মুক্ত সুবিধা সক্রিয় রয়েছে" : "📢 সব বিজ্ঞাপন বন্ধ করুন (Ad-Free)"}</div>
+                <p class="text-xs text-gray-600 mt-0.5">${user.adsDisabled ? "আপনার অ্যাকাউন্টে অ্যাপ ও ওয়েবসাইটের সব বিজ্ঞাপন বন্ধ আছে।" : `এককালীন ৳${Number(state.paymentSettings?.adRemovalFee || 200)} পেমেন্ট করে সব ব্যানার ও ভিডিও বিজ্ঞাপন স্থায়ীভাবে বন্ধ করুন।`}</p>
+              </div>
+              ${
+                !user.adsDisabled
+                  ? `<button onclick="window.kbApp.navigate('activation', { mode: 'ad_free' })" class="px-4 py-2 rounded-xl bg-[#168447] text-white text-xs font-bold">এখনই পরিশোধ করুন →</button>`
+                  : `<span class="px-3 py-1 rounded-full bg-emerald-600 text-white text-xs font-bold">✓ Ad-Free</span>`
+              }
+            </div>`
+          : ""
+      }
 
       <div class="bg-white rounded-3xl p-6 sm:p-8 border border-emerald-100 shadow-sm space-y-4">
         <h2 class="text-lg font-bold text-[#105B34]">✏️ প্রোফাইল ও ছবি সম্পাদনা</h2>
@@ -4385,19 +4753,40 @@ function renderActivationPage() {
   const st = user.accountStatus || "PAYMENT_PENDING";
   const stMeta = ACCOUNT_STATUS_META[st] || ACCOUNT_STATUS_META.PAYMENT_PENDING;
   const myPayments = state.activationPayments.filter((p) => p.userId === user.id);
-  const hasPending = myPayments.some((p) => p.status === "PENDING");
+  const mode = state.activationMode === "ad_free" ? "ad_free" : "account";
+  const isAdRemovalMode = mode === "ad_free";
+  const adRemovalFee = Number(settings.adRemovalFee || DEFAULT_PAYMENT_SETTINGS.adRemovalFee || 200);
+  const hasPending = myPayments.some((p) => p.status === "PENDING" && ((p.paymentType === "AD_FREE") === isAdRemovalMode));
   const isRenewal = user.activationDate > 0 || st === "EXPIRED" || st === "ACTIVE";
+  const payableAmount = isAdRemovalMode ? adRemovalFee : FIXED_ACTIVATION_FEE_BDT;
 
   return `
     <div class="max-w-3xl mx-auto space-y-6">
+      <div class="bg-white rounded-2xl p-2 border border-emerald-100 flex gap-2">
+        <button type="button" onclick="window.kbApp.setActivationMode('account')"
+          class="flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold ${!isAdRemovalMode ? "bg-[#168447] text-white" : "text-[#105B34] hover:bg-[#EAF7EF]"}">
+          🔐 অ্যাকাউন্ট সক্রিয় / নবায়ন (৳${FIXED_ACTIVATION_FEE_BDT})
+        </button>
+        <button type="button" onclick="window.kbApp.setActivationMode('ad_free')"
+          class="flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold ${isAdRemovalMode ? "bg-[#168447] text-white" : "text-[#105B34] hover:bg-[#EAF7EF]"}">
+          🚫 বিজ্ঞাপন বন্ধ (৳${adRemovalFee})
+        </button>
+      </div>
+
       <div class="bg-gradient-to-br from-[#105B34] to-[#168447] text-white rounded-3xl p-6 sm:p-8 shadow-md space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="px-3 py-1 rounded-full bg-white/15 text-xs font-bold">🔐 অ্যাকাউন্ট অ্যাক্টিভেশন ও ২ বছর মেয়াদ</span>
-          <span class="px-3 py-1 rounded-full text-xs font-bold ${stMeta.color}">${stMeta.labelBn}</span>
+          <span class="px-3 py-1 rounded-full bg-white/15 text-xs font-bold">
+            ${isAdRemovalMode ? "🚫 সব বিজ্ঞাপন স্থায়ীভাবে বন্ধ (Ad-Free)" : "🔐 অ্যাকাউন্ট অ্যাক্টিভেশন ও ২ বছর মেয়াদ"}
+          </span>
+          <span class="px-3 py-1 rounded-full text-xs font-bold ${isAdRemovalMode && user.adsDisabled ? "bg-emerald-300 text-[#105B34]" : stMeta.color}">
+            ${isAdRemovalMode ? (user.adsDisabled ? "✓ Ad-Free সক্রিয়" : "বিজ্ঞাপন চালু") : stMeta.labelBn}
+          </span>
         </div>
-        <h1 class="text-2xl font-extrabold">নির্ধারিত ফি: ৳${FIXED_ACTIVATION_FEE_BDT} (${FIXED_VALIDITY_YEARS} বছরের মেয়াদ)</h1>
+        <h1 class="text-2xl font-extrabold">
+          ${isAdRemovalMode ? `বিজ্ঞাপন মুক্ত করার ফি: ৳${adRemovalFee} (এককালীন)` : `নির্ধারিত ফি: ৳${FIXED_ACTIVATION_FEE_BDT} (${FIXED_VALIDITY_YEARS} বছরের মেয়াদ)`}
+        </h1>
         <p class="text-xs sm:text-sm text-emerald-50/90">${escapeHtml(settings.paymentInstructions || DEFAULT_PAYMENT_SETTINGS.paymentInstructions)}</p>
-        ${user.expiryDate > 0 ? `<div class="text-xs bg-white/15 rounded-2xl px-4 py-2 inline-block">বর্তমান মেয়াদ: ${formatDateBn(user.expiryDate)} (${daysUntilExpiry(user) ?? 0} দিন বাকি)</div>` : ""}
+        ${!isAdRemovalMode && user.expiryDate > 0 ? `<div class="text-xs bg-white/15 rounded-2xl px-4 py-2 inline-block">বর্তমান মেয়াদ: ${formatDateBn(user.expiryDate)} (${daysUntilExpiry(user) ?? 0} দিন বাকি)</div>` : ""}
       </div>
 
       <!-- Admin Official Payment Numbers -->
@@ -4423,14 +4812,21 @@ function renderActivationPage() {
 
       <!-- Payment Submission Form -->
       <div class="bg-white rounded-3xl p-6 border border-emerald-100 shadow-sm space-y-4">
-        <h2 class="text-lg font-bold text-[#105B34]">${isRenewal ? "🔄 নবায়ন পেমেন্ট তথ্য জমা দিন" : "💳 অ্যাক্টিভেশন পেমেন্ট তথ্য জমা দিন"}</h2>
+        <h2 class="text-lg font-bold text-[#105B34]">
+          ${isAdRemovalMode ? "🚫 বিজ্ঞাপন বন্ধ (Ad-Free) পেমেন্ট জমা দিন" : isRenewal ? "🔄 নবায়ন পেমেন্ট তথ্য জমা দিন" : "💳 অ্যাক্টিভেশন পেমেন্ট তথ্য জমা দিন"}
+        </h2>
         ${
-          hasPending
+          isAdRemovalMode && user.adsDisabled
+            ? `<div class="bg-[#EAF7EF] border border-emerald-200 rounded-2xl p-4 text-xs sm:text-sm text-[#105B34] font-bold">
+                ✓ আপনার অ্যাকাউন্টের জন্য সব বিজ্ঞাপন ইতোমধ্যেই বন্ধ (Ad-Free) করা হয়েছে। আর কোনো পেমেন্টের প্রয়োজন নেই।
+              </div>`
+            : hasPending
             ? `<div class="bg-sky-50 border border-sky-200 rounded-2xl p-4 text-xs sm:text-sm text-sky-900 font-semibold">
                 ⏳ আপনার একটি পেমেন্ট বর্তমানে অ্যাডমিন যাচাইয়ের জন্য অপেক্ষমাণ আছে। যাচাই সম্পন্ন হলেই নোটিফিকেশন পাবেন।
               </div>`
             : `<form onsubmit="window.kbApp.handleActivationPaymentSubmit(event)" class="space-y-3.5">
-                <input type="hidden" name="isRenewal" value="${isRenewal ? "1" : "0"}" />
+                <input type="hidden" name="isRenewal" value="${!isAdRemovalMode && isRenewal ? "1" : "0"}" />
+                <input type="hidden" name="isAdRemoval" value="${isAdRemovalMode ? "1" : "0"}" />
                 <div class="grid sm:grid-cols-2 gap-3">
                   <div>
                     <label class="text-xs font-bold block mb-1">পেমেন্ট মাধ্যম *</label>
@@ -4441,7 +4837,7 @@ function renderActivationPage() {
                   </div>
                   <div>
                     <label class="text-xs font-bold block mb-1">নির্ধারিত পরিমাণ (৳)</label>
-                    <input name="amount" value="${FIXED_ACTIVATION_FEE_BDT}" readonly class="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm font-bold text-[#105B34]" />
+                    <input name="amount" value="${payableAmount}" readonly class="w-full px-3.5 py-2.5 rounded-xl border border-gray-200 bg-gray-50 text-sm font-bold text-[#105B34]" />
                   </div>
                 </div>
 
@@ -4467,7 +4863,7 @@ function renderActivationPage() {
                 </div>
 
                 <button type="submit" class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm">
-                  ✓ ৳${FIXED_ACTIVATION_FEE_BDT} পেমেন্ট তথ্য জমা দিন
+                  ✓ ৳${payableAmount} পেমেন্ট তথ্য জমা দিন
                 </button>
               </form>`
         }
@@ -4478,15 +4874,16 @@ function renderActivationPage() {
         <h3 class="font-bold text-[#105B34]">📜 আমার পেমেন্ট জমাদানের ইতিহাস (${myPayments.length})</h3>
         ${
           !myPayments.length
-            ? `<p class="text-xs text-gray-500">এখনো কোনো অ্যাক্টিভেশন পেমেন্ট জমা দেওয়া হয়নি।</p>`
+            ? `<p class="text-xs text-gray-500">এখনো কোনো পেমেন্ট জমা দেওয়া হয়নি।</p>`
             : `<div class="space-y-2.5">
                 ${myPayments
                   .map((p) => {
                     const pMeta = ACTIVATION_PAYMENT_STATUS_META[p.status] || ACTIVATION_PAYMENT_STATUS_META.PENDING;
+                    const typeTag = p.paymentType === "AD_FREE" ? `<span class="px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 font-bold text-[10px] mr-1">🚫 Ad-Free</span>` : "";
                     return `<div class="p-3.5 rounded-2xl bg-[#F7FAF7] border border-emerald-100 text-xs flex flex-wrap justify-between gap-2">
                       <div>
-                        <div class="font-bold text-[#105B34]">${escapeHtml(p.paymentMethod)} • TxID: ${escapeHtml(p.transactionId)} • ${formatBdt(p.amount)}</div>
-                        <div class="text-gray-600">প্রেরক: ${escapeHtml(p.senderMobile)} • ${new Date(p.submittedAt).toLocaleString("bn-BD")}</div>
+                        <div class="font-bold text-[#105B34]">${typeTag}${escapeHtml(p.paymentMethod)} • TxID: ${escapeHtml(p.transactionId)} • ${formatBdt(p.amount)}</div>
+                        <div class="text-gray-600">প্রেরক: ${escapeHtml(p.senderMobile)} • ${new Date(p.submittedAt || p.createdAt).toLocaleString("bn-BD")}</div>
                         ${p.adminNotes ? `<div class="text-red-700 font-semibold mt-1">অ্যাডমিন নোট: ${escapeHtml(p.adminNotes)}</div>` : ""}
                       </div>
                       <span class="px-2.5 py-1 rounded-full h-fit font-bold ${pMeta.color}">${pMeta.labelBn}</span>
@@ -5233,6 +5630,7 @@ function renderAdminDashboardPage() {
     ["complaints", `অভিযোগ (${state.complaints.length})`],
     ["ads", "💰 বিজ্ঞাপন ও সব নেটওয়ার্ক"],
     ["tips", `💡 ডেইলি টিপস (${state.dailyTips.length})`],
+    ["sliders", `🖼️ হিরো স্লাইডার (${state.heroSliders.length})`],
     ["audit", "অডিট লগ"]
   ];
 
@@ -5321,20 +5719,21 @@ function renderAdminDashboardPage() {
                         <div class="space-y-1 text-xs">
                           <div class="flex flex-wrap items-center gap-2">
                             <span class="font-bold text-sm text-[#105B34]">${escapeHtml(p.userName)} (${escapeHtml(p.userPhone)})</span>
-                            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#EAF7EF] text-[#105B34]">${p.userRole === "FARMER" ? "👨‍🌾 কৃষক" : "🛍️ ক্রেতা"}</span>
+                            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#EAF7EF] text-[#105B34]">${(p.userRole || p.accountRole) === "FARMER" ? "👨‍🌾 কৃষক" : "🛍️ ক্রেতা"}</span>
                             <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${pMeta.color}">${pMeta.labelBn}</span>
-                            ${p.isRenewal ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800">🔄 নবায়ন</span>` : ""}
+                            ${p.paymentType === "AD_FREE" ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-800">🚫 বিজ্ঞাপন বন্ধ (Ad-Free)</span>` : ""}
+                            ${p.isRenewal && p.paymentType !== "AD_FREE" ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800">🔄 নবায়ন</span>` : ""}
                             ${isDupTx ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-600 text-white">⚠️ ডুপ্লিকেট TxID</span>` : ""}
                           </div>
-                          <div class="text-gray-700 font-semibold">${escapeHtml(p.paymentMethod)} • TxID: <span class="font-mono text-[#105B34]">${escapeHtml(p.transactionId)}</span> • পরিমাণ: <strong>${formatBdt(p.amount)}</strong> (${p.validityYears || FIXED_VALIDITY_YEARS} বছর)</div>
-                          <div class="text-gray-500">প্রেরক নম্বর: ${escapeHtml(p.senderMobile)} • জমা: ${new Date(p.submittedAt).toLocaleString("bn-BD")}</div>
+                          <div class="text-gray-700 font-semibold">${escapeHtml(p.paymentMethod)} • TxID: <span class="font-mono text-[#105B34]">${escapeHtml(p.transactionId)}</span> • পরিমাণ: <strong>${formatBdt(p.amount)}</strong>${p.paymentType === "AD_FREE" ? " (Ad-Free)" : ` (${p.validityYears || FIXED_VALIDITY_YEARS} বছর)`}</div>
+                          <div class="text-gray-500">প্রেরক নম্বর: ${escapeHtml(p.senderMobile)} • জমা: ${new Date(p.submittedAt || p.createdAt).toLocaleString("bn-BD")}</div>
                           ${p.adminNotes ? `<div class="text-red-700 font-semibold">নোট: ${escapeHtml(p.adminNotes)}</div>` : ""}
                         </div>
                         <div class="flex flex-wrap gap-2">
                           ${p.receiptUri ? `<button onclick="window.kbApp.openReceiptPreviewModal('${escapeHtml(p.id)}', 'activation')" class="px-3 py-1.5 rounded-xl bg-[#EAF7EF] text-[#105B34] text-xs font-bold border border-emerald-200">🖼️ রসিদ দেখুন</button>` : ""}
                           ${
                             p.status !== "APPROVED"
-                              ? `<button onclick="window.kbApp.adminApproveActivationPayment('${escapeHtml(p.id)}')" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">✓ অনুমোদন (২ বছর)</button>
+                              ? `<button onclick="window.kbApp.adminApproveActivationPayment('${escapeHtml(p.id)}')" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">${p.paymentType === "AD_FREE" ? "✓ Ad-Free অনুমোদন" : "✓ অনুমোদন (২ বছর)"}</button>
                                  <button onclick="window.kbApp.openRejectActivationModal('${escapeHtml(p.id)}', true)" class="px-3 py-1.5 rounded-xl bg-amber-600 text-white text-xs font-bold">↻ পুনঃজমা</button>
                                  <button onclick="window.kbApp.openRejectActivationModal('${escapeHtml(p.id)}', false)" class="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold">✕ প্রত্যাখ্যান</button>`
                               : ""
@@ -5391,6 +5790,15 @@ function renderAdminDashboardPage() {
                 <option value="PERSONAL" ${(ps.nagadAccountType || "PERSONAL") === "PERSONAL" ? "selected" : ""}>PERSONAL (পার্সোনাল)</option>
                 <option value="MERCHANT" ${ps.nagadAccountType === "MERCHANT" ? "selected" : ""}>MERCHANT (মার্চেন্ট)</option>
               </select>
+            </div>
+          </div>
+          <div class="grid sm:grid-cols-2 gap-3">
+            <div>
+              <label class="text-xs font-bold block mb-1">বিজ্ঞাপন মুক্ত করার ফি (Ad-Free Fee ৳) *</label>
+              <input name="adRemovalFee" type="number" min="1" step="1" required value="${Number(ps.adRemovalFee || DEFAULT_PAYMENT_SETTINGS.adRemovalFee || 200)}" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm font-bold text-[#105B34]" />
+            </div>
+            <div class="flex items-end pb-2 text-xs text-gray-600">
+              ব্যবহারকারীরা এই ফি পরিশোধ করলে তাদের সব বিজ্ঞাপন বন্ধ হবে।
             </div>
           </div>
           <div>
@@ -5523,12 +5931,17 @@ function renderAdminDashboardPage() {
                             <span class="font-bold text-sm text-[#105B34]">${escapeHtml(person.fullName)} (${escapeHtml(person.phone)})</span>
                             <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${isFarmer ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-sky-50 text-sky-700 border border-sky-200"}">${isFarmer ? "কৃষক" : "ক্রেতা"}</span>
                             <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${accMeta.color}">${accMeta.labelBn}</span>
+                            ${person.adsDisabled ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-800">🚫 Ad-Free</span>` : ""}
                           </div>
                           <div class="text-xs text-gray-600">${escapeHtml(person.unionName ? person.unionName + ", " : "")}${escapeHtml(person.upazila)}, ${escapeHtml(person.district)}, ${escapeHtml(person.division)} • NID: ${escapeHtml(person.nidMasked || "N/A")}</div>
                           <div class="text-[11px] text-gray-500">${person.expiryDate > 0 ? `মেয়াদ: ${formatDateBn(person.expiryDate)} (${daysUntilExpiry(person) ?? 0} দিন বাকি)` : "মেয়াদ এখনো শুরু হয়নি"}</div>
                         </div>
                       </div>
                       <div class="flex flex-wrap gap-2">
+                        <button onclick="window.kbApp.adminSetUserAdsDisabled('${escapeHtml(person.id)}', ${person.adsDisabled ? "false" : "true"})"
+                          class="px-3 py-1.5 rounded-xl ${person.adsDisabled ? "bg-purple-600 text-white" : "bg-purple-50 text-purple-900 border border-purple-200"} text-xs font-bold">
+                          ${person.adsDisabled ? "📢 বিজ্ঞাপন চালু করুন" : "🚫 বিজ্ঞাপন বন্ধ করুন"}
+                        </button>
                         ${accStatus !== "ACTIVE" ? `<button onclick="window.kbApp.adminSetAccountStatus('${escapeHtml(person.id)}', 'ACTIVE')" class="px-3 py-1.5 rounded-xl bg-[#168447] text-white text-xs font-bold">✓ সক্রিয় (২ বছর)</button>` : ""}
                         ${accStatus !== "SUSPENDED" ? `<button onclick="window.kbApp.adminSetAccountStatus('${escapeHtml(person.id)}', 'SUSPENDED')" class="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-bold">⏸ স্থগিত</button>` : ""}
                         ${person.verificationStatus !== "VERIFIED" ? `<button onclick="window.kbApp.adminVerifyUser('${escapeHtml(person.id)}', true)" class="px-3 py-1.5 rounded-xl bg-[#EAF7EF] text-[#105B34] border border-emerald-200 text-xs font-bold">✓ যাচাই</button>` : ""}
@@ -5985,6 +6398,102 @@ function renderAdminDashboardPage() {
         </div>
       </div>
     `;
+  } else if (tab === "sliders") {
+    const activeSlidersCount = state.heroSliders.filter((s) => s.isActive !== false).length;
+    bodyHtml = `
+      <div class="grid lg:grid-cols-2 gap-6">
+        <div class="bg-white rounded-3xl p-6 border border-emerald-100 shadow-sm space-y-4">
+          <h3 class="text-lg font-bold text-[#105B34]">🖼️ নতুন হিরো স্লাইডার যোগ করুন</h3>
+          <p class="text-xs text-gray-600">হোম স্ক্রিনের প্রধান ব্যানার ক্যারousel এখান থেকে যোগ, সম্পাদনা বা মুছতে পারবেন (অ্যাপ ও ওয়েবসাইটে লাইভ সিঙ্ক হয়)।</p>
+          <form onsubmit="window.kbApp.handleAdminAddSlider(event)" class="space-y-3">
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-xs font-bold block mb-1">ব্যাজ টেক্সট</label>
+                <input name="badgeBn" value="১০০% দালালমুক্ত বাজার" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              </div>
+              <div>
+                <label class="text-xs font-bold block mb-1">স্লাইড ক্রম (Sort Order)</label>
+                <input name="sortOrder" type="number" min="1" value="${state.heroSliders.length + 1}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">মূল শিরোনাম *</label>
+              <input name="titleBn" required placeholder="যেমন: সরাসরি কৃষকের কাছ থেকে" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+            </div>
+            <div>
+              <label class="text-xs font-bold block mb-1">হাইলাইট উপশিরোনাম</label>
+              <input name="subtitleBn" placeholder="যেমন: তাজা ফসল কিনুন" class="w-full px-3.5 py-2.5 rounded-xl border border-emerald-200 text-sm" />
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <input name="bullet1Bn" value="কৃষকের ন্যায্য দাম" placeholder="পয়েন্ট ১" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" />
+              <input name="bullet2Bn" value="ক্রেতার ন্যায্য দামে ক্রয়" placeholder="পয়েন্ট ২" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" />
+              <input name="bullet3Bn" value="সরাসরি যোগাযোগ" placeholder="পয়েন্ট ৩" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200 text-xs" />
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-xs font-bold block mb-1">বাটন টেক্সট</label>
+                <input name="ctaTextBn" value="এখনই অর্ডার করুন" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              </div>
+              <div>
+                <label class="text-xs font-bold block mb-1">লক্ষ্য পাতা (Route)</label>
+                <select name="targetRoute" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs bg-white">
+                  <option value="browse">ফসল খুঁজুন (browse)</option>
+                  <option value="farmers">কৃষক খুঁজুন (farmers)</option>
+                  <option value="sell">ফসল বিক্রি (sell)</option>
+                  <option value="activation">অ্যাক্টিভেশন / Ad-Free</option>
+                  <option value="register_farmer">কৃষক নিবন্ধন</option>
+                </select>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <label class="text-xs font-bold block">ব্যানার ছবি URL বা গ্যালারি থেকে আপলোড</label>
+              <input name="imageUri" id="add-slider-img-uri" placeholder="https://... অথবা নিচে ছবি আপলোড করুন" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-xs" />
+              <label class="inline-flex cursor-pointer px-3.5 py-2 rounded-xl bg-[#EAF7EF] border border-emerald-200 text-[#105B34] text-xs font-bold hover:bg-emerald-100">
+                🖼️ ব্যানার ছবি আপলোড
+                <input type="file" accept="image/*" onchange="window.kbApp.handleCompressedImageUpload(this, 'add-slider-img-uri', 'add-slider-img-preview')" class="hidden" />
+              </label>
+              <img id="add-slider-img-preview" class="hidden max-h-36 rounded-2xl border border-emerald-200 object-cover" alt="" />
+            </div>
+            <label class="flex items-center gap-2 text-xs font-bold bg-[#EAF7EF] px-3 py-2 rounded-xl border border-emerald-200">
+              <input type="checkbox" name="isActive" checked /> সক্রিয় রাখুন
+            </label>
+            <button type="submit" class="w-full py-3 rounded-xl bg-[#168447] hover:bg-[#105B34] text-white font-bold text-sm">+ হিরো স্লাইডার যোগ করুন</button>
+          </form>
+        </div>
+
+        <div class="bg-white rounded-3xl p-6 border border-emerald-100 shadow-sm space-y-3">
+          <h3 class="text-base font-bold text-[#105B34]">সব হিরো স্লাইডার (${state.heroSliders.length}টি • সক্রিয় ${activeSlidersCount}টি)</h3>
+          <div class="space-y-3 max-h-[600px] overflow-y-auto">
+            ${
+              !state.heroSliders.length
+                ? `<div class="p-8 text-center text-xs text-gray-500 border border-dashed border-emerald-200 rounded-2xl">কোনো কাস্টম স্লাইডার নেই। ডিফল্ট ফ্ল্যাগশিপ স্লাইড দেখাচ্ছে।</div>`
+                : state.heroSliders
+                    .map(
+                      (s) => `<div class="p-4 rounded-2xl border ${s.isActive !== false ? "border-emerald-200 bg-[#F7FAF7]" : "border-gray-200 bg-gray-50"} space-y-2 text-xs">
+                        <div class="flex items-start justify-between gap-2">
+                          <div class="flex items-center gap-2.5">
+                            ${s.imageUri ? `<img src="${escapeHtml(s.imageUri)}" alt="" class="w-16 h-11 rounded-xl object-cover border border-emerald-200" />` : `<div class="w-16 h-11 rounded-xl bg-[#EAF7EF] flex items-center justify-center">🖼️</div>`}
+                            <div>
+                              <div class="font-bold text-sm text-[#105B34]">#${s.sortOrder || 1} • ${escapeHtml(s.titleBn)}</div>
+                              ${s.subtitleBn ? `<div class="text-amber-700 font-semibold">${escapeHtml(s.subtitleBn)}</div>` : ""}
+                            </div>
+                          </div>
+                          <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${s.isActive !== false ? "bg-emerald-100 text-emerald-800" : "bg-gray-200 text-gray-700"}">${s.isActive !== false ? "সক্রিয়" : "বন্ধ"}</span>
+                        </div>
+                        <div class="text-[11px] text-gray-600">বাটন: ${escapeHtml(s.ctaTextBn)} → ${escapeHtml(s.targetRoute)}</div>
+                        <div class="flex flex-wrap gap-2 pt-1">
+                          <button type="button" onclick="window.kbApp.toggleHeroSliderActive('${escapeHtml(s.id)}')" class="px-3 py-1 rounded-lg border border-emerald-200 bg-white text-[#105B34] font-bold">${s.isActive !== false ? "⏸ বন্ধ করুন" : "▶ চালু করুন"}</button>
+                          <button type="button" onclick="window.kbApp.openAdminEditSliderModal('${escapeHtml(s.id)}')" class="px-3 py-1 rounded-lg bg-[#EAF7EF] text-[#105B34] font-bold border border-emerald-200">✏️ সম্পাদনা</button>
+                          <button type="button" onclick="window.kbApp.confirmDeleteHeroSlider('${escapeHtml(s.id)}')" class="px-3 py-1 rounded-lg bg-red-600 text-white font-bold">🗑️ মুছুন</button>
+                        </div>
+                      </div>`
+                    )
+                    .join("")
+            }
+          </div>
+        </div>
+      </div>
+    `;
   } else {
     bodyHtml = `<div class="space-y-2">${state.auditLogs.slice(0, 60).map((a) => `<div class="bg-white rounded-xl p-3 border border-emerald-100 text-xs flex justify-between"><div><strong>${escapeHtml(a.actionBn)}</strong> — ${escapeHtml(a.detailsBn)}</div><span class="text-gray-500">${new Date(a.createdAt).toLocaleString("bn-BD")}</span></div>`).join("") || `<div class="bg-white rounded-2xl p-8 text-center">কোনো লগ নেই।</div>`}</div>`;
   }
@@ -6270,7 +6779,8 @@ window.kbApp = {
       transactionId: fd.get("transactionId"),
       amount: fd.get("amount"),
       receiptUri: fd.get("receiptUri"),
-      isRenewal: fd.get("isRenewal") === "1"
+      isRenewal: fd.get("isRenewal") === "1",
+      isAdRemoval: fd.get("isAdRemoval") === "1"
     });
   },
   handleCompressedImageUpload(input, hiddenInputId, previewImgId, fallbackId) {
@@ -6525,6 +7035,137 @@ window.kbApp = {
   farmerConfirmPaymentReceived,
   adminApproveActivationPayment,
   adminSetAccountStatus,
+  adminSetUserAdsDisabled,
+  dispatchHeroRoute,
+  setHeroSlide(idx) {
+    state.heroSlideIdx = Math.max(0, Number(idx || 0));
+    renderCurrentView();
+  },
+  prevHeroSlide(total) {
+    const n = Math.max(1, Number(total || 1));
+    state.heroSlideIdx = (Number(state.heroSlideIdx || 0) - 1 + n) % n;
+    renderCurrentView();
+  },
+  nextHeroSlide(total) {
+    const n = Math.max(1, Number(total || 1));
+    state.heroSlideIdx = (Number(state.heroSlideIdx || 0) + 1) % n;
+    renderCurrentView();
+  },
+  setActivationMode(mode) {
+    state.activationMode = mode === "ad_free" ? "ad_free" : "account";
+    renderCurrentView();
+  },
+  async handleAdminAddSlider(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const ok = await adminSaveHeroSlider({
+      badgeBn: fd.get("badgeBn"),
+      titleBn: fd.get("titleBn"),
+      subtitleBn: fd.get("subtitleBn"),
+      bullet1Bn: fd.get("bullet1Bn"),
+      bullet2Bn: fd.get("bullet2Bn"),
+      bullet3Bn: fd.get("bullet3Bn"),
+      ctaTextBn: fd.get("ctaTextBn"),
+      targetRoute: fd.get("targetRoute"),
+      imageUri: fd.get("imageUri"),
+      sortOrder: fd.get("sortOrder"),
+      isActive: fd.get("isActive") === "on"
+    });
+    if (ok) e.target.reset();
+  },
+  async toggleHeroSliderActive(sliderId) {
+    const s = state.heroSliders.find((x) => x.id === sliderId);
+    if (!s) return;
+    await adminSaveHeroSlider({ ...s, isActive: s.isActive === false });
+  },
+  openAdminEditSliderModal(sliderId) {
+    const s = state.heroSliders.find((x) => x.id === sliderId);
+    if (!s) return;
+    openModal(`
+      <h3 class="text-lg font-bold text-[#105B34] mb-3">✏️ হিরো স্লাইডার সম্পাদনা</h3>
+      <form onsubmit="window.kbApp.handleAdminEditSliderSubmit(event, '${escapeHtml(s.id)}')" class="space-y-2.5 text-xs">
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <label class="font-bold block mb-1">ব্যাজ টেক্সট</label>
+            <input name="badgeBn" value="${escapeHtml(s.badgeBn)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200" />
+          </div>
+          <div>
+            <label class="font-bold block mb-1">ক্রম (Sort Order)</label>
+            <input name="sortOrder" type="number" min="1" value="${s.sortOrder || 1}" class="w-full px-3 py-2 rounded-xl border border-emerald-200" />
+          </div>
+        </div>
+        <div>
+          <label class="font-bold block mb-1">মূল শিরোনাম *</label>
+          <input name="titleBn" required value="${escapeHtml(s.titleBn)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200 text-sm" />
+        </div>
+        <div>
+          <label class="font-bold block mb-1">হাইলাইট উপশিরোনাম</label>
+          <input name="subtitleBn" value="${escapeHtml(s.subtitleBn)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200" />
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <input name="bullet1Bn" value="${escapeHtml(s.bullet1Bn)}" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200" />
+          <input name="bullet2Bn" value="${escapeHtml(s.bullet2Bn)}" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200" />
+          <input name="bullet3Bn" value="${escapeHtml(s.bullet3Bn)}" class="w-full px-2.5 py-2 rounded-xl border border-emerald-200" />
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <input name="ctaTextBn" value="${escapeHtml(s.ctaTextBn)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200" />
+          <select name="targetRoute" class="w-full px-3 py-2 rounded-xl border border-emerald-200 bg-white">
+            <option value="browse" ${s.targetRoute === "browse" ? "selected" : ""}>ফসল খুঁজুন</option>
+            <option value="farmers" ${s.targetRoute === "farmers" ? "selected" : ""}>কৃষক খুঁজুন</option>
+            <option value="sell" ${s.targetRoute === "sell" ? "selected" : ""}>ফসল বিক্রি</option>
+            <option value="activation" ${s.targetRoute === "activation" ? "selected" : ""}>অ্যাক্টিভেশন / Ad-Free</option>
+            <option value="register_farmer" ${s.targetRoute === "register_farmer" ? "selected" : ""}>কৃষক নিবন্ধন</option>
+          </select>
+        </div>
+        <div>
+          <label class="font-bold block mb-1">ছবি URL</label>
+          <input name="imageUri" id="edit-slider-img-uri" value="${escapeHtml(s.imageUri)}" class="w-full px-3 py-2 rounded-xl border border-emerald-200" />
+        </div>
+        <label class="flex items-center gap-2 font-bold">
+          <input type="checkbox" name="isActive" ${s.isActive !== false ? "checked" : ""} /> সক্রিয় রাখুন
+        </label>
+        <div class="flex gap-2 justify-end pt-1">
+          <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border font-bold">বাতিল</button>
+          <button type="submit" class="px-4 py-2 rounded-xl bg-[#168447] text-white font-bold">সংরক্ষণ</button>
+        </div>
+      </form>
+    `);
+  },
+  async handleAdminEditSliderSubmit(e, sliderId) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const ok = await adminSaveHeroSlider({
+      id: sliderId,
+      badgeBn: fd.get("badgeBn"),
+      titleBn: fd.get("titleBn"),
+      subtitleBn: fd.get("subtitleBn"),
+      bullet1Bn: fd.get("bullet1Bn"),
+      bullet2Bn: fd.get("bullet2Bn"),
+      bullet3Bn: fd.get("bullet3Bn"),
+      ctaTextBn: fd.get("ctaTextBn"),
+      targetRoute: fd.get("targetRoute"),
+      imageUri: fd.get("imageUri"),
+      sortOrder: fd.get("sortOrder"),
+      isActive: fd.get("isActive") === "on"
+    });
+    if (ok) closeModal();
+  },
+  confirmDeleteHeroSlider(sliderId) {
+    const s = state.heroSliders.find((x) => x.id === sliderId);
+    if (!s) return;
+    openModal(`
+      <h3 class="text-lg font-bold text-red-700 mb-2">🗑️ হিরো স্লাইডার মুছবেন?</h3>
+      <p class="text-sm text-gray-700 mb-4">"${escapeHtml(s.titleBn)}" স্থায়ীভাবে মুছে ফেলা হবে।</p>
+      <div class="flex gap-2 justify-end">
+        <button type="button" onclick="window.kbApp.closeModal()" class="px-4 py-2 rounded-xl border text-xs font-bold">বাতিল</button>
+        <button type="button" onclick="window.kbApp.deleteHeroSliderConfirmed('${escapeHtml(sliderId)}')" class="px-4 py-2 rounded-xl bg-red-600 text-white text-xs font-bold">হ্যাঁ, মুছুন</button>
+      </div>
+    `);
+  },
+  async deleteHeroSliderConfirmed(sliderId) {
+    closeModal();
+    await adminDeleteHeroSlider(sliderId);
+  },
   openRejectOrderPaymentModal(paymentId) {
     openModal(`
       <h3 class="text-lg font-bold text-[#105B34] mb-3">✕ অগ্রিম পেমেন্ট প্রত্যাখ্যান করুন</h3>
@@ -6869,6 +7510,7 @@ window.kbApp = {
       bKashAccountType: String(fd.get("bKashAccountType") || "PERSONAL"),
       nagadNumber: String(fd.get("nagadNumber") || "").trim(),
       nagadAccountType: String(fd.get("nagadAccountType") || "PERSONAL"),
+      adRemovalFee: Number(fd.get("adRemovalFee") || 200),
       paymentInstructions: String(fd.get("paymentInstructions") || "").trim(),
       notify30Days: fd.get("notify30Days") === "on",
       notify7Days: fd.get("notify7Days") === "on",

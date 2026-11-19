@@ -24,9 +24,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ActivationPaymentEntity::class,
         PaymentSettingsEntity::class,
         FarmerPaymentSettingsEntity::class,
-        OrderPaymentEntity::class
+        OrderPaymentEntity::class,
+        HeroSliderEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class KrishiBondhuDatabase : RoomDatabase() {
@@ -42,6 +43,7 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
     abstract fun paymentSettingsDao(): PaymentSettingsDao
     abstract fun farmerPaymentSettingsDao(): FarmerPaymentSettingsDao
     abstract fun orderPaymentDao(): OrderPaymentDao
+    abstract fun heroSliderDao(): HeroSliderDao
 
     companion object {
         @Volatile
@@ -183,6 +185,32 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE users ADD COLUMN adsDisabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE payment_settings ADD COLUMN adRemovalFee REAL NOT NULL DEFAULT 200.0")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS hero_sliders (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        badgeBn TEXT NOT NULL,
+                        titleBn TEXT NOT NULL,
+                        subtitleBn TEXT NOT NULL,
+                        bullet1Bn TEXT NOT NULL,
+                        bullet2Bn TEXT NOT NULL,
+                        bullet3Bn TEXT NOT NULL,
+                        ctaTextBn TEXT NOT NULL,
+                        targetRoute TEXT NOT NULL,
+                        imageUri TEXT NOT NULL,
+                        sortOrder INTEGER NOT NULL,
+                        isActive INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): KrishiBondhuDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -190,7 +218,7 @@ abstract class KrishiBondhuDatabase : RoomDatabase() {
                     KrishiBondhuDatabase::class.java,
                     "krishi_bondhu_local_dev.db"
                 )
-                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

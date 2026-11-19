@@ -61,6 +61,10 @@
     "paymentSettings": {
       ".read": true,
       ".write": true
+    },
+    "heroSliders": {
+      ".read": true,
+      ".write": true
     }
   }
 }

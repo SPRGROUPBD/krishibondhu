@@ -5,6 +5,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -12,8 +15,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -37,6 +42,7 @@ import coil.compose.AsyncImage
 import com.example.ads.*
 import com.example.data.local.ActivationPaymentEntity
 import com.example.data.local.CategoryEntity
+import com.example.data.local.HeroSliderEntity
 import com.example.data.local.PaymentSettingsEntity
 import com.example.data.local.ProductEntity
 import com.example.data.model.*
@@ -48,6 +54,7 @@ import com.example.ui.components.formatDateBn
 import com.example.ui.theme.*
 import com.example.ui.viewmodel.MarketplaceUiState
 import com.example.util.MediaCaptureHelper
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -71,6 +78,9 @@ fun AdminDashboardScreen(
     onSaveAdConfig: (AdConfig) -> Unit = {},
     onSaveDailyTip: (DailyTip) -> Unit = {},
     onDeleteDailyTip: (String) -> Unit = {},
+    onSetUserAdsDisabled: (userId: String, adsDisabled: Boolean, reason: String) -> Unit = { _, _, _ -> },
+    onSaveHeroSlider: (HeroSliderEntity) -> Unit = {},
+    onDeleteHeroSlider: (String) -> Unit = {},
     onBuildCsvReport: () -> String
 ) {
     val context = LocalContext.current
@@ -88,7 +98,8 @@ fun AdminDashboardScreen(
         "এলাকা",
         "অডিট লগ",
         "বিজ্ঞাপন ও সব নেটওয়ার্ক",
-        "ডেইলি টিপস (${uiState.dailyTips.size})"
+        "ডেইলি টিপস (${uiState.dailyTips.size})",
+        "হিরো স্লাইডার (${uiState.heroSliders.size})"
     )
 
     Scaffold(
@@ -167,7 +178,8 @@ fun AdminDashboardScreen(
                 2 -> AdminVerificationTab(
                     uiState = uiState,
                     onVerifyUser = onVerifyUser,
-                    onSetAccountStatus = onSetAccountStatus
+                    onSetAccountStatus = onSetAccountStatus,
+                    onSetUserAdsDisabled = onSetUserAdsDisabled
                 )
                 3 -> AdminProductsTab(
                     uiState = uiState,
@@ -194,6 +206,11 @@ fun AdminDashboardScreen(
                     adConfig = uiState.adConfig,
                     onSaveDailyTip = onSaveDailyTip,
                     onDeleteDailyTip = onDeleteDailyTip
+                )
+                12 -> AdminHeroSlidersTab(
+                    heroSliders = uiState.heroSliders,
+                    onSaveHeroSlider = onSaveHeroSlider,
+                    onDeleteHeroSlider = onDeleteHeroSlider
                 )
             }
         }
@@ -442,13 +459,28 @@ private fun AdminActivationPaymentsTab(
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
-                            Text("${pay.userPhone} • ${pay.paymentType}", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                text = if (pay.paymentType == "AD_FREE") "${pay.userPhone} • বিজ্ঞাপন বন্ধ (Ad-Free)" else "${pay.userPhone} • ${pay.paymentType}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
                         }
                         Surface(color = bg, shape = RoundedCornerShape(8.dp)) {
                             Text(
                                 text = payStatus.display(uiState.language),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = fg,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+
+                    if (pay.paymentType == "AD_FREE") {
+                        Surface(color = InfoBlueLight, shape = RoundedCornerShape(6.dp)) {
+                            Text(
+                                text = "🚫 বিজ্ঞাপন বন্ধ (Ad-Free) পেমেন্ট আবেদন",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = InfoBlue,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                             )
@@ -493,7 +525,9 @@ private fun AdminActivationPaymentsTab(
                             Button(
                                 onClick = { actionTarget = pay to "APPROVE" },
                                 modifier = Modifier.weight(1f).testTag("admin_approve_pay_${pay.id}")
-                            ) { Text("✓ অনুমোদন (২ বছর)") }
+                            ) {
+                                Text(if (pay.paymentType == "AD_FREE") "✓ অনুমোদন (Ad-Free)" else "✓ অনুমোদন (২ বছর)")
+                            }
                             OutlinedButton(
                                 onClick = { actionTarget = pay to "RESUBMIT" },
                                 modifier = Modifier.weight(1f)
@@ -539,7 +573,11 @@ private fun AdminActivationPaymentsTab(
             title = {
                 Text(
                     when (action) {
-                        "APPROVE" -> "পেমেন্ট অনুমোদন ও ২ বছর সক্রিয় (${pay.userName})"
+                        "APPROVE" -> if (pay.paymentType == "AD_FREE") {
+                            "সব বিজ্ঞাপন বন্ধ (Ad-Free) অনুমোদন (${pay.userName})"
+                        } else {
+                            "পেমেন্ট অনুমোদন ও ২ বছর সক্রিয় (${pay.userName})"
+                        }
                         "RESUBMIT" -> "পুনরায় পেমেন্ট জমার অনুরোধ"
                         else -> "পেমেন্ট প্রত্যাখ্যান"
                     }
@@ -582,7 +620,8 @@ private fun AdminActivationPaymentsTab(
 private fun AdminVerificationTab(
     uiState: MarketplaceUiState,
     onVerifyUser: (String, Boolean) -> Unit,
-    onSetAccountStatus: (String, AccountStatus, String) -> Unit
+    onSetAccountStatus: (String, AccountStatus, String) -> Unit,
+    onSetUserAdsDisabled: (String, Boolean, String) -> Unit
 ) {
     var filterMode by remember { mutableStateOf("ALL") } // ALL, FARMER, BUYER, ACTIVE, EXPIRED, SUSPENDED
     val pendingFarmers = uiState.farmers.count { it.verificationStatus == "PENDING" }
@@ -729,6 +768,40 @@ private fun AdminVerificationTab(
                     }
                     if (person.nidMasked.isNotBlank()) {
                         Text("মাস্কড এনআইডি: ${person.nidMasked}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Surface(
+                        color = if (person.adsDisabled) LightGreen else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(1.dp, if (person.adsDisabled) PrimaryGreen.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (person.adsDisabled) "🚫 বিজ্ঞাপন: বন্ধ (Ad-Free সক্রিয়)" else "📢 বিজ্ঞাপন: চালু (Ads Active)",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (person.adsDisabled) DarkGreen else TextCharcoal
+                                )
+                                Text(
+                                    text = if (person.adsDisabled) "এই ব্যবহারকারীর অ্যাপ ও ওয়েবসাইটে সব বিজ্ঞাপন বন্ধ আছে" else "সুইচ অফ করলে এই ব্যবহারকারীর সব বিজ্ঞাপন বন্ধ হবে",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = !person.adsDisabled,
+                                onCheckedChange = { adsOn ->
+                                    onSetUserAdsDisabled(person.id, !adsOn, "")
+                                },
+                                modifier = Modifier.testTag("admin_user_ads_toggle_${person.id}")
+                            )
+                        }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (person.verificationStatus != "VERIFIED") {
@@ -956,6 +1029,7 @@ private fun AdminPaymentSettingsTab(
     var farmerFee by remember(settings) { mutableStateOf(settings.farmerFee.toInt().toString()) }
     var buyerFee by remember(settings) { mutableStateOf(settings.buyerFee.toInt().toString()) }
     var renewalFee by remember(settings) { mutableStateOf(settings.renewalFee.toInt().toString()) }
+    var adRemovalFee by remember(settings) { mutableStateOf((settings.adRemovalFee.takeIf { it > 0 } ?: 200.0).toInt().toString()) }
     var validityYears by remember(settings) { mutableStateOf(settings.validityYears.toString()) }
     var instructions by remember(settings) { mutableStateOf(settings.paymentInstructions) }
     var notify30Days by remember(settings) { mutableStateOf(settings.notify30Days) }
@@ -1051,6 +1125,15 @@ private fun AdminPaymentSettingsTab(
                     }
 
                     OutlinedTextField(
+                        value = adRemovalFee,
+                        onValueChange = { adRemovalFee = it },
+                        label = { Text("বিজ্ঞাপন বন্ধ (Ad-Free) ফি (৳)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("admin_ad_removal_fee_input")
+                    )
+
+                    OutlinedTextField(
                         value = instructions,
                         onValueChange = { instructions = it },
                         label = { Text("ব্যবহারকারীদের জন্য পেমেন্ট নির্দেশনা") },
@@ -1084,6 +1167,7 @@ private fun AdminPaymentSettingsTab(
                                     farmerFee = farmerFee.toDoubleOrNull() ?: 300.0,
                                     buyerFee = buyerFee.toDoubleOrNull() ?: 300.0,
                                     renewalFee = renewalFee.toDoubleOrNull() ?: 300.0,
+                                    adRemovalFee = adRemovalFee.toDoubleOrNull() ?: 200.0,
                                     validityYears = validityYears.toIntOrNull() ?: 2,
                                     paymentInstructions = instructions.trim(),
                                     notify30Days = notify30Days,
@@ -2808,6 +2892,417 @@ private fun AdminDailyTipsTab(
             },
             dismissButton = {
                 TextButton(onClick = { deletingTip = null }) { Text("বাতিল") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun AdminHeroSlidersTab(
+    heroSliders: List<HeroSliderEntity>,
+    onSaveHeroSlider: (HeroSliderEntity) -> Unit,
+    onDeleteHeroSlider: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val sortedSliders = remember(heroSliders) {
+        heroSliders.sortedWith(compareBy<HeroSliderEntity> { it.sortOrder }.thenByDescending { it.updatedAt })
+    }
+    var showFormDialog by remember { mutableStateOf(false) }
+    var editingSlider by remember { mutableStateOf<HeroSliderEntity?>(null) }
+    var deletingSlider by remember { mutableStateOf<HeroSliderEntity?>(null) }
+
+    val routeLabels = remember {
+        listOf(
+            "browse" to "ফসলের বাজার (Browse)",
+            "farmers" to "কৃষক তালিকা",
+            "sell" to "ফসল বিক্রি করুন",
+            "activation" to "অ্যাক্টিভেশন ও Ad-Free",
+            "register_farmer" to "কৃষক নিবন্ধন"
+        )
+    }
+
+    LazyColumn(
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = LightGreen),
+                border = BorderStroke(1.dp, PrimaryGreen.copy(alpha = 0.45f))
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "হোম স্ক্রিন হিরো স্লাইডার ব্যবস্থাপনা",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkGreen
+                    )
+                    Text(
+                        text = "মোট স্লাইড: ${heroSliders.size}টি (সক্রিয়: ${heroSliders.count { it.isActive }}টি)। এখান থেকে অ্যাড, এডিট ও ডিলিট করলে তাৎক্ষণিক অ্যাপ ও ওয়েবসাইটের হোম ব্যানারে প্রদর্শিত হবে।",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DarkGreen
+                    )
+                    Button(
+                        onClick = {
+                            editingSlider = null
+                            showFormDialog = true
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("admin_add_hero_slider_button")
+                    ) {
+                        Icon(Icons.Filled.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("নতুন হিরো স্লাইডার যোগ করুন", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        if (sortedSliders.isEmpty()) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("🖼️", style = MaterialTheme.typography.displaySmall)
+                        Text("এখনো কোনো কাস্টম স্লাইডার যোগ করা হয়নি", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "ডিফল্ট কৃষি বন্ধু ব্যানারের পাশাপাশি নতুন অফার বা প্রচারণামূলক স্লাইড যুক্ত করতে উপরের বাটনে ট্যাপ করুন।",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        } else {
+            items(sortedSliders, key = { it.id }) { slide ->
+                val imgModel = MediaCaptureHelper.imageModelFromUri(slide.imageUri)
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(
+                        1.dp,
+                        if (slide.isActive) PrimaryGreen.copy(alpha = 0.45f) else MaterialTheme.colorScheme.outline
+                    ),
+                    modifier = Modifier.testTag("admin_slider_card_${slide.id}")
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (imgModel != null) {
+                            AsyncImage(
+                                model = imgModel,
+                                contentDescription = slide.titleBn,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(120.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                if (slide.badgeBn.isNotBlank()) {
+                                    Text(
+                                        text = "#${slide.sortOrder} • ${slide.badgeBn}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = PrimaryGreen,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Text(slide.titleBn, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = DarkGreen)
+                            }
+                            Surface(
+                                color = if (slide.isActive) LightGreen else Color(0xFFF3F4F6),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = if (slide.isActive) "সক্রিয়" else "বন্ধ",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (slide.isActive) DarkGreen else Color(0xFF4B5563),
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+                        if (slide.subtitleBn.isNotBlank()) {
+                            Text(slide.subtitleBn, style = MaterialTheme.typography.bodySmall)
+                        }
+                        val bullets = listOf(slide.bullet1Bn, slide.bullet2Bn, slide.bullet3Bn).filter { it.isNotBlank() }
+                        if (bullets.isNotEmpty()) {
+                            Text(
+                                text = bullets.joinToString(" • "),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = "CTA: ${slide.ctaTextBn} → ${routeLabels.firstOrNull { it.first == slide.targetRoute }?.second ?: slide.targetRoute}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = PrimaryGreen,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Switch(
+                                    checked = slide.isActive,
+                                    onCheckedChange = { checked ->
+                                        onSaveHeroSlider(slide.copy(isActive = checked))
+                                    },
+                                    modifier = Modifier.testTag("admin_toggle_slider_${slide.id}")
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(if (slide.isActive) "চালু" else "বন্ধ", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = {
+                                        editingSlider = slide
+                                        showFormDialog = true
+                                    },
+                                    modifier = Modifier.testTag("admin_edit_slider_${slide.id}")
+                                ) {
+                                    Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("সম্পাদনা")
+                                }
+                                TextButton(
+                                    onClick = { deletingSlider = slide },
+                                    colors = ButtonDefaults.textButtonColors(contentColor = AlertRed),
+                                    modifier = Modifier.testTag("admin_delete_slider_${slide.id}")
+                                ) {
+                                    Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("মুছুন")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showFormDialog) {
+        val current = editingSlider
+        var badgeBn by remember(current) { mutableStateOf(current?.badgeBn ?: "১০০% দালালমুক্ত বাজার") }
+        var titleBn by remember(current) { mutableStateOf(current?.titleBn.orEmpty()) }
+        var subtitleBn by remember(current) { mutableStateOf(current?.subtitleBn.orEmpty()) }
+        var bullet1Bn by remember(current) { mutableStateOf(current?.bullet1Bn ?: "কৃষকের ন্যায্য দাম") }
+        var bullet2Bn by remember(current) { mutableStateOf(current?.bullet2Bn ?: "ক্রেতার ন্যায্য দামে ক্রয়") }
+        var bullet3Bn by remember(current) { mutableStateOf(current?.bullet3Bn ?: "সরাসরি যোগাযোগ") }
+        var ctaTextBn by remember(current) { mutableStateOf(current?.ctaTextBn ?: "এখনই অর্ডার করুন") }
+        var targetRoute by remember(current) { mutableStateOf(current?.targetRoute?.ifBlank { "browse" } ?: "browse") }
+        var sortOrderText by remember(current) { mutableStateOf((current?.sortOrder ?: (heroSliders.size + 1)).toString()) }
+        var imageUri by remember(current) { mutableStateOf(current?.imageUri.orEmpty()) }
+        var isActive by remember(current) { mutableStateOf(current?.isActive ?: true) }
+        var processingImage by remember { mutableStateOf(false) }
+        var formError by remember { mutableStateOf<String?>(null) }
+
+        val sliderPhotoPicker = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.PickVisualMedia()
+        ) { uri ->
+            if (uri != null) {
+                processingImage = true
+                scope.launch {
+                    val encoded = MediaCaptureHelper.encodeUriToCompactDataUrl(context, uri)
+                    imageUri = encoded ?: uri.toString()
+                    processingImage = false
+                }
+            }
+        }
+
+        AlertDialog(
+            onDismissRequest = { showFormDialog = false },
+            title = { Text(if (current == null) "নতুন হিরো স্লাইডার যোগ করুন" else "হিরো স্লাইডার সম্পাদনা") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(
+                            onClick = {
+                                sliderPhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ব্যানার ছবি আপলোড")
+                        }
+                        if (imageUri.isNotBlank()) {
+                            TextButton(onClick = { imageUri = "" }) { Text("ছবি মুছুন") }
+                        }
+                    }
+                    if (processingImage) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    val previewModel = MediaCaptureHelper.imageModelFromUri(imageUri)
+                    if (previewModel != null) {
+                        AsyncImage(
+                            model = previewModel,
+                            contentDescription = "ব্যানার প্রিভিউ",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxWidth().height(100.dp).clip(RoundedCornerShape(10.dp))
+                        )
+                    }
+                    OutlinedTextField(
+                        value = imageUri.takeIf { !it.startsWith("data:") }.orEmpty(),
+                        onValueChange = { imageUri = it },
+                        label = { Text("অথবা ছবির HTTPS URL (ঐচ্ছিক)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = badgeBn,
+                            onValueChange = { badgeBn = it },
+                            label = { Text("ব্যাজ টেক্সট") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1.6f).testTag("hero_slider_badge_input")
+                        )
+                        OutlinedTextField(
+                            value = sortOrderText,
+                            onValueChange = { sortOrderText = it },
+                            label = { Text("ক্রম") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(0.7f)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = titleBn,
+                        onValueChange = {
+                            titleBn = it
+                            formError = null
+                        },
+                        label = { Text("মূল শিরোনাম *") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("hero_slider_title_input")
+                    )
+                    OutlinedTextField(
+                        value = subtitleBn,
+                        onValueChange = { subtitleBn = it },
+                        label = { Text("উপ-শিরোনাম (যেমন: তাজা ফসল কিনুন)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("hero_slider_subtitle_input")
+                    )
+                    OutlinedTextField(
+                        value = bullet1Bn,
+                        onValueChange = { bullet1Bn = it },
+                        label = { Text("পয়েন্ট ১") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = bullet2Bn,
+                        onValueChange = { bullet2Bn = it },
+                        label = { Text("পয়েন্ট ২") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = bullet3Bn,
+                        onValueChange = { bullet3Bn = it },
+                        label = { Text("পয়েন্ট ৩") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = ctaTextBn,
+                        onValueChange = { ctaTextBn = it },
+                        label = { Text("বাটন টেক্সট (CTA)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("hero_slider_cta_input")
+                    )
+                    Text("বাটনে ট্যাপ করলে কোন পেজে যাবে:", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(routeLabels) { (key, label) ->
+                            FilterChip(
+                                selected = targetRoute == key,
+                                onClick = { targetRoute = key },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("হোম স্ক্রিনে সক্রিয় রাখুন", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        Switch(checked = isActive, onCheckedChange = { isActive = it })
+                    }
+                    if (!formError.isNullOrBlank()) {
+                        Text(formError!!, color = AlertRed, style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleanTitle = titleBn.trim()
+                        if (cleanTitle.isEmpty()) {
+                            formError = "স্লাইডারের মূল শিরোনাম আবশ্যক"
+                            return@Button
+                        }
+                        val nextSlider = (current ?: HeroSliderEntity(id = "", titleBn = cleanTitle)).copy(
+                            badgeBn = badgeBn.trim(),
+                            titleBn = cleanTitle,
+                            subtitleBn = subtitleBn.trim(),
+                            bullet1Bn = bullet1Bn.trim(),
+                            bullet2Bn = bullet2Bn.trim(),
+                            bullet3Bn = bullet3Bn.trim(),
+                            ctaTextBn = ctaTextBn.trim().ifBlank { "এখনই অর্ডার করুন" },
+                            targetRoute = targetRoute,
+                            imageUri = imageUri.trim(),
+                            sortOrder = sortOrderText.toIntOrNull()?.coerceAtLeast(1) ?: 1,
+                            isActive = isActive
+                        )
+                        onSaveHeroSlider(nextSlider)
+                        showFormDialog = false
+                        editingSlider = null
+                    },
+                    enabled = !processingImage,
+                    modifier = Modifier.testTag("hero_slider_save_button")
+                ) {
+                    Text("সংরক্ষণ করুন")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFormDialog = false }) { Text("বাতিল") }
+            }
+        )
+    }
+
+    deletingSlider?.let { slide ->
+        AlertDialog(
+            onDismissRequest = { deletingSlider = null },
+            title = { Text("হিরো স্লাইডার মুছে ফেলবেন?") },
+            text = { Text("'${slide.titleBn}' স্থায়ীভাবে মুছে ফেলা হবে (অ্যাপ ও ওয়েবসাইট থেকে)।") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteHeroSlider(slide.id)
+                        deletingSlider = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AlertRed),
+                    modifier = Modifier.testTag("admin_confirm_delete_slider")
+                ) { Text("মুছে ফেলুন") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletingSlider = null }) { Text("বাতিল") }
             }
         )
     }

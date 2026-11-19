@@ -57,6 +57,7 @@ fun ProfileScreen(
     onOpenRegister: () -> Unit,
     onLogout: () -> Unit,
     onOpenActivation: () -> Unit = {},
+    onOpenAdRemovalPayment: () -> Unit = {},
     onUpdateProfile: (
         fullName: String,
         division: String,
@@ -341,6 +342,83 @@ fun ProfileScreen(
                                 },
                                 fontWeight = FontWeight.Bold
                             )
+                        }
+                    }
+                }
+            }
+
+            item {
+                val adFee = uiState.paymentSettings.adRemovalFee.takeIf { it > 0 }?.toInt() ?: 200
+                val adFreePending = uiState.activationPayments.any {
+                    it.userId == user.id && it.paymentType == "AD_FREE" && it.status == "PENDING"
+                }
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (user.adsDisabled) LightGreen else MaterialTheme.colorScheme.surface
+                    ),
+                    border = BorderStroke(1.dp, if (user.adsDisabled) PrimaryGreen else MaterialTheme.colorScheme.outline),
+                    modifier = Modifier.testTag("profile_ad_free_card")
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "বিজ্ঞাপন মুক্ত অভিজ্ঞতা (Ad-Free)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = DarkGreen
+                            )
+                            Surface(
+                                color = if (user.adsDisabled) PrimaryGreen else if (adFreePending) InfoBlueLight else HarvestGoldLight,
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Text(
+                                    text = when {
+                                        user.adsDisabled -> "✓ Ad-Free সক্রিয়"
+                                        adFreePending -> "যাচাইাধীন"
+                                        else -> "৳ $adFee"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = when {
+                                        user.adsDisabled -> Color.White
+                                        adFreePending -> InfoBlue
+                                        else -> DarkGreen
+                                    },
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+                        if (user.adsDisabled) {
+                            Text(
+                                text = "✓ আপনার সব বিজ্ঞাপন বন্ধ রয়েছে (Ad-Free সক্রিয়)। অ্যাপ ও ওয়েবসাইটে কোনো বিজ্ঞাপন প্রদর্শিত হবে না।",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = DarkGreen
+                            )
+                        } else if (adFreePending) {
+                            Text(
+                                text = "আপনার Ad-Free পেমেন্ট আবেদন অ্যাডমিন যাচাই করছেন। অনুমোদিত হলেই সব বিজ্ঞাপন বন্ধ হবে।",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = InfoBlue
+                            )
+                        } else {
+                            Text(
+                                text = "এককালীন মাত্র ৳ $adFee পেমেন্ট করে অ্যাপ ও ওয়েবসাইট থেকে সব বিজ্ঞাপন চিরতরে বন্ধ করুন।",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedButton(
+                                onClick = onOpenAdRemovalPayment,
+                                modifier = Modifier.fillMaxWidth().testTag("profile_remove_ads_button")
+                            ) {
+                                Icon(Icons.Filled.VisibilityOff, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("সব বিজ্ঞাপন বন্ধ করুন (৳ $adFee)", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }

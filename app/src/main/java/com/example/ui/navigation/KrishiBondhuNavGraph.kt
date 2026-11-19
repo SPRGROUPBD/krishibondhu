@@ -40,6 +40,7 @@ object Routes {
     const val ORDERS = "orders"
     const val PROFILE = "profile"
     const val ACTIVATION = "activation"
+    const val ACTIVATION_PATTERN = "activation?mode={mode}"
     const val PRODUCT_DETAIL = "product/{productId}"
     const val FARMER_PROFILE = "farmer/{farmerId}"
     const val CART = "cart"
@@ -51,6 +52,7 @@ object Routes {
     const val INFO = "info/{topic}"
 
     fun browse(farmersOnly: Boolean = false) = "browse?farmers=$farmersOnly"
+    fun activation(mode: String = "account") = "activation?mode=$mode"
     fun productDetail(id: String) = "product/$id"
     fun farmerProfile(id: String) = "farmer/$id"
     fun orderDetail(id: String) = "order/$id"
@@ -319,6 +321,8 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onOrderClick = { oid -> navController.navigate(Routes.orderDetail(oid)) },
                             onOpenCart = { navController.navigate(Routes.CART) },
                             onOpenAdminDashboard = { navController.navigate(Routes.ADMIN) },
+                            onOpenRegisterFarmer = { navController.navigate(Routes.register(UserRole.FARMER)) },
+                            onOpenActivation = { navController.navigate(Routes.ACTIVATION) },
                             onRefreshSync = viewModel::syncNow
                         )
                     }
@@ -424,6 +428,7 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                             onOpenRegister = { navController.navigate(Routes.register(UserRole.BUYER)) },
                             onLogout = viewModel::logout,
                             onOpenActivation = { navController.navigate(Routes.ACTIVATION) },
+                            onOpenAdRemovalPayment = { navController.navigate(Routes.activation("ad_free")) },
                             onUpdateProfile = { name, div, dist, upz, union, village, bio, nid4, photoUri ->
                                 viewModel.updateProfile(name, div, dist, upz, union, village, bio, nid4, photoUri) {}
                             },
@@ -436,12 +441,20 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                         )
                     }
 
-                    composable(Routes.ACTIVATION) {
+                    composable(
+                        route = Routes.ACTIVATION_PATTERN,
+                        arguments = listOf(navArgument("mode") {
+                            type = NavType.StringType
+                            defaultValue = "account"
+                        })
+                    ) { backStack ->
+                        val mode = backStack.arguments?.getString("mode") ?: "account"
                         ActivationScreen(
                             uiState = uiState,
+                            initialMode = mode,
                             onBack = { navController.popBackStack() },
-                            onSubmitPayment = { method, sender, txId, amount, receiptUri, isRenewal ->
-                                viewModel.submitActivationPayment(method, sender, txId, amount, receiptUri, isRenewal)
+                            onSubmitPayment = { method, sender, txId, amount, receiptUri, isRenewal, isAdRemoval ->
+                                viewModel.submitActivationPayment(method, sender, txId, amount, receiptUri, isRenewal, isAdRemoval)
                             },
                             onRequireLogin = { navController.navigate(Routes.LOGIN) },
                             onCopyToast = viewModel::showToast
@@ -577,6 +590,9 @@ fun KrishiBondhuApp(viewModel: KrishiBondhuViewModel) {
                                 onSaveAdConfig = viewModel::adminSaveAdConfig,
                                 onSaveDailyTip = viewModel::adminSaveDailyTip,
                                 onDeleteDailyTip = viewModel::adminDeleteDailyTip,
+                                onSetUserAdsDisabled = viewModel::adminSetUserAdsDisabled,
+                                onSaveHeroSlider = viewModel::adminSaveHeroSlider,
+                                onDeleteHeroSlider = viewModel::adminDeleteHeroSlider,
                                 onBuildCsvReport = viewModel::buildCsvReport
                             )
                         } else {

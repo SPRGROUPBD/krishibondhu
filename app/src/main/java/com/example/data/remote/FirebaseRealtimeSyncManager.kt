@@ -433,6 +433,28 @@ class FirebaseRealtimeSyncManager(
                 Log.w(TAG, "orderPayments listener cancelled: ${error.message}")
             }
         })
+
+        // 12. Admin-Managed Hero Sliders listener
+        root.child("heroSliders").addValueEventListener(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val list = snapshot.children.mapNotNull { snapToHeroSlider(it) }
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        if (!snapshot.exists() || list.isEmpty()) {
+                            localDb.heroSliderDao().clearAllSliders()
+                        } else {
+                            localDb.heroSliderDao().insertAll(list)
+                            val ids = list.map { it.id }
+                            if (ids.size <= 900) localDb.heroSliderDao().deleteSlidersNotIn(ids)
+                        }
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                Log.w(TAG, "heroSliders listener cancelled: ${error.message}")
+            }
+        })
     }
 
     private fun itOrSelf(snap: DataSnapshot): DataSnapshot = snap
@@ -558,6 +580,7 @@ class FirebaseRealtimeSyncManager(
                     psRes = RestGetOutcome(true, rootObj.optJSONObject("paymentSettings")?.toString() ?: "null"),
                     fpsRes = RestGetOutcome(true, rootObj.optJSONObject("farmerPaymentSettings")?.toString() ?: "null"),
                     opRes = RestGetOutcome(true, rootObj.optJSONObject("orderPayments")?.toString() ?: "null"),
+                    slidersRes = RestGetOutcome(true, rootObj.optJSONObject("heroSliders")?.toString() ?: "null"),
                     onAdConfigChanged = onAdConfigChanged,
                     onDailyTipsChanged = onDailyTipsChanged,
                     onIncomingNotification = onIncomingNotification
@@ -584,6 +607,7 @@ class FirebaseRealtimeSyncManager(
             val psD = async(Dispatchers.IO) { restGetJsonWithStatus("paymentSettings.json") }
             val fpsD = async(Dispatchers.IO) { restGetJsonWithStatus("farmerPaymentSettings.json") }
             val opD = async(Dispatchers.IO) { restGetJsonWithStatus("orderPayments.json") }
+            val slidersD = async(Dispatchers.IO) { restGetJsonWithStatus("heroSliders.json") }
 
             val catsRes = catsD.await()
             val locsRes = locsD.await()
@@ -601,6 +625,7 @@ class FirebaseRealtimeSyncManager(
             val psRes = psD.await()
             val fpsRes = fpsD.await()
             val opRes = opD.await()
+            val slidersRes = slidersD.await()
 
             reconcileAllNodesFromJson(
                 localDb = localDb,
@@ -620,6 +645,7 @@ class FirebaseRealtimeSyncManager(
                 psRes = psRes,
                 fpsRes = fpsRes,
                 opRes = opRes,
+                slidersRes = slidersRes,
                 onAdConfigChanged = onAdConfigChanged,
                 onDailyTipsChanged = onDailyTipsChanged,
                 onIncomingNotification = onIncomingNotification
@@ -653,6 +679,7 @@ class FirebaseRealtimeSyncManager(
         psRes: RestGetOutcome,
         fpsRes: RestGetOutcome,
         opRes: RestGetOutcome,
+        slidersRes: RestGetOutcome,
         onAdConfigChanged: (AdConfig) -> Unit,
         onDailyTipsChanged: (List<DailyTip>?) -> Unit,
         onIncomingNotification: (NotificationEntity) -> Unit
@@ -893,6 +920,19 @@ class FirebaseRealtimeSyncManager(
                 }
             }
         }
+
+        // 13. Hero Sliders
+        parseJsonObjectOrNull(slidersRes)?.let { slidersObj ->
+            val list = if (slidersObj.length() == 0) emptyList() else parseJsonMap(slidersObj) { id, obj -> jsonToHeroSlider(id, obj) }
+            runCatching {
+                if (list.isEmpty()) localDb.heroSliderDao().clearAllSliders()
+                else {
+                    localDb.heroSliderDao().insertAll(list)
+                    val ids = list.map { it.id }
+                    if (ids.size <= 900) localDb.heroSliderDao().deleteSlidersNotIn(ids)
+                }
+            }
+        }
     }
 
     private suspend fun pullUsersFromRestIntoDb(localDb: KrishiBondhuDatabase): List<UserEntity> {
@@ -1098,6 +1138,27 @@ class FirebaseRealtimeSyncManager(
         }
     }
 
+    suspend fun pushHeroSlider(slider: HeroSliderEntity) {
+        val map = heroSliderToMap(slider)
+        pushNode("heroSliders/${slider.id}", map) { root ->
+            root.child("heroSliders").child(slider.id).setValue(map).await()
+        }
+    }
+
+    suspend fun deleteHeroSlider(sliderId: String) {
+        if (!enableRemoteSync || sliderId.isBlank()) return
+        val sdkOk = withTimeoutOrNull(3000L) {
+            runCatching {
+                val root = rootRefOrNull() ?: return@runCatching false
+                root.child("heroSliders").child(sliderId).removeValue().await()
+                true
+            }.getOrDefault(false)
+        } ?: false
+        if (!sdkOk) {
+            restDelete("heroSliders/$sliderId.json")
+        }
+    }
+
     suspend fun pushActivationPayment(payment: ActivationPaymentEntity) {
         val map = activationPaymentToMap(payment)
         pushNode("activationPayments/${payment.id}", map) { root ->
@@ -1283,7 +1344,8 @@ class FirebaseRealtimeSyncManager(
         "activationDate" to u.activationDate,
         "expiryDate" to u.expiryDate,
         "validityYears" to u.validityYears,
-        "lastPaymentId" to u.lastPaymentId
+        "lastPaymentId" to u.lastPaymentId,
+        "adsDisabled" to u.adsDisabled
     )
 
     private fun resolveAccountStatus(role: String, rawAccountStatus: String?, verificationStatus: String): String {
@@ -1325,7 +1387,8 @@ class FirebaseRealtimeSyncManager(
             activationDate = s.lng("activationDate") ?: 0L,
             expiryDate = s.lng("expiryDate") ?: 0L,
             validityYears = (s.lng("validityYears") ?: 2L).toInt().coerceAtLeast(1),
-            lastPaymentId = s.str("lastPaymentId") ?: ""
+            lastPaymentId = s.str("lastPaymentId") ?: "",
+            adsDisabled = s.bool("adsDisabled") ?: false
         )
     }
 
@@ -1362,7 +1425,8 @@ class FirebaseRealtimeSyncManager(
             activationDate = o.optLong("activationDate", 0L),
             expiryDate = o.optLong("expiryDate", 0L),
             validityYears = o.optInt("validityYears", 2).coerceAtLeast(1),
-            lastPaymentId = o.optString("lastPaymentId", "")
+            lastPaymentId = o.optString("lastPaymentId", ""),
+            adsDisabled = o.optBoolean("adsDisabled", false)
         )
     }
 
@@ -2200,6 +2264,7 @@ class FirebaseRealtimeSyncManager(
         "farmerFee" to ps.farmerFee,
         "buyerFee" to ps.buyerFee,
         "renewalFee" to ps.renewalFee,
+        "adRemovalFee" to ps.adRemovalFee,
         "validityYears" to ps.validityYears,
         "paymentInstructions" to ps.paymentInstructions,
         "notify30Days" to ps.notify30Days,
@@ -2218,6 +2283,7 @@ class FirebaseRealtimeSyncManager(
             farmerFee = s.dbl("farmerFee") ?: 300.0,
             buyerFee = s.dbl("buyerFee") ?: 300.0,
             renewalFee = s.dbl("renewalFee") ?: 300.0,
+            adRemovalFee = s.dbl("adRemovalFee") ?: 200.0,
             validityYears = (s.lng("validityYears") ?: 2L).toInt().coerceAtLeast(1),
             paymentInstructions = s.str("paymentInstructions") ?: PaymentSettingsEntity().paymentInstructions,
             notify30Days = s.bool("notify30Days") ?: true,
@@ -2237,6 +2303,7 @@ class FirebaseRealtimeSyncManager(
             farmerFee = o.optDouble("farmerFee", 300.0).takeUnless { it.isNaN() } ?: 300.0,
             buyerFee = o.optDouble("buyerFee", 300.0).takeUnless { it.isNaN() } ?: 300.0,
             renewalFee = o.optDouble("renewalFee", 300.0).takeUnless { it.isNaN() } ?: 300.0,
+            adRemovalFee = o.optDouble("adRemovalFee", 200.0).takeUnless { it.isNaN() } ?: 200.0,
             validityYears = o.optInt("validityYears", 2).coerceAtLeast(1),
             paymentInstructions = o.optString("paymentInstructions", PaymentSettingsEntity().paymentInstructions),
             notify30Days = o.optBoolean("notify30Days", true),
@@ -2400,6 +2467,63 @@ class FirebaseRealtimeSyncManager(
             emoji = o.optString("emoji", "🌾").ifBlank { "🌾" },
             isActive = o.optBoolean("isActive", true),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
+            updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
+        )
+    }
+
+    private fun heroSliderToMap(hs: HeroSliderEntity): Map<String, Any?> = mapOf(
+        "id" to hs.id,
+        "badgeBn" to hs.badgeBn,
+        "titleBn" to hs.titleBn,
+        "subtitleBn" to hs.subtitleBn,
+        "bullet1Bn" to hs.bullet1Bn,
+        "bullet2Bn" to hs.bullet2Bn,
+        "bullet3Bn" to hs.bullet3Bn,
+        "ctaTextBn" to hs.ctaTextBn,
+        "targetRoute" to hs.targetRoute,
+        "imageUri" to hs.imageUri,
+        "sortOrder" to hs.sortOrder,
+        "isActive" to hs.isActive,
+        "updatedAt" to hs.updatedAt
+    )
+
+    private fun snapToHeroSlider(s: DataSnapshot): HeroSliderEntity? {
+        val id = s.str("id") ?: s.key ?: return null
+        val titleBn = s.str("titleBn") ?: return null
+        return HeroSliderEntity(
+            id = id,
+            badgeBn = s.str("badgeBn") ?: "১০০% দালালমুক্ত বাজার",
+            titleBn = titleBn,
+            subtitleBn = s.str("subtitleBn") ?: "",
+            bullet1Bn = s.str("bullet1Bn") ?: "",
+            bullet2Bn = s.str("bullet2Bn") ?: "",
+            bullet3Bn = s.str("bullet3Bn") ?: "",
+            ctaTextBn = s.str("ctaTextBn") ?: "এখনই অর্ডার করুন",
+            targetRoute = s.str("targetRoute") ?: "browse",
+            imageUri = s.str("imageUri") ?: "",
+            sortOrder = (s.lng("sortOrder") ?: 1L).toInt(),
+            isActive = s.bool("isActive") ?: true,
+            updatedAt = s.lng("updatedAt") ?: System.currentTimeMillis()
+        )
+    }
+
+    private fun jsonToHeroSlider(key: String, o: JSONObject): HeroSliderEntity? {
+        val id = o.optString("id", key).ifBlank { key }
+        val titleBn = o.optString("titleBn", "")
+        if (titleBn.isBlank()) return null
+        return HeroSliderEntity(
+            id = id,
+            badgeBn = o.optString("badgeBn", "১০০% দালালমুক্ত বাজার"),
+            titleBn = titleBn,
+            subtitleBn = o.optString("subtitleBn", ""),
+            bullet1Bn = o.optString("bullet1Bn", ""),
+            bullet2Bn = o.optString("bullet2Bn", ""),
+            bullet3Bn = o.optString("bullet3Bn", ""),
+            ctaTextBn = o.optString("ctaTextBn", "এখনই অর্ডার করুন").ifBlank { "এখনই অর্ডার করুন" },
+            targetRoute = o.optString("targetRoute", "browse").ifBlank { "browse" },
+            imageUri = o.optString("imageUri", ""),
+            sortOrder = o.optInt("sortOrder", 1),
+            isActive = o.optBoolean("isActive", true),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis())
         )
     }

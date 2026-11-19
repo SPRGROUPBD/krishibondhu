@@ -110,7 +110,8 @@ fun AdBannerSection(
     placementTag: String = "banner"
 ) {
     val observedRoute by AdMonetizationManager.currentRouteFlow.collectAsState()
-    if (!adConfig.adsEnabled || AdMonetizationManager.isAdBlockedRoute(observedRoute)) return
+    val userAdsSuppressed by AdMonetizationManager.userAdsSuppressedFlow.collectAsState()
+    if (userAdsSuppressed || !adConfig.adsEnabled || AdMonetizationManager.isAdBlockedRoute(observedRoute)) return
 
     val context = LocalContext.current
     val telemetry by AdMonetizationManager.telemetry.collectAsState()
@@ -854,7 +855,8 @@ fun RewardedMarketTipCard(
     modifier: Modifier = Modifier
 ) {
     val observedRoute by AdMonetizationManager.currentRouteFlow.collectAsState()
-    if (!adConfig.adsEnabled || !adConfig.androidAdsEnabled || !adConfig.rewardedEnabled) return
+    val userAdsSuppressed by AdMonetizationManager.userAdsSuppressedFlow.collectAsState()
+    if (userAdsSuppressed || !adConfig.adsEnabled || !adConfig.androidAdsEnabled || !adConfig.rewardedEnabled) return
     if (AdMonetizationManager.isAdBlockedRoute(observedRoute)) return
     val rewardedId = adConfig.resolvedRewardedUnitId()
     val startIoReady = AdMonetizationManager.isStartIoEnabledEffective(adConfig)

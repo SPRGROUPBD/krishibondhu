@@ -368,6 +368,8 @@ object AdMonetizationManager {
     private var currentRoute: String = "splash"
     private val _currentRouteFlow = MutableStateFlow("splash")
     val currentRouteFlow: StateFlow<String> = _currentRouteFlow.asStateFlow()
+    private val _userAdsSuppressed = MutableStateFlow(false)
+    val userAdsSuppressedFlow: StateFlow<Boolean> = _userAdsSuppressed.asStateFlow()
     @Volatile
     private var currentActivityRef: WeakReference<Activity>? = null
     @Volatile
@@ -618,6 +620,17 @@ object AdMonetizationManager {
         }
     }
 
+    fun setUserAdsSuppressed(suppressed: Boolean) {
+        if (_userAdsSuppressed.value == suppressed) return
+        _userAdsSuppressed.value = suppressed
+        if (suppressed) {
+            pendingAppOpenOnLaunch = false
+            cancelAllRetryJobs()
+        }
+    }
+
+    fun isUserAdsSuppressed(): Boolean = _userAdsSuppressed.value
+
     fun isCurrentRouteAdBlocked(): Boolean = isAdBlockedRoute(currentRoute)
 
     fun isAdBlockedRoute(route: String): Boolean =
@@ -626,6 +639,7 @@ object AdMonetizationManager {
             route == "sell" ||
             route.startsWith("sell?") ||
             route == "activation" ||
+            route.startsWith("activation?") ||
             route.startsWith("order/") ||
             route == "login" ||
             route == "register" ||
@@ -1067,6 +1081,7 @@ object AdMonetizationManager {
     }
 
     private fun preloadStartIoInterstitial(context: Context) {
+        if (_userAdsSuppressed.value) return
         if (isTestEnvironment() || !startIoInitialized || isLoadingStartIoInterstitial || startIoInterstitialReady) return
         if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || (!latestConfig.interstitialEnabled && !latestConfig.appOpenEnabled)) return
         if (!NetworkMonitor.isCurrentlyOnline(context)) return
@@ -1104,6 +1119,7 @@ object AdMonetizationManager {
     }
 
     private fun preloadStartIoRewarded(context: Context, force: Boolean = false) {
+        if (_userAdsSuppressed.value) return
         if (isTestEnvironment() || !startIoInitialized || isLoadingStartIoRewarded || startIoRewardedReady) return
         if (!latestConfig.adsEnabled || !latestConfig.androidAdsEnabled || !latestConfig.rewardedEnabled) return
         if (!NetworkMonitor.isCurrentlyOnline(context)) return
@@ -1138,7 +1154,7 @@ object AdMonetizationManager {
     }
 
     fun preloadAllFormats(context: Context, config: AdConfig = latestConfig) {
-        if (isTestEnvironment()) return
+        if (_userAdsSuppressed.value || isTestEnvironment()) return
         if (!config.adsEnabled || !config.androidAdsEnabled) return
         if (config.interstitialEnabled) {
             preloadInterstitial(context, config.resolvedInterstitialUnitId(), true)
@@ -1157,7 +1173,7 @@ object AdMonetizationManager {
 
     fun preloadInterstitial(context: Context, unitId: String, enabled: Boolean) {
         val cleanId = unitId.trim()
-        if (!enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
+        if (_userAdsSuppressed.value || !enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
         if (cleanId.isEmpty()) {
             markInvalidPlacement(AdFormatType.INTERSTITIAL, "Interstitial Ad Unit ID is blank")
             return
@@ -1343,6 +1359,7 @@ object AdMonetizationManager {
     }
 
     fun maybeShowInterstitial(activity: Activity?, overrideUnitId: String, enabled: Boolean) {
+        if (_userAdsSuppressed.value) return
         if (activity == null || activity.isFinishing || activity.isDestroyed) return
         if (isTestEnvironment() || !enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
         if (isAdBlockedRoute(currentRoute)) return
@@ -1459,7 +1476,7 @@ object AdMonetizationManager {
 
     fun preloadRewarded(context: Context, unitId: String, enabled: Boolean) {
         val cleanId = unitId.trim()
-        if (!enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
+        if (_userAdsSuppressed.value || !enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
         if (cleanId.isEmpty()) {
             markInvalidPlacement(AdFormatType.REWARDED, "Rewarded Ad Unit ID is blank")
             return
@@ -1770,8 +1787,8 @@ object AdMonetizationManager {
             onResult(false, "Activity unavailable")
             return
         }
-        if (isAdBlockedRoute(currentRoute) || !cfg.adsEnabled || !cfg.androidAdsEnabled || !cfg.rewardedEnabled) {
-            onResult(false, "Rewarded ads are currently disabled")
+        if (_userAdsSuppressed.value || isAdBlockedRoute(currentRoute) || !cfg.adsEnabled || !cfg.androidAdsEnabled || !cfg.rewardedEnabled) {
+            onResult(false, if (_userAdsSuppressed.value) "Ad-Free active" else "Rewarded ads are currently disabled")
             return
         }
         if (isShowingFullscreenAd) {
@@ -1826,7 +1843,7 @@ object AdMonetizationManager {
 
     fun preloadAppOpen(context: Context, unitId: String, enabled: Boolean) {
         val cleanId = unitId.trim().ifEmpty { latestConfig.resolvedInterstitialUnitId() }
-        if (!enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
+        if (_userAdsSuppressed.value || !enabled || !latestConfig.adsEnabled || !latestConfig.androidAdsEnabled) return
         if (cleanId.isEmpty()) {
             if (isStartIoEnabledEffective()) {
                 preloadStartIoInterstitial(context)
@@ -2040,7 +2057,7 @@ object AdMonetizationManager {
 
     fun maybeShowAppOpenOnForeground(activity: Activity? = currentActivityRef?.get()) {
         val cfg = latestConfig
-        if (isTestEnvironment() || !cfg.adsEnabled || !cfg.androidAdsEnabled || !cfg.appOpenEnabled) return
+        if (_userAdsSuppressed.value || isTestEnvironment() || !cfg.adsEnabled || !cfg.androidAdsEnabled || !cfg.appOpenEnabled) return
         if (currentRoute == "splash") {
             pendingAppOpenOnLaunch = true
             activity?.let { act ->
@@ -2299,7 +2316,7 @@ object AdMonetizationManager {
     fun isSdkReady(): Boolean = sdkInitialized || startIoInitialized
 
     fun canRequestSdkAd(context: Context, config: AdConfig, unitOrPlacementId: String, format: AdFormatType): Boolean {
-        if (!config.adsEnabled || !config.androidAdsEnabled) return false
+        if (_userAdsSuppressed.value || !config.adsEnabled || !config.androidAdsEnabled) return false
         if (!usesDirectUnityAds(config) && resolveMediationAppKey(config).isEmpty()) {
             appendLog(AdDebugEventCode.INVALID_APP_KEY, format, message = "Unity Game ID or Mediation App Key is missing")
             return false
@@ -2346,6 +2363,7 @@ object AdMonetizationManager {
         isShowingFullscreenAd = false
         currentRoute = "splash"
         _currentRouteFlow.value = "splash"
+        _userAdsSuppressed.value = false
         interstitialAd = null
         loadedInterstitialUnitId = ""
         loadedDirectInterstitialId = ""

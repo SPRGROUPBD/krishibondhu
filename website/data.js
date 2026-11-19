@@ -220,6 +220,7 @@ export const DEFAULT_PAYMENT_SETTINGS = {
   farmerFee: 300,
   buyerFee: 300,
   renewalFee: 300,
+  adRemovalFee: 200,
   validityYears: 2,
   paymentInstructions:
     "নিচের বিকাশ বা নগদ নম্বরে ৩০০ টাকা Send Money / Payment করে আপনার প্রেরক মোবাইল নম্বর, ট্রানজেকশন আইডি (TxID) এবং পেমেন্ট রসিদ/স্ক্রিনশট জমা দিন। অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।",

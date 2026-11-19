@@ -46,6 +46,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun ActivationScreen(
     uiState: MarketplaceUiState,
+    initialMode: String = "account",
     onBack: () -> Unit,
     onSubmitPayment: (
         method: PaymentMethod,
@@ -53,7 +54,8 @@ fun ActivationScreen(
         transactionId: String,
         amount: Double,
         receiptUri: String,
-        isRenewal: Boolean
+        isRenewal: Boolean,
+        isAdRemoval: Boolean
     ) -> Unit,
     onRequireLogin: () -> Unit,
     onCopyToast: (String) -> Unit
@@ -102,10 +104,18 @@ fun ActivationScreen(
         val myPayments = remember(uiState.activationPayments, user.id) {
             uiState.activationPayments.filter { it.userId == user.id }.sortedByDescending { it.createdAt }
         }
-        val hasPendingPayment = myPayments.any { it.status == ActivationPaymentStatus.PENDING.name }
+        var selectedMode by remember(initialMode) {
+            mutableStateOf(if (initialMode.equals("ad_free", ignoreCase = true)) "AD_FREE" else "ACCOUNT")
+        }
+        val isAdMode = selectedMode == "AD_FREE"
+        val hasPendingAccountPayment = myPayments.any { it.status == ActivationPaymentStatus.PENDING.name && it.paymentType != "AD_FREE" }
+        val hasPendingAdFreePayment = myPayments.any { it.status == ActivationPaymentStatus.PENDING.name && it.paymentType == "AD_FREE" }
+        val hasPendingPayment = if (isAdMode) hasPendingAdFreePayment else hasPendingAccountPayment
         val isActive = user.isMarketplaceActive()
         val isExpired = user.accountStatus == AccountStatus.EXPIRED.name || (user.expiryDate > 0L && user.expiryDate <= System.currentTimeMillis())
-        val fee = if (isActive || isExpired) settings.renewalFee else if (user.role == UserRole.FARMER.name) settings.farmerFee else settings.buyerFee
+        val accountFee = if (isActive || isExpired) settings.renewalFee else if (user.role == UserRole.FARMER.name) settings.farmerFee else settings.buyerFee
+        val adRemovalFee = settings.adRemovalFee.takeIf { it > 0 } ?: 200.0
+        val fee = if (isAdMode) adRemovalFee else accountFee
         var showRenewalForm by remember(user.accountStatus) { mutableStateOf(!isActive) }
 
         var selectedMethod by remember { mutableStateOf(PaymentMethod.BKASH) }
@@ -218,13 +228,30 @@ fun ActivationScreen(
                             }
                         }
 
-                        if (isActive && !hasPendingPayment) {
+                        if (isActive && !hasPendingAccountPayment && !isAdMode) {
                             OutlinedButton(
                                 onClick = { showRenewalForm = !showRenewalForm },
                                 modifier = Modifier.fillMaxWidth().testTag("toggle_renewal_form_button")
                             ) {
-                                Text(if (showRenewalForm) "রিনিউ ফর্ম লুকান" else "আগেই রিনিউ করুন (+২ বছর মেয়াদ বাড়ান • ৳${fee.toInt()})")
+                                Text(if (showRenewalForm) "রিনিউ ফর্ম লুকান" else "আগেই রিনিউ করুন (+২ বছর মেয়াদ বাড়ান • ৳${accountFee.toInt()})")
                             }
+                        }
+
+                        HorizontalDivider()
+                        Text("পেমেন্ট ধরন নির্বাচন করুন:", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = !isAdMode,
+                                onClick = { selectedMode = "ACCOUNT" },
+                                label = { Text("অ্যাকাউন্ট সক্রিয় / রিনিউ (৳${accountFee.toInt()})") },
+                                modifier = Modifier.weight(1f).testTag("activation_mode_account")
+                            )
+                            FilterChip(
+                                selected = isAdMode,
+                                onClick = { selectedMode = "AD_FREE" },
+                                label = { Text("সব বিজ্ঞাপন বন্ধ (৳${adRemovalFee.toInt()})") },
+                                modifier = Modifier.weight(1f).testTag("activation_mode_ad_free")
+                            )
                         }
                     }
                 }
@@ -265,8 +292,30 @@ fun ActivationScreen(
                 }
             }
 
-            // 3. Pending Notice OR Submission Form
-            if (hasPendingPayment) {
+            // 3. Already Ad-Free OR Pending Notice OR Submission Form
+            if (isAdMode && user.adsDisabled) {
+                item {
+                    Card(
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = LightGreen),
+                        border = BorderStroke(1.dp, PrimaryGreen),
+                        modifier = Modifier.testTag("ad_free_already_active_banner")
+                    ) {
+                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = PrimaryGreen)
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text("✓ আপনার সব বিজ্ঞাপন স্থায়ীভাবে বন্ধ রয়েছে", fontWeight = FontWeight.Bold, color = DarkGreen)
+                                Text(
+                                    "আপনার অ্যাকাউন্টে Ad-Free সুবিধা ইতোমধ্যে চালু আছে। অ্যাপ ও ওয়েবসাইটে কোনো বিজ্ঞাপন দেখাবে না।",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = DarkGreen
+                                )
+                            }
+                        }
+                    }
+                }
+            } else if (hasPendingPayment) {
                 item {
                     Card(
                         shape = RoundedCornerShape(16.dp),
@@ -280,7 +329,11 @@ fun ActivationScreen(
                             Column {
                                 Text("আপনার পেমেন্ট যাচাইাধীন রয়েছে", fontWeight = FontWeight.Bold, color = InfoBlue)
                                 Text(
-                                    "সুপার অ্যাডমিন আপনার ট্রানজেকশন আইডি ও রসিদ যাচাই করে অনুমোদন দেওয়ার পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।",
+                                    if (isAdMode) {
+                                        "সুপার অ্যাডমিন আপনার Ad-Free পেমেন্ট যাচাই করে অনুমোদন দিলেই আপনার সব বিজ্ঞাপন বন্ধ হয়ে যাবে।"
+                                    } else {
+                                        "সুপার অ্যাডমিন আপনার ট্রানজেকশন আইডি ও রসিদ যাচাই করে অনুমোদন দেওয়ার পর ২ বছরের জন্য অ্যাকাউন্ট সক্রিয় হবে।"
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = InfoBlue
                                 )
@@ -288,7 +341,7 @@ fun ActivationScreen(
                         }
                     }
                 }
-            } else if (showRenewalForm) {
+            } else if (isAdMode || showRenewalForm) {
                 item {
                     Card(
                         shape = RoundedCornerShape(16.dp),
@@ -297,11 +350,19 @@ fun ActivationScreen(
                     ) {
                         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Text(
-                                text = if (isActive || isExpired) "অ্যাকাউন্ট রিনিউ পেমেন্ট জমা দিন (+২ বছর)" else "অ্যাক্টিভেশন পেমেন্ট জমা দিন (২ বছর)",
+                                text = when {
+                                    isAdMode -> "সব বিজ্ঞাপন চিরতরে বন্ধ করুন (Ad-Free)"
+                                    isActive || isExpired -> "অ্যাকাউন্ট রিনিউ পেমেন্ট জমা দিন (+২ বছর)"
+                                    else -> "অ্যাক্টিভেশন পেমেন্ট জমা দিন (২ বছর)"
+                                },
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
-                            Text("নির্ধারিত ফি: ৳ ${fee.toInt()} (${settings.validityYears} বছর মেয়াদ)", fontWeight = FontWeight.SemiBold, color = PrimaryGreen)
+                            Text(
+                                text = if (isAdMode) "নির্ধারিত ফি: ৳ ${fee.toInt()} (এককালীন — সব বিজ্ঞাপন বন্ধ)" else "নির্ধারিত ফি: ৳ ${fee.toInt()} (${settings.validityYears} বছর মেয়াদ)",
+                                fontWeight = FontWeight.SemiBold,
+                                color = PrimaryGreen
+                            )
 
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 FilterChip(
@@ -400,7 +461,8 @@ fun ActivationScreen(
                                         transactionId.trim(),
                                         fee,
                                         receiptUri,
-                                        isActive || isExpired
+                                        !isAdMode && (isActive || isExpired),
+                                        isAdMode
                                     )
                                     transactionId = ""
                                     receiptUri = ""
@@ -409,7 +471,11 @@ fun ActivationScreen(
                                 enabled = canSubmit,
                                 modifier = Modifier.fillMaxWidth().height(50.dp).testTag("activation_submit_button")
                             ) {
-                                Text("পেমেন্ট যাচাইয়ের জন্য জমা দিন (৳ ${fee.toInt()})", fontWeight = FontWeight.Bold)
+                                Text(
+                                    if (isAdMode) "Ad-Free পেমেন্ট জমা দিন (৳ ${fee.toInt()})"
+                                    else "পেমেন্ট যাচাইয়ের জন্য জমা দিন (৳ ${fee.toInt()})",
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
                         }
                     }

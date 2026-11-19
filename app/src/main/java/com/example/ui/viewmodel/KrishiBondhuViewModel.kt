@@ -3,6 +3,7 @@ package com.example.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ads.AdMonetizationManager
 import com.example.data.local.*
 import com.example.data.model.*
 import com.example.data.remote.FirebaseRealtimeSyncManager
@@ -46,6 +47,7 @@ data class MarketplaceUiState(
     val priceSort: PriceSort = PriceSort.NEWEST,
     val adConfig: AdConfig = AdConfig(),
     val dailyTips: List<DailyTip> = DefaultDailyTips.initialTips,
+    val heroSliders: List<HeroSliderEntity> = emptyList(),
     val toastMessage: String? = null
 ) {
     val activeRole: UserRole?
@@ -257,9 +259,10 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     private val paymentBundlesFlow = combine(
         repo.paymentSettings,
         repo.farmerPaymentSettings,
-        repo.orderPayments
-    ) { paySettings, farmerPaySettings, ordPayments ->
-        PaymentBundle(paySettings, farmerPaySettings, ordPayments)
+        repo.orderPayments,
+        repo.heroSliders
+    ) { paySettings, farmerPaySettings, ordPayments, sliders ->
+        PaymentBundle(paySettings, farmerPaySettings, ordPayments, sliders)
     }
 
     private val extrasFlow = combine(
@@ -275,6 +278,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             paymentSettings = payBundle.paymentSettings,
             farmerPaymentSettings = payBundle.farmerPaymentSettings,
             orderPayments = payBundle.orderPayments,
+            heroSliders = payBundle.heroSliders,
             toast = toast,
             online = syncBundle.online,
             adConfig = syncBundle.adConfig,
@@ -329,6 +333,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             priceSort = filter.priceSort,
             adConfig = extras.adConfig,
             dailyTips = extras.dailyTips,
+            heroSliders = extras.heroSliders,
             toastMessage = extras.toast
         )
     }.stateIn(
@@ -339,6 +344,14 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
 
     init {
         KrishiNotificationHelper.ensureChannel(application)
+        viewModelScope.launch {
+            uiState
+                .map { it.activeUser?.adsDisabled == true }
+                .distinctUntilChanged()
+                .collect { suppressed ->
+                    AdMonetizationManager.setUserAdsSuppressed(suppressed)
+                }
+        }
         viewModelScope.launch {
             repo.initializeCatalogsAndSync(viewModelScope) { incomingNotif ->
                 val current = uiState.value.activeUser
@@ -582,6 +595,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         amount: Double,
         receiptUri: String,
         isRenewal: Boolean = false,
+        isAdRemoval: Boolean = false,
         onSuccess: () -> Unit = {}
     ) {
         val user = uiState.value.activeUser ?: return
@@ -593,10 +607,17 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
                 transactionId = transactionId,
                 amount = amount,
                 receiptUri = receiptUri,
-                isRenewal = isRenewal
+                isRenewal = isRenewal,
+                isAdRemoval = isAdRemoval
             )
                 .onSuccess {
-                    showToast("পেমেন্ট তথ্য জমা হয়েছে! অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য সক্রিয় হবে ✓")
+                    showToast(
+                        if (isAdRemoval) {
+                            "বিজ্ঞাপন মুক্ত (Ad-Free) পেমেন্ট জমা হয়েছে! অ্যাডমিন যাচাইয়ের পর সব বিজ্ঞাপন বন্ধ হবে ✓"
+                        } else {
+                            "পেমেন্ট তথ্য জমা হয়েছে! অ্যাডমিন যাচাইয়ের পর ২ বছরের জন্য সক্রিয় হবে ✓"
+                        }
+                    )
                     onSuccess()
                 }
                 .onFailure { showToast(it.message ?: "পেমেন্ট জমা দেওয়া যায়নি") }
@@ -606,9 +627,15 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     fun adminApproveActivationPayment(paymentId: String, notes: String = "") {
         val admin = uiState.value.activeUser ?: return
         if (admin.role != UserRole.ADMIN.name) return
+        val isAdRemoval = uiState.value.activationPayments.firstOrNull { it.id == paymentId }?.paymentType == "AD_FREE"
         viewModelScope.launch {
             repo.adminApproveActivationPayment(admin, paymentId, notes)
-                .onSuccess { showToast("${it.fullName}-এর অ্যাকাউন্ট ২ বছরের জন্য সক্রিয় হয়েছে ✓") }
+                .onSuccess {
+                    showToast(
+                        if (isAdRemoval) "${it.fullName}-এর সব বিজ্ঞাপন বন্ধ (Ad-Free) চালু হয়েছে ✓"
+                        else "${it.fullName}-এর অ্যাকাউন্ট ২ বছরের জন্য সক্রিয় হয়েছে ✓"
+                    )
+                }
                 .onFailure { showToast(it.message ?: "অনুমোদন করা যায়নি") }
         }
     }
@@ -645,6 +672,21 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
             repo.adminSavePaymentSettings(admin, settings)
                 .onSuccess { showToast("অ্যাক্টিভেশন পেমেন্ট সেটিংস সংরক্ষিত হয়েছে ✓") }
                 .onFailure { showToast(it.message ?: "পেমেন্ট সেটিংস সংরক্ষণ ব্যর্থ হয়েছে") }
+        }
+    }
+
+    fun adminSetUserAdsDisabled(userId: String, adsDisabled: Boolean, reason: String = "") {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminSetUserAdsDisabled(admin, userId, adsDisabled, reason)
+                .onSuccess {
+                    showToast(
+                        if (adsDisabled) "${it.fullName}-এর সব বিজ্ঞাপন বন্ধ করা হয়েছে ✓"
+                        else "${it.fullName}-এর অ্যাকাউন্টে বিজ্ঞাপন চালু করা হয়েছে"
+                    )
+                }
+                .onFailure { showToast(it.message ?: "বিজ্ঞাপন অবস্থা পরিবর্তন করা যায়নি") }
         }
     }
 
@@ -1017,6 +1059,26 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    fun adminSaveHeroSlider(slider: HeroSliderEntity) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminSaveHeroSlider(admin, slider)
+                .onSuccess { showToast("হিরো স্লাইডার সংরক্ষিত হয়েছে ও সবার জন্য লাইভ হয়েছে ✓") }
+                .onFailure { showToast(it.message ?: "হিরো স্লাইডার সংরক্ষণ ব্যর্থ হয়েছে") }
+        }
+    }
+
+    fun adminDeleteHeroSlider(sliderId: String) {
+        val admin = uiState.value.activeUser ?: return
+        if (admin.role != UserRole.ADMIN.name) return
+        viewModelScope.launch {
+            repo.adminDeleteHeroSlider(admin, sliderId)
+                .onSuccess { showToast("হিরো স্লাইডার মুছে ফেলা হয়েছে") }
+                .onFailure { showToast(it.message ?: "হিরো স্লাইডার মুছা যায়নি") }
+        }
+    }
+
     fun markAllNotificationsRead() {
         viewModelScope.launch { repo.markNotificationsRead(uiState.value.activeUser) }
     }
@@ -1056,7 +1118,8 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
     private data class PaymentBundle(
         val paymentSettings: PaymentSettingsEntity,
         val farmerPaymentSettings: List<FarmerPaymentSettingsEntity>,
-        val orderPayments: List<OrderPaymentEntity>
+        val orderPayments: List<OrderPaymentEntity>,
+        val heroSliders: List<HeroSliderEntity>
     )
 
     private data class ExtrasBundle(
@@ -1065,6 +1128,7 @@ class KrishiBondhuViewModel(application: Application) : AndroidViewModel(applica
         val paymentSettings: PaymentSettingsEntity,
         val farmerPaymentSettings: List<FarmerPaymentSettingsEntity>,
         val orderPayments: List<OrderPaymentEntity>,
+        val heroSliders: List<HeroSliderEntity>,
         val toast: String?,
         val online: Boolean,
         val adConfig: AdConfig,
